@@ -7,9 +7,12 @@ static void dummy()
 }
 
 /* atexit.c and __stdio_exit.c override these. the latter is linked
- * as a consequence of linking either __toread.c or __towrite.c. */
+ * as a consequence of linking either __toread.c or __towrite.c.
+ * tcc_posix: TCC weak resolution is first-definition-wins, so the
+ * weak_alias here would stick to dummy() even after __stdio_exit.o
+ * is pulled in.  Use strong refs so exit() always flushes stdio. */
 weak_alias(dummy, __funcs_on_exit);
-weak_alias(dummy, __stdio_exit);
+extern void __stdio_exit(void);
 
 #ifndef SHARED
 weak_alias(dummy, _fini);

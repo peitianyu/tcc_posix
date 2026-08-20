@@ -91,6 +91,7 @@ bin/tcc.exe hello.c -o hello.exe
 | 大栈帧 (16KB, __chkstk) | ✅ | ✅ |
 | pthread create/join (4 线程) | ⚠️ join 卡死 | ✅ |
 | 静态链接 (无动态依赖) | ✅ (PE) | ✅ (ELF) |
+| tcc -run (内存执行) | ✅ printf/malloc/time/opendir | — |
 
 ## 已知限制
 
@@ -100,10 +101,10 @@ bin/tcc.exe hello.c -o hello.exe
    Linux 不完全一致, 建议用相对路径或当前目录
 3. **数学库 (complex/浮点主块) 未编译** — musl 构建时排除 complex/math 主块,
    仅含 `__signbitl/__fpclassifyl/frexpl` 辅助 (printf %Lf 需要)
-4. **`-run` 模式仅支持纯计算** — tcc_run 内存执行不走 crt_crt1.o 的 `_start`
-   (psx_init 完整初始化: daemon 线程/brk 等依赖正常 PE 启动环境), 故
-   malloc/write/printf 等依赖后端的调用不可用; 纯函数 (strlen/memcpy) 与
-   无 libc 依赖的程序正常。完整程序用 `tcc hello.c -o hello.exe && ./hello.exe`
+4. **`-run` 模式完整支持 musl** — runmain.o 的 `_runmain` 转发到
+   `__libc_entry_routine` (crt_glue): psx_init 初始化后端 + `__libc_start_main`
+   (stdio/TLS) + exit(main)。printf/malloc/time/opendir/getcwd/write 全可用。
+   已知: Windows 端 pthread join 卡死 (同限制 1)
 
 ## 链接细节 (TCC 特性 workaround)
 
