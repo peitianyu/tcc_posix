@@ -64,7 +64,18 @@ ssize_t __sys_read(int fd, void * buf, size_t bytes)
 __psx_api
 ssize_t __sys_pread(int fd, void * buf, size_t bytes, off_t offset)
 {
-	return __io(fd,buf,bytes,offset,SEEK_SET,__IO_READ);
+	/* tcc_posix: 2015 的 NT ReadFile 在同步句柄下忽略 poffset,
+	   用当前指针并推进 → pread 语义错误 (不应改偏移).
+	   用 保存指针 + 定位 + 读 + 恢复 模拟. */
+	ssize_t ret;
+	off_t cur = __sys_lseek(fd, 0, SEEK_CUR);
+	if (cur < 0)
+		return __sys_read(fd, buf, bytes); /* 非定位文件退化为 read */
+	if (__sys_lseek(fd, offset, SEEK_SET) < 0)
+		return -1;
+	ret = __sys_read(fd, buf, bytes);
+	__sys_lseek(fd, cur, SEEK_SET);
+	return ret;
 }
 
 __psx_api

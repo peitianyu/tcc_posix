@@ -45,35 +45,55 @@ PYEOF
 # (排除: complex/math/ldso 已从源码目录删除; 架构子目录 x86_64/i386/nt32 已删)
 # 注: thread/ 根的 musl 原版不直接编译 (由 nt64 薄包装 include, 见 src/thread/nt64/pthread_*.c);
 #     env/__init_tls.c 提供 __copy_tls (pthread_create 需要), 必须编译
-for f in $(find "$MUSL/src" -name '*.c' \
+# 并行 + 增量: xargs -P 多进程, 每进程批量处理 (Windows 进程启动开销大)
+mkobj() {
+	local f rel obj err
+	for f in "$@"; do
+		rel="${f#$MUSL/src/}"
+		obj="$OUT/musl_${rel//\//_}.o"
+		err="$OUT/.err.${obj##*/}"
+		[ -f "$obj" ] && [ "$obj" -nt "$f" ] && continue
+		if "$TCC" $CFLAGS "$f" -o "$obj" 2>"$err" ; then
+			echo "OK: $rel"
+		else
+			echo "FAIL: $rel"
+			head -3 "$err" | sed 's/^/    /' >&2
+		fi
+	done
+}
+export -f mkobj
+export TCC CFLAGS MUSL OUT
+find "$MUSL/src" -name '*.c' \
 	! -path '*/thread/__set_thread_area.c' ! -path '*/thread/pthread_detach.c' \
 	! -path '*/thread/pthread_equal.c' ! -path '*/thread/pthread_self.c' \
-	! -name '*res_*' ! -name 'lookup_*' | sort); do
-	rel="${f#$MUSL/src/}"
-	obj="$OUT/musl_${rel//\//_}.o"
-	if "$TCC" $CFLAGS "$f" -o "$obj" 2>"$OUT/.err" ; then
-		ok=$((ok+1))
-	else
-		fail=$((fail+1)); failed="$failed musl/$rel"
-		echo "FAIL: musl/$rel"
-		head -2 "$OUT/.err" | sed 's/^/    /'
-	fi
-done
+	! -name '*res_*' ! -name 'lookup_*' | sort | \
+	xargs -P "${JOBS:-8}" -n "${BATCH:-25}" bash -c 'mkobj "$@"' _ 2>/dev/null | \
+	awk '/^OK:/{ok++} /^FAIL:/{fail++; f=f" "$2} END{print "C: "ok" ok, "fail" fail" f}'
+
 # tcc-win64 大栈帧 chkstk (真实现, 替代 TCC 空桩)
 "$TCC" -c "$MM/arch/nt64/src/chkstk.s" -o "$OUT/chkstk.o" 2>/dev/null || true
 
-# mmglue arch/nt64/src
-for f in $(find "$MM/arch/nt64/src" -name '*.c' | sort); do
-	rel="${f#$MM/arch/nt64/src/}"
-	obj="$OUT/mmg_${rel//\//_}.o"
-	if "$TCC" $CFLAGS "$f" -o "$obj" 2>"$OUT/.err" ; then
-		ok=$((ok+1))
-	else
-		fail=$((fail+1)); failed="$failed mmglue/arch/$rel"
-		echo "FAIL: mmglue/arch/nt64/$rel"
-		head -2 "$OUT/.err" | sed 's/^/    /'
-	fi
-done
+# mmglue arch/nt64/src (并行 + 增量, 批量)
+mkmmg() {
+	local f rel obj err
+	for f in "$@"; do
+		rel="${f#$MM/arch/nt64/src/}"
+		obj="$OUT/mmg_${rel//\//_}.o"
+		err="$OUT/.err.${obj##*/}"
+		[ -f "$obj" ] && [ "$obj" -nt "$f" ] && continue
+		if "$TCC" $CFLAGS "$f" -o "$obj" 2>"$err" ; then
+			echo "OK: mmg/$rel"
+		else
+			echo "FAIL: mmg/$rel"
+			head -3 "$err" | sed 's/^/    /' >&2
+		fi
+	done
+}
+export -f mkmmg
+export MM
+find "$MM/arch/nt64/src" -name '*.c' | sort | \
+	xargs -P "${JOBS:-8}" -n "${BATCH:-25}" bash -c 'mkmmg "$@"' _ 2>/dev/null | \
+	awk '/^OK:/{ok++} /^FAIL:/{fail++; f=f" "$2} END{print "mmg: "ok" ok, "fail" fail" f}'
 # (mmglue src/ overrides are merged into the tree)
 
 # --- crt 对象 (build_both.sh 链接模板需要; 不在 src/ 下, 单独编译) ---
@@ -99,13 +119,16 @@ for f in crti crtn init_array; do
 	fi
 done
 # frexpl: math/ 目录已排除编译, 但链接需要 (printf %Lf 等) — 单独编译进 libc.a
-if "$TCC" $CFLAGS "$MM/src/math/frexpl.c" -o "$OUT/frexpl.o" 2>"$OUT/.err"; then
+# frexp: frexpl 的 53 位分支 (LDBL_MANT_DIG==53) 委托给 double 版 frexp
+for mf in frexpl frexp; do
+if "$TCC" $CFLAGS "$MM/src/math/$mf.c" -o "$OUT/$mf.o" 2>"$OUT/.err"; then
 	ok=$((ok+1))
 else
-	fail=$((fail+1)); failed="$failed math/frexpl.c"
-	echo "FAIL: math/frexpl.c"
+	fail=$((fail+1)); failed="$failed math/$mf.c"
+	echo "FAIL: math/$mf.c"
 	head -2 "$OUT/.err" | sed 's/^/    /'
 fi
+done
 
 # --- libc.a 打包 (mingw ar @objlist.txt; 命令行 >32K 会被截断) ---
 #   排除: hello 测试 / crt_* (入口 _start 需显式提供, 防 libtcc1 内 crt1.o 冲突)
@@ -149,12 +172,11 @@ if [ -x /c/msys64/mingw64/bin/ar ]; then
 	BK_DIR="$OUT/.libtcc1"
 	rm -rf "$BK_DIR" && mkdir -p "$BK_DIR"
 	( cd "$BK_DIR" && /c/msys64/mingw64/bin/ar x "$BASE/lib/libtcc1.a" && \
-		for f in *.o; do /c/msys64/mingw64/bin/ar r "$OUT/libc.a" "$PWD/$f"; done )
+		/c/msys64/mingw64/bin/ar r "$OUT/libc.a" *.o )
 	rm -rf "$BK_DIR"
 	for m in crt1.o crt1w.o wincrt1.o wincrt1w.o tcov.o dllcrt1.o dllmain.o winex.o; do
 		/c/msys64/mingw64/bin/ar d "$OUT/libc.a" "$m" 2>/dev/null
 	done
-	echo "libc.a (含 libtcc1, 无 CRT): $(/c/msys64/mingw64/bin/ar t "$OUT/libc.a" 2>/dev/null | wc -l) 成员"
 fi
 
 # --- runmain.o (-run 入口) 编译并入 libc.a ---

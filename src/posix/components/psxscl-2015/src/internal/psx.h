@@ -92,6 +92,7 @@ typedef void *		__sys_routine(mmap)(void * addr, size_t length, int prot, int fl
 typedef void *		__sys_routine(mremap)(void * mapaddr, size_t mapsize, size_t newsize, int flags);
 typedef intptr_t	__sys_routine(munmap)(void * addr, size_t length);
 typedef intptr_t	__sys_routine(mprotect)(void * addr, size_t length, int prot);
+typedef intptr_t	__sys_routine(msync)(void * addr, size_t length, int flags);
 
 /* mount */
 typedef intptr_t	__sys_routine(mount)(const char * source, const char * target, const char * fstype, uintptr_t mntflags, const void * data);
@@ -126,6 +127,11 @@ typedef intptr_t	__sys_routine(rt_sigaction)(int signum, const struct __sigactio
 typedef intptr_t	__sys_routine(rt_sigprocmask)(int,const sigset_t *,sigset_t *);
 typedef intptr_t	__sys_routine(getitimer)(enum __psx_timer_type which, struct itimerval * curr_value);
 typedef intptr_t	__sys_routine(setitimer)(enum __psx_timer_type which, const struct itimerval * new_value, struct itimerval * old_value);
+/* tcc_posix: tkill/kill (musl raise 依赖) */
+typedef intptr_t	__sys_routine(tkill)(int tid, int signum);
+typedef intptr_t	__sys_routine(kill)(int pid, int signum);
+__sys_interface(tkill);
+__sys_interface(kill);
 
 /* socket */
 typedef intptr_t	__sys_routine(accept)(int, struct __sockaddr *, socklen_t *);
@@ -232,6 +238,7 @@ __sys_interface(mmap);
 __sys_interface(mremap);
 __sys_interface(munmap);
 __sys_interface(mprotect);
+__sys_interface(msync);
 
 /* mount */
 __sys_interface(mount);

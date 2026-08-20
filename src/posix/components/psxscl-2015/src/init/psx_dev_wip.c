@@ -84,6 +84,7 @@ static void __populate_syscall_vtbl(void)
 	/* mman */
 	set_syscall_pointer(mmap);
 	set_syscall_pointer(mprotect);
+	set_syscall_pointer(msync);
 	set_syscall_pointer(mremap);
 	set_syscall_pointer(munmap);
 
@@ -120,6 +121,9 @@ static void __populate_syscall_vtbl(void)
 	set_syscall_pointer(rt_sigprocmask);
 	set_syscall_pointer(getitimer);
 	set_syscall_pointer(setitimer);
+	/* tcc_posix: 2015 pre-alpha 缺 tkill/kill, musl raise() 依赖 */
+	set_syscall_pointer(tkill);
+	set_syscall_pointer(kill);
 
 	/* socket */
 	set_syscall_pointer(accept);

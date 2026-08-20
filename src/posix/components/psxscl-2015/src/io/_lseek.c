@@ -56,16 +56,19 @@ off_t __sys_lseek(int fdidx, off_t offset, int whence)
 		fpi.current_byte_offset.quad += offset;
 
 	} else if (whence == SEEK_END) {
+		/* tcc_posix: NT_FILE_END_OF_FILE_INFORMATION 查询在 2015
+		   实现下失败 (ENXIO); 改用 tt_stat (fstat 同路径) 拿文件大小 */
+		nt_stat nstat;
+		struct __psx_tlca * tl;
+		tl = __tlca_self();
+		if ((status = __ntapi->tt_stat(
+				ofd->info.hfile,0,0,
+				&nstat,tl->buffer,(uint32_t)tl->buflen,
+				0,0)))
+			return __psx_sig_epilog(tlca,-ENXIO,status);
 		if (offset > 0)
 			return __psx_sig_epilog(tlca,-EINVAL,EPSXONLY);
-
-		else if ((status = __iovtbl[ofd->info.fdtype].query(
-				ofd->info.hfile,&iosb,
-				&eof,sizeof(eof),
-				NT_FILE_END_OF_FILE_INFORMATION)))
-			return __psx_sig_epilog(tlca,-ENXIO,status);
-
-		fpi.current_byte_offset.quad = eof.end_of_file.quad + offset;
+		fpi.current_byte_offset.quad = nstat.fsi.end_of_file.quad + offset;
 	}
 
 	if ((status = __iovtbl[ofd->info.fdtype].set(

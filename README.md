@@ -92,14 +92,31 @@ bin/tcc.exe hello.c -o hello.exe
 | 静态链接 (无动态依赖) | ✅ (PE) | ✅ (ELF) |
 | tcc -run (内存执行) | ✅ printf/malloc/time/opendir | — |
 
+## 测试套件 (tests/ + test.sh)
+
+```bash
+./test.sh              # Windows 编译+运行 (12 测试)
+./test.sh -run         # 追加 tcc -run 模式 (12 测试)
+./test.sh -clean       # 清理测试产物
+```
+
+覆盖: stdio 格式化 / 字符串 (mem*/strtok_r/strcasestr) / 内存压力 /
+文件 IO (lseek/pread/rename/access) / 目录 (opendir/mkdir/rmdir) /
+时间 (time/strftime/strptime) / mmap (匿名+文件映射) / 环境 (env/cwd) /
+数值转换+数学 (strtol/floor/sqrt/fmod) / 宽字符函数 / 编译正确性
+(递归/对齐/64位) / 信号 (raise/sigaction)。
+
+当前: **24/24 通过** (编译运行 12 + -run 12)。
+
 ## 已知限制
 
 1. **Windows 端 pthread 多线程 join 卡死** — psxscl 2015 的已知问题
    (符号重叠/布局相关, 单线程程序无影响; Linux 端线程正常)
 2. **Windows 端 `/tmp` 等绝对 POSIX 路径** — psxscl 的路径映射与
    Linux 不完全一致, 建议用相对路径或当前目录
-3. **数学库 (complex/浮点主块) 未编译** — musl 构建时排除 complex/math 主块,
-   仅含 `__signbitl/__fpclassifyl/frexpl` 辅助 (printf %Lf 需要)
+3. **宽字符字面量 (L"...") 不可用** — TCC 的 PE 目标 wchar_t 字面量是
+   2 字节, musl 的 wchar_t 是 4 字节 → 宽字符串/宽格式串错乱;
+   宽字符函数 (isw*/tow*/wcslen 等) 正常 (t010 用非字面量测试)
 4. **`-run` 模式完整支持 musl** — runmain.o 的 `_runmain` 转发到
    `__libc_entry_routine` (crt_glue): psx_init 初始化后端 + `__libc_start_main`
    (stdio/TLS) + exit(main)。printf/malloc/time/opendir/getcwd/write 全可用。
