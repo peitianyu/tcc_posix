@@ -104,20 +104,22 @@ bin/tcc.exe hello.c -o hello.exe
 文件 IO (lseek/pread/rename/access) / 目录 (opendir/mkdir/rmdir) /
 时间 (time/strftime/strptime) / mmap (匿名+文件映射) / 环境 (env/cwd) /
 数值转换+数学 (strtol/floor/sqrt/fmod) / 宽字符函数 / 编译正确性
-(递归/对齐/64位) / 信号 (raise/sigaction)。
+(递归/对齐/64位) / 信号 (raise/sigaction) / /tmp 映射 (t013)。
 
-当前: **Windows 12 + -run 12 + Linux 12 = 36/36 通过**。
+`/tmp` 映射: psxscl 兼容层把 `/tmp` 重写到环境变量 TMP 指向的
+用户临时目录 (字节拷贝 tt_generic_memcpy, tt_aligned_block_memcpy
+按 uintptr_t 块会截断路径).
+
+当前: **Windows 13 + -run 13 + Linux 13 = 39/39 通过**。
 
 ## 已知限制
 
 1. **Windows 端 pthread join 卡死** — psxscl 2015 的 futex/ctid 机制在
    TCC 编译下不完整 (ctid 清除不可靠); 单线程程序无影响, Linux 端线程正常
-2. **Windows 端 `/tmp` 等绝对 POSIX 路径** — psxscl 的路径映射与
-   Linux 不完全一致, 建议用相对路径或当前目录
-3. **宽字符字面量 (L"...") 不可用** — TCC 的 PE 目标 wchar_t 字面量是
+2. **宽字符字面量 (L"...") 不可用** — TCC 的 PE 目标 wchar_t 字面量是
    2 字节, musl 的 wchar_t 是 4 字节 → 宽字符串/宽格式串错乱;
    宽字符函数 (isw*/tow*/wcslen 等) 正常 (t010 用非字面量测试)
-4. **`-run` 模式完整支持 musl** — runmain.o 的 `_runmain` 转发到
+3. **`-run` 模式完整支持 musl** — runmain.o 的 `_runmain` 转发到
    `__libc_entry_routine` (crt_glue): psx_init 初始化后端 + `__libc_start_main`
    (stdio/TLS) + exit(main)。printf/malloc/time/opendir/getcwd/write 全可用。
    已知: Windows 端 pthread join 卡死 (同限制 1)

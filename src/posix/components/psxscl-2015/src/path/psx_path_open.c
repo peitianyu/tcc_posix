@@ -142,6 +142,44 @@ int32_t __fastcall __psx_path_open(
 	if (!(exflags & PSX_PATH_INTERNAL_CALL))
 		path_info->fobjattr |= NT_OBJ_INHERIT;
 
+	/* tcc_posix: /tmp 映射到用户临时目录 (环境变量 TMP)
+	   psxscl 的 root 是系统根 (C:\), /tmp 不存在.
+	   用栈缓冲构造新路径 (独立于 inbuf, 不与 normalize 的
+	   UTF16 输出冲突). 注意用 tt_generic_memcpy (字节拷贝),
+	   tt_aligned_block_memcpy 按 uintptr_t 块会截断. */
+	if ((path_arg[0] == '/') && (path_arg[1] == 't') && (path_arg[2] == 'm')
+	    && (path_arg[3] == 'p') && (path_arg[4] == 0 || path_arg[4] == '/')) {
+		char **envp;
+		const unsigned char *tmp_path = 0;
+		size_t tmplen = 0;
+		size_t restlen = __ntapi->tt_string_null_offset_multibyte(path_arg + 4);
+		unsigned char newpath[512];
+		unsigned char *dst = newpath;
+
+		for (envp = rtctx.envp_utf8; envp && *envp; envp++) {
+			if ((*envp)[0] == 'T' && (*envp)[1] == 'M' && (*envp)[2] == 'P'
+			    && (*envp)[3] == '=') {
+				tmp_path = (const unsigned char *)(*envp + 4);
+				tmplen = __ntapi->tt_string_null_offset_multibyte(tmp_path);
+				break;
+			}
+		}
+		if (tmp_path && tmplen && (tmplen + restlen + 2) < sizeof(newpath)) {
+			__ntapi->tt_generic_memcpy(dst, tmp_path, tmplen);
+			dst += tmplen;
+			if (path_arg[4] == '/') {
+				if (dst[-1] != '/')
+					*dst++ = '/';
+				__ntapi->tt_generic_memcpy(dst, path_arg + 5, restlen);
+				dst += restlen;
+			} else if (dst[-1] != '/') {
+				*dst++ = '/';
+			}
+			*dst = 0;
+			path_arg = newpath;
+		}
+	}
+
 	/* normalize */
 	if (__psx_normalize_path_utf8(path_arg,path_info))
 		return __path_open_cancel(tlca,path_info,-EILSEQ,EPSXONLY);
