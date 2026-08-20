@@ -1,0 +1,34 @@
+dalist: a zero-dependency book-keeping library
+----------------------------------------------
+
+
+how to build (quick)
+--------------------
+
+git clone https://git.midipix.org/dalist &&
+mkdir dalist_build &&
+cd dalist_build &&
+../dalist/configure --host=$HOST &&
+make &&
+make DESTDIR=$DESTDIR install
+
+* native builds are supported (leave out --host).
+* both in-tree and out-of-tree builds are supported.
+
+
+supported targets
+-----------------
++ all posix targets
++ x86_64-nt64-midipix
++ x86_64-w64-mingw32
++ i686-nt32-midipix
++ i686-w64-mingw32
++ all targets providing malloc
++ all targets providing mmap
+
+
+supported compilers
+-------------------
++ gcc
++ clang
++ cl

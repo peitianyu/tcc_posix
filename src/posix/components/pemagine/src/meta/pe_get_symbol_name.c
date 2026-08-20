@@ -1,0 +1,173 @@
+/*****************************************************************************/
+/*  pemagination: a (virtual) tour into portable bits and executable bytes   */
+/*  Copyright (C) 2013--2020  SysDeer Technologies, LLC                      */
+/*  Released under GPLv2 and GPLv3; see COPYING.PEMAGINE.                    */
+/*****************************************************************************/
+
+#include <psxtypes/psxtypes.h>
+#include <pemagine/pemagine.h>
+
+
+struct pe_symbol_name_ctx {
+	const void *	addr;
+	char *		name;
+};
+
+static int pe_enum_exports_callback(
+	const void *			base,
+	struct pe_raw_export_hdr *	exp_hdr,
+	struct pe_export_sym *		sym,
+	enum pe_callback_reason		reason,
+	void *				context);
+
+#if (__SIZEOF_POINTER__ == 4)
+static char * pe_get_imported_symbol_info_32(
+	const void *			sym_addr,
+	struct pe_ldr_tbl_entry **	ldr_tbl_entry);
+#endif
+
+#if (__SIZEOF_POINTER__ == 8)
+static char * pe_get_imported_symbol_info_64(
+	const void *			sym_addr,
+	struct pe_ldr_tbl_entry **	ldr_tbl_entry);
+#endif
+
+
+char * pe_get_symbol_name(const void * base, const void * sym_addr)
+{
+	struct pe_export_sym		exp_item;
+	struct pe_symbol_name_ctx	ctx;
+
+	ctx.name = 0;
+	ctx.addr = sym_addr;
+
+	pe_enum_image_exports(
+		base,
+		pe_enum_exports_callback,
+		&exp_item,
+		&ctx);
+
+	return ctx.name;
+}
+
+
+char * pe_get_import_symbol_info(
+	const void *			sym_addr,
+	struct pe_ldr_tbl_entry **	ldr_tbl_entry)
+{
+	#if (__SIZEOF_POINTER__ == 4)
+		return pe_get_imported_symbol_info_32(
+			sym_addr,
+			ldr_tbl_entry);
+	#elif (__SIZEOF_POINTER__ == 8)
+		return pe_get_imported_symbol_info_64(
+			sym_addr,
+			ldr_tbl_entry);
+	#endif
+}
+
+static int pe_enum_exports_callback(
+	const void *			base,
+	struct pe_raw_export_hdr *	exp_hdr,
+	struct pe_export_sym  *		sym,
+	enum pe_callback_reason		reason,
+	void *				context)
+{
+	struct pe_symbol_name_ctx * ctx;
+
+	(void)base;
+	(void)exp_hdr;
+
+	if (reason != PE_CALLBACK_REASON_ITEM)
+		return 1;
+
+	ctx = (struct pe_symbol_name_ctx *)context;
+
+	if (sym->addr == ctx->addr) {
+		ctx->name = sym->name;
+		return 0;
+	} else
+		return 1;
+}
+
+
+#if (__SIZEOF_POINTER__ == 4)
+static char * pe_get_imported_symbol_info_32(
+	const void *			sym_addr,
+	struct pe_ldr_tbl_entry **	ldr_tbl_entry)
+{
+	struct symbol {
+		unsigned char	call;
+		unsigned char	ds;
+		unsigned char	sym_addr[4];
+		unsigned char	padding[2];
+	};
+
+	char *				fn_name;
+	struct pe_ldr_tbl_entry *	mod_info;
+	void *				mod_base;
+	uint32_t ***			sym_redirected_addr;
+	struct symbol *			sym;
+
+	fn_name  = 0;
+	sym = (struct symbol *)sym_addr;
+
+	if ((sym->call == 0xff) && (sym->ds == 0x25))
+		if ((sym_redirected_addr = (uint32_t ***)sym->sym_addr))
+			if ((mod_info = pe_get_symbol_module_info(
+					**sym_redirected_addr)))
+				if ((mod_base = mod_info->dll_base))
+					fn_name = pe_get_symbol_name(
+						mod_base,
+						**sym_redirected_addr);
+	if (fn_name && ldr_tbl_entry)
+		*ldr_tbl_entry = mod_info;
+
+	return fn_name;
+}
+#endif
+
+
+#if (__SIZEOF_POINTER__ == 8)
+static char * pe_get_imported_symbol_info_64(
+	const void *			sym_addr,
+	struct pe_ldr_tbl_entry **	ldr_tbl_entry)
+{
+	struct symbol {
+		unsigned char	call;
+		unsigned char	ds;
+		unsigned char	sym_addr[4];
+		unsigned char	padding[2];
+	};
+
+	char *				fn_name;
+	struct pe_ldr_tbl_entry *	mod_info;
+	void *				mod_base;
+	uint32_t *			sym_offset;
+	uint32_t			offset;
+	struct symbol *			sym;
+
+	fn_name  = 0;
+	mod_info = 0;
+	sym = (struct symbol *)sym_addr;
+
+	if ((sym->call == 0xff) && (sym->ds == 0x25)) {
+		if ((sym_offset = (uint32_t *)sym->sym_addr)) {
+			offset   = *sym_offset;
+			sym_addr = *(void **)(offset + (uintptr_t)(++sym_offset));
+		} else
+			sym_addr = 0;
+
+		if (sym_addr && (mod_info = pe_get_symbol_module_info(sym_addr)))
+			if ((mod_base = mod_info->dll_base))
+				fn_name = pe_get_symbol_name(
+					mod_base,
+					sym_addr);
+	}
+
+	if (fn_name && ldr_tbl_entry)
+		*ldr_tbl_entry = mod_info;
+
+	return fn_name;
+}
+#endif

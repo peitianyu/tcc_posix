@@ -1,0 +1,23 @@
+# 构建产物 (可重建: ./build.sh + ./install.sh)
+bin/
+build/
+
+# 固化 musl 头 (可从 src/posix/musl-1.1.11/include 重建)
+include/
+
+# 组件内部构建产物 (psxscl/ntapi 等编译出的 .a/.o)
+src/posix/components/*/build/
+src/posix/components/*/src/**/*.o
+
+# 固化库产物 (lib/ 下源码保留: *.c *.s crt/)
+lib/*.a
+lib/kernel32.def
+
+# 示例产物
+examples/*.exe
+examples/*_linux
+
+# 系统文件
+Thumbs.db
+Desktop.ini
+*.swp

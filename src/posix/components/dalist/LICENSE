@@ -1,0 +1,10 @@
+  dalist: a zero-dependency book-keeping library
+  ----------------------------------------------
+
+  Copyright (C) 2013--2021  SysDeer Technologies, LLC
+
+  This library is currently released under the GPLv2 and GPLv3 (see
+  COPYING.DALIST for the relevant text). If you wish to use this
+  library with a different license, please contact the author
+  at <writeonce at midipix dot org> and briefly describe the type
+  of license (or license exception) that you would like to obtain.

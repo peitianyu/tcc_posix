@@ -1,0 +1,31 @@
+pemagination: a (virtual) tour into portable bits and executable bytes
+----------------------------------------------------------------------
+
+
+how to build (quick)
+--------------------
+
+git clone https://git.midipix.org/pemagine &&
+mkdir pemagine_build &&
+cd pemagine_build &&
+../pemagine/configure --host=$HOST &&
+make &&
+make DESTDIR=$DESTDIR install
+
+* native builds are supported (leave out --host).
+* both in-tree and out-of-tree builds are supported.
+
+
+supported targets
+-----------------
++ x86_64-nt64-midipix
++ x86_64-w64-mingw32
++ i686-nt32-midipix
++ i686-w64-mingw32
+
+
+supported compilers
+-------------------
++ gcc
++ clang
++ cl

@@ -1,0 +1,20 @@
+#ifndef _PSX_LIMITS_H_
+#define _PSX_LIMITS_H_
+
+#define __OS_MILLISECONDS	* (-1) * 10 * 1000
+
+#define __PSX_SYSCALLS		512
+#define __PSX_TLCA_POINTERS	256
+#define __PSX_PATH_ARR_POINTERS	128
+#define __PSX_UCONTEXT_ALIGN	64
+#define __PSX_PAGE_SIZE		0x10000
+#define __PSX_VIRTUAL_PAGE_SIZE	0x1000
+#define __PSX_INIT_MAX_WAIT	60000 __OS_MILLISECONDS
+
+#define __PSX_OFD_CAP		1048576
+#define __PSX_BITS_PER_PAGE	32768
+#define __PSX_OFD_BITMAP_PAGES	(__PSX_OFD_CAP / __PSX_BITS_PER_PAGE)
+#define __PSX_OFD_PER_BUCKET	(__PSX_PAGE_SIZE / sizeof(struct __ofd))
+#define __PSX_OFD_BUCKETS	(__PSX_OFD_CAP / __PSX_OFD_PER_BUCKET)
+
+#endif

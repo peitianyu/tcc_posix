@@ -1,0 +1,51 @@
+* the thread-specific playground:
+
+int32_t dlock; /* daemon lock */
+int32_t tlock; /* thread lock */
+int32_t tip;   /* thread is in a syscall prolog */
+int32_t count; /* number of pending signals */
+
+
+
+* thread prolog
+
+1) atomically set tip to 1;
+2) 64-bit locked cas, {0,0} --> {0,1}
+   success: enter system call
+   failure: daemon lock has been acquired, process signals (the faster way)
+            (if the daemon lock is 2 rather than 1, then it is the
+             thread's responsibility to reset the lock)
+
+* thread epilog
+1) process any pending signals (the faster way)
+2) atomically set (64-bit) tlock and tip to zero
+
+
+
+* daemon signal delivery
+
+1) find a thread for which the signal may be delivered
+
+2) increase the number of pending signals
+
+3) queue user apc
+
+4) acquire daemon lock (always succeeds)
+
+5) see whether a thread lock had also been acquired
+
+   yes: we are done, since the thread will process the signals
+        the faster way in the epilog
+
+   no:  suspend the thread
+
+6) see whether the thread is in the middle of a system call
+   prolog (tip)
+
+   yes: increase the daemon lock (from 1 to 2)
+	wake the thread;
+	wait for the thread do reset the daemon lock
+	we are done, since the thread will now process
+	the signals the faster way;
+
+   no:	do the thing

@@ -1,0 +1,4 @@
+LIBRARY hello.exe
+
+EXPORTS
+ntapi_init

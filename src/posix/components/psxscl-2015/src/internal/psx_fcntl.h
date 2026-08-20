@@ -1,0 +1,82 @@
+#ifndef _PSX_FCNTL_H_
+#define _PSX_FCNTL_H_
+
+enum __fcntl_cmd_type {
+	F_DUPFD,
+	F_GETFD,
+	F_SETFD,
+	F_GETFL,
+	F_SETFL,
+	F_GETLK,
+	F_SETLK,
+	F_SETLKW,
+	F_SETOWN,
+	F_GETOWN,
+	F_SETSIG,
+	F_GETSIG,
+	F_UNUSED12,
+	F_UNUSED13,
+	F_UNUSED14,
+	F_SETOWN_EX,
+	F_GETOWN_EX,
+	F_GETOWNER_UIDS,
+	F_CAP
+};
+
+#define O_RDONLY		0x0
+#define O_WRONLY		0x1
+#define O_RDWR			0x2
+#define O_ACCMODE		(0x03 | O_SEARCH)
+
+#define O_SEARCH		0x200000
+#define O_EXEC			0x200000
+#define O_PATH			0x200000
+
+#define F_EXT_BASE		0x400
+#define F_DUPFD_CLOEXEC		(F_EXT_BASE + 6)
+
+#define F_RDLCK			0x0
+#define F_WRLCK			0x1
+#define F_UNLCK			0x2
+
+#define FD_CLOEXEC		0x1
+
+#define SEEK_SET		0x0
+#define SEEK_CUR		0x1
+#define SEEK_END		0x2
+
+#define AT_FDCWD		(-100)
+#define AT_SYMLINK_NOFOLLOW	0x100
+#define AT_REMOVEDIR		0x200
+#define AT_SYMLINK_FOLLOW	0x400
+#define AT_EACCESS		0x200
+
+#define POSIX_FADV_NORMAL	0x0
+#define POSIX_FADV_RANDOM	0x1
+#define POSIX_FADV_SEQUENTIAL	0x2
+#define POSIX_FADV_WILLNEED	0x3
+#define POSIX_FADV_DONTNEED	0x4
+#define POSIX_FADV_NOREUSE	0x5
+
+#define O_CREAT			0100
+#define O_EXCL			0200
+#define O_NOCTTY		0400
+#define O_TRUNC			01000
+#define O_APPEND		02000
+#define O_NONBLOCK		04000
+#define O_DSYNC			010000
+#define O_RESCAN		0400000
+#define O_SYNC			04010000
+#define O_RSYNC			04010000
+#define O_DIRECTORY		0200000
+#define O_NOFOLLOW		0400000
+#define O_CLOEXEC		02000000
+
+#define O_ASYNC			020000
+#define O_DIRECT		040000
+#define O_LARGEFILE		0
+#define O_NOATIME		01000000
+#define O_TMPFILE		020200000
+#define O_NDELAY		O_NONBLOCK
+
+#endif
