@@ -131,7 +131,9 @@ void * __sys_mmap(
 	m.attr		= m.hfile ? NT_SEC_COMMIT : NT_SEC_RESERVE;
 	m.size.quad	= (length < 1<<30) ? 1<<30 : length;
 	m.foffset.quad	= offset;
-	m.commit	= length;
+	/* tcc_posix: commit 向上取整到 64KB 页 (musl nt64 PAGE_SIZE),
+	   否则 VirtualProtect 跨未提交区域失败 (EINVAL) */
+	m.commit	= (length + 0xFFFF) & ~(size_t)0xFFFF;
 	m.reserve	= (size_t)m.size.quad;
 	m.share		= (m.hfile && (flags & MAP_PRIVATE)) ? NT_VIEW_UNMAP : NT_VIEW_SHARE;
 	m.cprot		= (m.cprot & NT_PAGE_READWRITE) ? NT_PAGE_READWRITE : m.cprot;

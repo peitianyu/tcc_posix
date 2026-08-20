@@ -34,6 +34,10 @@ void __init_libc(char **envp, char *pn)
 	__hwcap = aux[AT_HWCAP];
 	__sysinfo = aux[AT_SYSINFO];
 	libc.page_size = aux[AT_PAGESZ];
+	/* tcc_posix: psxscl 的 envp 后无有效 auxv (AT_PAGESZ 读到垃圾),
+	   nt64 固定 64KB 页 */
+	if (libc.page_size < 4096)
+		libc.page_size = 65536;
 
 	if (pn) {
 		__progname = __progname_full = pn;

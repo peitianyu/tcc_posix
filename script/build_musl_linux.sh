@@ -21,15 +21,16 @@ CFLAGS="-c -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -fomit-frame-po
 	-I $MUSL/src/internal -I $MUSL/arch/x86_64 \
 	-I $BASE/build/linux-musl-inc -I $MUSL/include"
 
-# 2. 编译 C (排除 complex/math 主块/ldso/DNS; math 辅助单独)
+# 2. 编译 C (排除 complex/ldso/DNS; math 单独编译, 排除架构子目录)
 for f in $(find "$MUSL/src" -name "*.c" ! -path "*complex*" ! -path "*math*" \
         ! -path "*ldso*" ! -name "*res_*" ! -name "lookup_*" | sort); do
 	rel="${f#$MUSL/src/}"; obj="$OUT/${rel//\//_}.o"
 	[ -f "$obj" ] || "$TCC" $CFLAGS "$f" -o "$obj" || echo "FAIL: $rel"
 done
-for f in __signbitl __fpclassifyl frexpl; do
-	obj="$OUT/math_$f.o"
-	[ -f "$obj" ] || "$TCC" $CFLAGS "$MUSL/src/math/$f.c" -o "$obj" || echo "FAIL: math/$f"
+# math 全量 (musl 完整 math, 排除架构子目录与 complex 依赖)
+for f in $(find "$MUSL/src/math" -maxdepth 1 -name "*.c" | sort); do
+	obj="$OUT/math_$(basename "$f" .c).o"
+	[ -f "$obj" ] || "$TCC" $CFLAGS "$f" -o "$obj" || echo "FAIL: math/$(basename $f)"
 done
 
 # 3. 汇编 x86_64 .s (排除 Scrt1 共享 crt)

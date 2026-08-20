@@ -17,6 +17,7 @@ __psx_api
 intptr_t __sys_munmap(void * addr, size_t length)
 {
 	struct __psx_tlca *	tlca;
+	struct __mmap_ctx *	mapinfo;
 	intptr_t		ret;
 	void *			faddr;
 	size_t			flen;
@@ -26,17 +27,27 @@ intptr_t __sys_munmap(void * addr, size_t length)
 	tlca = __tlca_self();
 	__psx_sig_prolog(tlca);
 
-	/* 2015 pre-alpha bug: 匿名 mmap 走 VirtualAlloc, 但 munmap 用
-	 * UnmapViewOfSection (只适用文件 section) -> 改 FreeVirtualMemory。 */
-	faddr = addr;
-	flen  = 0;
-	tlca->ntstatus = __ntapi->zw_free_virtual_memory(
-		NT_CURRENT_PROCESS_HANDLE,
-		&faddr,
-		&flen,
-		NT_MEM_RELEASE);
+	/* tcc_posix: 区分匿名 (VirtualAlloc) 与文件映射 (MapViewOfSection).
+	   文件映射必须用 UnmapViewOfSection, 匿名用 FreeVirtualMemory. */
+	mapinfo = __psx_section_get(tlca->ctx, addr, 0);
 
-	ret = tlca->ntstatus ? -EINVAL : 0;
+	if (mapinfo && mapinfo->hsection) {
+		/* 文件映射: UnmapViewOfSection */
+		tlca->ntstatus = __ntapi->zw_unmap_view_of_section(
+			NT_CURRENT_PROCESS_HANDLE,
+			addr);
+		ret = tlca->ntstatus ? -EINVAL : 0;
+	} else {
+		/* 匿名: FreeVirtualMemory */
+		faddr = addr;
+		flen  = 0;
+		tlca->ntstatus = __ntapi->zw_free_virtual_memory(
+			NT_CURRENT_PROCESS_HANDLE,
+			&faddr,
+			&flen,
+			NT_MEM_RELEASE);
+		ret = tlca->ntstatus ? -EINVAL : 0;
+	}
 
 	return __psx_sig_epilog(tlca,ret,tlca->ntstatus);
 }

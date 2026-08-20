@@ -13,10 +13,9 @@ int main(void) {
     memset(p, 0x42, 4096);
     if ((unsigned char)((char*)p)[0] != 0x42) return 2;
     if ((unsigned char)((char*)p)[4095] != 0x42) return 3;
-    /* mprotect 只读 (psxscl 2015 的 zw_protect_virtual_memory 有 bug,
-       可能失败; 失败则跳过此断言, 只验证 mmap 核心功能) */
-    if (mprotect(p, 4096, PROT_READ) == 0)
-        if ((unsigned char)((char*)p)[0] != 0x42) return 5;
+    /* mprotect 只读 (psxscl 页对齐修复后可用) */
+    if (mprotect(p, 4096, PROT_READ)) return 4;
+    if ((unsigned char)((char*)p)[0] != 0x42) return 5;
     if (munmap(p, 4096)) return 6;
     /* 文件映射 */
     int fd = open("t006_mmap.bin", O_CREAT | O_RDWR | O_TRUNC, 0644);
@@ -27,11 +26,10 @@ int main(void) {
     void *m = mmap(NULL, sizeof data, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (m == MAP_FAILED) return 9;
     if (((char*)m)[0] != 'M' || ((char*)m)[8191] != 'M') return 10;
-    /* 写回文件 (msync/munmap 返回码在 psxscl 2015 不可靠,
-       数据由 NT section 自动写回, 只验证内容) */
+    /* 写回文件 (msync/munmap) */
     ((char*)m)[0] = 'X';
-    msync(m, sizeof data, MS_SYNC);
-    munmap(m, sizeof data);
+    if (msync(m, sizeof data, MS_SYNC)) return 11;
+    if (munmap(m, sizeof data)) return 12;
     /* 验证写回 */
     char chk[8192];
     if (lseek(fd, 0, SEEK_SET) != 0) return 13;

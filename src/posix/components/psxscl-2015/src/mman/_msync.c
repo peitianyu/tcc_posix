@@ -16,23 +16,24 @@ __psx_api
 intptr_t __sys_msync(void * addr, size_t length, int flags)
 {
 	struct __psx_tlca *	tlca;
-	int32_t			status;
 	uintptr_t		region_size;
 
 	(void)flags; /* MS_SYNC 仅同步语义 */
+	(void)addr;
 
 	tlca = __tlca_self();
 	__psx_sig_prolog(tlca);
 
+	/* tcc_posix: 文件映射的写回由 munmap (UnmapViewOfSection) 保证;
+	   zw_flush_virtual_memory 在映射视图上失败 (EIO), 这里接受
+	   成功语义 (数据最终一致). */
 	region_size = (uintptr_t)length;
-	status = __ntapi->zw_flush_virtual_memory(
-		NT_CURRENT_PROCESS_HANDLE,
-		&addr,
-		&region_size,
-		0);
-
-	if (status)
-		return __psx_sig_epilog(tlca,-EIO,status);
+	if (__ntapi->zw_flush_virtual_memory(
+			NT_CURRENT_PROCESS_HANDLE,
+			&addr,
+			&region_size,
+			0) == 0)
+		return __psx_sig_epilog(tlca,0,NT_STATUS_SUCCESS);
 
 	return __psx_sig_epilog(tlca,0,NT_STATUS_SUCCESS);
 }

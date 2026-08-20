@@ -1,8 +1,8 @@
 #!/bin/bash
 # test.sh - tcc_posix 编译链测试套件
-# 用法: ./test.sh              # 全部测试 (Windows 编译+运行)
-#       ./test.sh -linux       # 追加 Linux 测试 (需 WSL + tcc-linux.exe)
-#       ./test.sh -run         # 追加 tcc -run 模式测试
+# 用法: ./test.sh              # Windows 编译+运行
+#       ./test.sh -run         # 追加 tcc -run 模式
+#       ./test.sh -linux       # 追加 Linux (WSL) 测试
 #       ./test.sh -clean       # 清理测试产物
 #
 # 测试源码: tests/tNNN_*.c, 每个程序退出码 0 = 通过
@@ -11,6 +11,7 @@ BASE="$(cd "$(dirname "$0")" && pwd)"
 TCC="$BASE/bin/tcc.exe"
 INC_WIN="$BASE/src/posix/musl-nt64/include"
 ARCH_WIN="$BASE/src/posix/musl-nt64/arch/nt64"
+ARCH_LNX="$BASE/src/posix/musl-1.1.11/arch/x86_64"
 TESTDIR="$BASE/build/tests"
 PASS=0; FAIL=0; FAILED=""
 MODE_LINUX=0; MODE_RUN=0
@@ -30,8 +31,7 @@ mkdir -p "$TESTDIR"
 echo "=== tcc_posix 测试套件 ==="
 echo "编译器: $("$TCC" -v 2>&1 | head -1)"
 
-# 单测: 复制源码 → 编译 → 链接 → 运行 (检查退出码)
-# run_win <name>
+# 单测: 编译 → 链接 → 独立目录运行 (检查退出码)
 run_win() {
     local name="$1"
     local src="tests/$name.c"
@@ -73,7 +73,8 @@ run_run() {
 
 # Linux (WSL) 编译运行
 run_linux() {
-    local name="$1" src="tests/$name.c"
+    local name="$1"
+    local src="tests/$name.c"
     [ -f "$src" ] || return
     local lnx="$BASE/build/tcc-linux.exe"
     [ -x "$lnx" ] || { echo "SKIP $name (无 tcc-linux.exe)"; return; }
@@ -87,20 +88,18 @@ run_linux() {
         libtcc1.o va_list.o libc.a -o "$exe" ) 2>"$TESTDIR/$name.llerr"; then
         FAIL=$((FAIL+1)); FAILED="$FAILED $name(lnx链接)"; echo "FAIL $name (lnx链接)"; head -3 "$TESTDIR/$name.llerr"; return
     fi
+    # WSL 运行: D:/work/tcc_posix/build/tests/x_linux → /mnt/d/work/tcc_posix/build/tests/x_linux
+    local wslpath
+    wslpath=$(echo "$exe" | sed -E 's|^/([a-z])/|\1/|; s|^|/mnt/|')
     local out rc
-    out=$(MSYS_NO_PATHCONV=1 timeout 15 wsl -e "/mnt/$(echo "${exe#/}" | tr ':' '/' | tr '\\\\' '/' | sed 's|^\([a-z]\)|\\1|')" 2>&1); rc=$?
-    # 简化: 用相对路径复制到可访问处
-    out=$(cp "$exe" /tmp/ 2>/dev/null && MSYS_NO_PATHCONV=1 timeout 15 wsl -e "/mnt/c/Users/12165/AppData/Local/Temp/$(basename "$exe")" 2>&1); rc=$?
+    out=$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' timeout 15 wsl -e bash -lc "'$wslpath'" 2>&1); rc=$?
     if [ "$rc" = "0" ]; then
         PASS=$((PASS+1)); echo "PASS $name (linux)"
     else
         FAIL=$((FAIL+1)); FAILED="$FAILED $name(lnx rc=$rc)"; echo "FAIL $name (linux): rc=$rc"
         echo "$out" | head -5
     fi
-    rm -f /tmp/$(basename "$exe")
 }
-
-ARCH_LNX="$BASE/src/posix/musl-1.1.11/arch/x86_64"
 
 echo "--- Windows 编译+运行 ---"
 for src in tests/t*.c; do

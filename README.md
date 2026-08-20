@@ -106,12 +106,12 @@ bin/tcc.exe hello.c -o hello.exe
 数值转换+数学 (strtol/floor/sqrt/fmod) / 宽字符函数 / 编译正确性
 (递归/对齐/64位) / 信号 (raise/sigaction)。
 
-当前: **24/24 通过** (编译运行 12 + -run 12)。
+当前: **Windows 12 + -run 12 + Linux 12 = 36/36 通过**。
 
 ## 已知限制
 
-1. **Windows 端 pthread 多线程 join 卡死** — psxscl 2015 的已知问题
-   (符号重叠/布局相关, 单线程程序无影响; Linux 端线程正常)
+1. **Windows 端 pthread join 卡死** — psxscl 2015 的 futex/ctid 机制在
+   TCC 编译下不完整 (ctid 清除不可靠); 单线程程序无影响, Linux 端线程正常
 2. **Windows 端 `/tmp` 等绝对 POSIX 路径** — psxscl 的路径映射与
    Linux 不完全一致, 建议用相对路径或当前目录
 3. **宽字符字面量 (L"...") 不可用** — TCC 的 PE 目标 wchar_t 字面量是
