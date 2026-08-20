@@ -112,7 +112,7 @@ fi
 #   chkstk.o 与 init_array.o 并入库内 (闭包提取可自动找到)
 if [ -x /c/msys64/mingw64/bin/ar ]; then
 	( cd "$OUT" && for f in *.o; do case "$f" in
-		hello*|crt_*|libc.a) ;;
+		hello*|libc.a|crt_Scrt1*|crt_crtdev*|crt_crtposix*) ;;
 		*) echo "$f" ;;
 	esac; done > objlist.txt && /c/msys64/mingw64/bin/ar rcs libc.a @objlist.txt && rm -f objlist.txt )
 	echo "libc.a: $(ls -la "$OUT/libc.a" 2>/dev/null | awk '{print $5}') bytes ($(/c/msys64/mingw64/bin/ar t "$OUT/libc.a" 2>/dev/null | wc -l) 成员)"
@@ -155,6 +155,17 @@ if [ -x /c/msys64/mingw64/bin/ar ]; then
 		/c/msys64/mingw64/bin/ar d "$OUT/libc.a" "$m" 2>/dev/null
 	done
 	echo "libc.a (含 libtcc1, 无 CRT): $(/c/msys64/mingw64/bin/ar t "$OUT/libc.a" 2>/dev/null | wc -l) 成员"
+fi
+
+# --- runmain.o (-run 入口) 编译并入 libc.a ---
+# tccrun.c: runmain.o 文件缺失时 fallback: set_global_sym(_runmain) + 重载
+# libc.a → alacarte 提取 _runmain 成员
+if [ -x /c/msys64/mingw64/bin/ar ]; then
+	"$TCC" -c "$BASE/lib/runmain.c" -o "$OUT/runmain.o" \
+		-I "$MM/include" -I "$MM/arch/nt64" 2>/dev/null
+	/c/msys64/mingw64/bin/ar r "$OUT/libc.a" "$OUT/runmain.o" 2>/dev/null
+	rm -f "$OUT/runmain.o"
+	echo "libc.a (含 runmain): $(/c/msys64/mingw64/bin/ar t "$OUT/libc.a" 2>/dev/null | wc -l) 成员"
 fi
 echo "=============================="
 echo "musl compiled OK: $ok   FAILED: $fail"

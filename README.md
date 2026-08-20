@@ -45,13 +45,12 @@ exec 转发), 两个单目标 tcc (tcc-win.exe / tcc-linux.exe) 通过它互相�
 
 ```bash
 ./install.sh
-# 产物: bin/tcc.exe + bin/lib/ (2 个文件) + bin/include/ (musl 头)
+# 产物: bin/tcc.exe + bin/lib/libc.a (唯一运行时文件) + bin/include/ (musl 头)
 #
-#   bin/lib/crt_crt1.o   入口对象 (唯一需显式的运行时对象, 定义 _start)
-#   bin/lib/libc.a       3.2M, 1281 成员: musl + chkstk + init_array
-#                        + mem 4件套 + psxscl/ntapi/pemagine/dalist 后端
-#                        + libtcc1 (编译器辅助), 剔除 msvcrt 时代 CRT
-#                        → 零 Windows API 依赖, 无需 kernel32.def
+#   bin/lib/libc.a  3.2M, 1283 成员: musl + chkstk + init_array + mem 4件套
+#                  + psxscl/ntapi/pemagine/dalist 后端 + libtcc1 (编译器辅助)
+#                  + crt_crt1 (入口 _start) + runmain (-run)
+#                  → 零 Windows API 依赖, 无裸 .o (同原版 TCC lib 只有 .a)
 
 # 用法: 一条命令编译链接, 默认链 musl (无 msvcrt)
 bin/tcc.exe hello.c -o hello.exe
@@ -110,14 +109,16 @@ bin/tcc.exe hello.c -o hello.exe
 
 - **TCC 归档提取闭包有效**: tccelf.c `tcc_load_alacarte` 的 do-while 循环
   会自动补提被新加载成员引用的符号 → 链接只需单遍列库
-- **crt_crt1.o 必须显式且最先**: 它定义入口 `_start`, 而入口符号是链接器
-  隐式引用 (不在任何 .o 的未定义符号表里), alacarte 索引查不到 → 必须显式
-  加载 (libc.a 内的 crt1.o 已剔除, 无冲突风险)
-- **chkstk / init_array / mem 4件套 / 后端 4 库 / libtcc1 全部并入 libc.a**
-  (1281 成员): 闭包提取自动解析 musl 内部及 musl→后端的交叉引用
+- **入口符号经 set_global_sym 提前注册**: tccpe.c 的 posix 分支先
+  `set_global_sym(_start)` 再加载 libc.a → alacarte 索引能查到 _start →
+  crt_crt1 成员被提取 (无需显式裸 .o)
+- **chkstk / init_array / mem 4件套 / 后端 4 库 / libtcc1 / crt_crt1 /
+  runmain 全部并入 libc.a** (1283 成员): 闭包提取自动解析全部交叉引用
 - **剔除 msvcrt 时代 CRT**: libtcc1 里的 crt1/crt1w/wincrt1/wincrt1w/tcov/
   dllcrt1/dllmain/winex 引用 kernel32 API, 而 musl/psxscl 零 Windows 依赖 →
   从 libc.a 剔除, 无需 kernel32.def (libc.a 完全自足)
+- **-run 的 runmain 提取**: tccrun.c 找不到 runmain.o 文件时 fallback -
+  set_global_sym(_runmain) + 重载 libc.a, alacarte 提取 _runmain 成员
 - **后端合并依赖重名修复**: psxscl/ntapi 构建时 C 版与汇编版同名对象
   (`__psx_init_tlca.o` / `tt_fork_v1.o`) 会互相覆盖, 丢失
   `__psx_tlca_prolog` / `__tt_fork_v1` 等关键符号 → 构建脚本已把汇编版改名

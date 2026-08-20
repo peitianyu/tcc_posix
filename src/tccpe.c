@@ -2080,14 +2080,11 @@ static void pe_add_runtime(TCCState *s1, struct pe_info *pe)
 #ifdef CONFIG_TCC_POSIX
         /* tcc_posix: default link = musl libc + psxscl backend (no msvcrt) */
         const char *p;
-        /* crt_crt1.o must load first: it defines _start, so the crt1.o
-           (removed from libc.a) is not an issue.  chkstk, init_array,
-           libtcc1 runtime and all backends are inside libc.a; musl/psxscl
-           have zero Windows API dependencies, so no kernel32.def needed. */
-        tcc_add_support(s1, "crt_crt1.c.o");
-        s1->static_link = 0;
-        /* libc.a contains everything: musl + chkstk + init_array + mem4
-           + backends + libtcc1 (closure extraction resolves all refs) */
+        /* crt_crt1.o is inside libc.a: set_global_sym(_start) above
+           registers the entry as undefined before libc.a loads, so
+           alacarte pulls the member defining _start.  chkstk, init_array,
+           libtcc1 runtime and all backends are also inside libc.a;
+           musl/psxscl have zero Windows API dependencies. */
         tcc_add_support(s1, "libc.a");
         (void)p;
 #else

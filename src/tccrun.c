@@ -236,7 +236,13 @@ LIBTCCAPI int tcc_run(TCCState *s1, int argc, char **argv)
     s1->run_main = "_runmain", top_sym = "main";
     if (s1->elf_entryname)
         s1->run_main = top_sym = s1->elf_entryname;
-    tcc_add_support(s1, "runmain.o");
+    if (0 != tcc_add_dll(s1, "runmain.o", 0)) {
+        /* tcc_posix: runmain.o merged into libc.a.  Create the undefined
+           _runmain symbol first, then load libc.a again - alacarte will
+           pull the member defining _runmain (others are already loaded). */
+        set_global_sym(s1, "_runmain", NULL, 0);
+        tcc_add_dll(s1, "libc.a", 0);
+    }
 
     if (tcc_relocate(s1) < 0)
         return -1;

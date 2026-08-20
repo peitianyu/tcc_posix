@@ -3,11 +3,9 @@
 #
 # 产物: bin/tcc.exe (开箱即用: tcc hello.c → hello.exe, 默认链 musl + psxscl)
 #       bin/include/          musl 头 (nt64)
-#       bin/lib/crt_crt1.o    入口对象 (唯一需显式的运行时对象)
-#       bin/lib/libc.a        3.3M, 全部运行时: musl+chkstk+init_array+mem4
-#                             +libtcc1+psxscl/ntapi/pemagine/dalist
+#       bin/lib/libc.a        3.3M, 唯一运行时文件: musl+chkstk+init_array
+#                             +mem4+后端+libtcc1+crt_crt1(入口)+runmain(-run)
 #                             (零 Windows API 依赖 → 无 kernel32.def)
-#       bin/lib/runmain.o     -run 入口 (_runmain), 纯计算程序可用
 set -u
 BASE="$(cd "$(dirname "$0")" && pwd)"
 BOOT_TCC=tcc.exe
@@ -31,15 +29,10 @@ cp -r "$BASE/src/posix/musl-nt64/arch/nt64/bits" "$BIN/include/" 2>/dev/null
 # winapi 头 (tcc 编译自身需要 windows.h 等, 从 src 侧 win32/include 拿)
 cp -r "$BASE/src/posix/musl-nt64/include/winapi/." "$BIN/include/winapi/" 2>/dev/null || true
 
-# 运行时对象 + 库 → lib/ (tcc 的 library_paths 含 <tccdir>/lib)
-# crt_crt1.o 显式 (入口 _start); libc.a 含一切 (musl+chkstk+init_array+mem4
-# +libtcc1+全部后端, 零 Windows API 依赖 → 无需 kernel32.def)
-OBJ="$BASE/build/win-musl-obj"
-cp "$OBJ/crt_crt1.c.o"        "$BIN/lib/"
+# 库 → lib/ (tcc 的 library_paths 含 <tccdir>/lib)
+# libc.a 含一切: musl + chkstk + init_array + mem4 + 后端 + libtcc1
+# + crt_crt1 (入口) + runmain (-run) → bin/lib 只需这一个文件
 cp "$BASE/lib/libc-win.a"     "$BIN/lib/libc.a"
-# runmain.o: -run 入口 (_runmain), 纯计算程序可用 (完整 musl 初始化需 PE 启动)
-"$BIN/tcc.exe" -c "$BASE/lib/runmain.c" -o "$BIN/lib/runmain.o" \
-	-I "$BASE/src/posix/musl-nt64/include" -I "$BASE/src/posix/musl-nt64/arch/nt64" 2>/dev/null
 
 echo "=== [3/3] 验证开箱即用 ==="
 cd /tmp && rm -f bin_hello.c bin_hello.exe
