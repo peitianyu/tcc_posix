@@ -20,15 +20,45 @@ build/tcc-win.exe -platform=linux examples/hello.c  # Linux ELF
 ## 测试
 
 ```bash
-./test.sh              # Windows 编译+运行 (28 测试)
+./test.sh              # Windows 编译+运行 (30 测试)
 ./test.sh -run         # 追加 tcc -run 模式
 ./test.sh -linux       # 追加 Linux (WSL) 测试
 ```
 
-当前 **84/84 通过** (Win 28 + -run 28 + Linux 28)。覆盖 stdio/malloc/mmap/文件/目录/时间/
+当前 **90/90 通过** (Win 30 + -run 30 + Linux 30)。覆盖 stdio/malloc/mmap/文件/目录/时间/
 宽字符/信号/tmp 映射、pthread 全套 (create/join/mutex/cond/barrier/sem/递归锁)、
-线程压力、main 提前退出、tcc -run (含 futex 真阻塞),以及 ctype/setjmp/regex/search/
-fenv/multibyte/crypt/prng 模块 (t022-t028)。
+线程压力、main 提前退出、tcc -run (含 futex 真阻塞)、ctype/setjmp/regex/search/
+fenv/multibyte/crypt/prng 模块 (t022-t028),以及语言扩展 defer (t029) 与
+对象方法 (t030)。
+
+## 语言扩展
+
+**defer 语句** (t029):Go 式作用域清理,注册点求值、离开作用域逆序调用,与
+`__attribute__((cleanup))` 共用 scope cleanup 机制,支持 return/goto 全路径:
+
+```c
+{ struct File f = open_file("x"); defer f.close(); }
+```
+
+**对象方法** (t030):C++ 式 —— struct 体内函数定义即方法,无需关键字。隐式 `self`
+参数 (类型 `T*`),方法体可直接引用字段 (编译期替换为 `self->字段`),`v.func()` /
+`ptr->func()` 自动注入 self。方法编译为内部函数 `__method_<id>_<名>` (static),
+查表调用,零运行时开销:
+
+```c
+struct Point {
+    int x, y;
+    int sum(void) { return x + y; }          /* 隐式 self, 直接写字段 */
+    void set(int a, int b) { x = a; y = b; }
+    int combo(int k) { return self->sum() + self->mul(k); }  /* 方法互调 */
+};
+struct Point p = { 3, 4 };
+p.sum();        /* ≡ __method_0_sum(&p) */
+```
+
+已知限制:方法引用的字段须声明在方法之前;方法体局部变量/参数不得与字段同名
+(会被替换为 self->字段);方法间互调须 `self->`;方法必须带函数体;self 为方法
+保留参数名。
 
 ## 已知限制
 

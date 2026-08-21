@@ -121,88 +121,169 @@ git commit -m "feat: defer 语句 (Go 式作用域清理, 复用 scope cleanup �
 
 ---
 
-## 任务 2:对象方法
+## 任务 2:对象方法 (C++ 式, 无关键字)
+
+**设计 (2026-08-21 与伙伴讨论后重写)**:struct 体内函数定义 = 方法, 无需 `method` 关键字 (C++ 同款语法)。成员解析后类型为 VT_FUNC 且后跟 `{` → 方法。隐式 self 参数 (编译器注入, 名字 `self`, 类型 = `struct*`), 方法体可直接引用字段 (token 替换为 `self->字段`)。调用 `v.func()` / `pp->func()` 自动注入 self。方法编译为内部函数 `__method_<id>_<方法名>` (static, 编译器合成名, 用户不可见), 方法表 `{struct sym → id}` 查表调用。
+
+**示例:**
+```c
+struct Point {
+    int x, y;
+    int sum(void) { return x + y; }          /* 方法: 隐式 self, 直接写字段 */
+    void set(int a, int b) { x = a; y = b; }
+    int combo(int k) { return self->sum() + self->mul(k); }  /* 方法互调 */
+};
+Point p = { 3, 4 };
+p.sum();        /* ≡ __method_0_sum(&p) */
+pp->sum();      /* 指针同形 */
+```
+
+**已知限制** (文档化):
+- 方法引用的字段必须声明在方法之前 (收集时替换需要字段集合)
+- 方法体局部变量/参数不得与字段同名 (会被替换成 self->字段)
+- 方法体内调用其他方法须 `self->` (self 是注入参数, 可直接用)
+- 方法必须带函数体 (纯声明不支持);self 为方法保留参数名
+- 方法随类型作用域:局部 struct 的方法符号只在定义它的函数内可调
 
 **文件:**
-- 修改:`src/tccgen.c`(unary `.` 分支)
+- 修改:`src/tccgen.c`(方法数据结构 + struct_decl 拦截 + gen_function 重放 + unary 调用注入)
 - 创建:`tests/t030_method.c`
 
-- [ ] **步骤 1:编写失败测试 `tests/t030_method.c`**
+- [x] **步骤 1:编写失败测试 `tests/t030_method.c`**
+
+覆盖:基本调用+返回值、self 修改字段、`->` 调用、参数+字段引用、方法互调 (self->)、匿名 struct+typedef、递归方法、字段与方法同名时字段优先:
 
 ```c
-/* 测试: 对象方法 (v.func() → Type_func(&v), 命名约定) */
+/* 测试: 对象方法 (C++ 式: struct 体内函数定义, 隐式 self, . 与 -> 调用) */
 #include <stdio.h>
-#include <string.h>
-typedef struct { int x, y; } Point;
-void Point_print(Point *self) { printf("(%d,%d)", self->x, self->y); }
-int Point_sum(Point *self) { return self->x + self->y; }
-void Point_set(Point *self, int a, int b) { self->x = a; self->y = b; }
-
+struct Point {
+    int x, y;
+    int sum(void) { return x + y; }
+    void set(int a, int b) { x = a; y = b; }
+    int mul(int k) { return x * k; }
+    int combo(int k) { return self->sum() + self->mul(k); }
+};
+typedef struct { int v; int get(void) { return v; } } Box;
+struct Fact { int f(int n) { return n <= 1 ? 1 : self->f(n - 1) * n; } };
 int main(void) {
-    Point p = { 3, 4 };
-    /* 1. 基本调用 + 返回值 */
+    struct Point p = { 3, 4 };
     if (p.sum() != 7) return 1;
-    /* 2. self 修改 */
     p.set(10, 20);
     if (p.x != 10 || p.y != 20) return 2;
-    /* 3. -> 调用形式 */
-    Point *pp = &p;
+    struct Point *pp = &p;
     if (pp->sum() != 30) return 3;
-    /* 4. 字段与方法同名: 字段优先 */
-    typedef struct { int sum; } S;
-    S s = { 5 };
-    if (s.sum != 5) return 4;
+    if (p.mul(3) != 30) return 4;
+    if (p.combo(2) != 50) return 5;
+    Box b = { 9 };
+    if (b.get() != 9) return 6;
+    struct Fact f;
+    if (f.f(5) != 120) return 7;
+    struct S { int sum; };
+    struct S s = { 5 };
+    if (s.sum != 5) return 8;
     printf("method ok\n");
     return 0;
 }
 ```
 
-- [ ] **步骤 2:运行确认失败**
+- [x] **步骤 2:运行确认失败**
 
-运行:`bin/tcc.exe -c tests/t030_method.c -o /tmp/t.o -I src/posix/musl-nt64/include -I src/posix/musl-nt64/arch/nt64 -std=c99`
-预期:编译错误 `p.sum()` 处 "field not found: sum"。
+运行:`bin/tcc.exe -c tests/t030_method.c ...` 预期:成员循环对函数类型报 "invalid type" 或类似。
 
-- [ ] **步骤 3:实现 — `.` 分支方法回退**
+- [ ] **步骤 3:实现 — 数据结构与方法表**
 
-`src/tccgen.c:6178` 前后,把 `s = find_field(&vtop->type, tok, &cumofs);` 改为探测 + 回退:
+tccgen.c 在 struct_decl 前新增 (方法用 token 流 + gen_function 重放):
 
 ```c
-/* 探测字段 (SYM_FIELD 标志 = 静默模式, 无则返回 NULL) */
-s = find_field(&vtop->type, tok | SYM_FIELD, &cumofs);
-if (!s && tok >= TOK_UIDENT && tok_next_is('(')) {
-    /* 方法回退: 尝试 Type_tok */
-    Sym *m = try_method_call(tok);   /* 新函数, 见步骤 4 */
-    if (m) continue;                  /* 已生成调用, 跳出 post operations */
-    /* 无此方法: 走原 find_field 报错路径 */
-    s = find_field(&vtop->type, tok, &cumofs);
+typedef struct MethodDef {
+    struct MethodDef *next;
+    int name;              /* 方法名 tok */
+    CType sig;             /* 函数类型 (返回 + 参数链 ref->next, 不含 self) */
+    TokenString body;      /* 方法体 token 流 (字段已替换为 self->字段) */
+    Sym *sym;              /* 内部函数符号 */
+    int func_tok;          /* 内部函数名 token (__method_<id>_<名>) */
+} MethodDef;
+typedef struct MethodType {
+    struct MethodType *next;
+    Sym *ref;              /* struct 符号 */
+    int id;                /* -1 = 未分配 (收集期) */
+    MethodDef *methods;
+} MethodType;
+static MethodType *method_types;   /* 方法表: 调用点查 ref → id */
+static int method_id_counter;
+static int method_pending_self;    /* '(' 分支的 self 注入标记 */
+static int tok_self;               /* "self" 标识符 token (惰性) */
+```
+
+辅助函数:`method_type_get(Sym*)`(查/建)、`method_register`、`method_type_id(CType*)`(调用点查表)、`method_is_field`、`tok_self()`、`method_parse(Sym*, int name, CType*)`、`method_emit_all(Sym*)`、`method_lookup(int ident)`。
+
+- [ ] **步骤 4:实现 — struct_decl 成员循环拦截**
+
+type_decl 之后 (现有 `(type1.t & VT_BTYPE) == VT_FUNC → tcc_error` 之前, 且必须在 `type_size` 不完整检查之前):
+
+```c
+if ((type1.t & VT_BTYPE) == VT_FUNC) {
+    /* C++ 式方法: 需函数体 */
+    if (tok != '{')
+        tcc_error("method '%s' needs a body", get_tok_str(v, NULL));
+    method_parse(s, v, &type1);
+    if (tok == ';')   /* 方法后可选 ';' */
+        next();
+    goto method_member_done;   /* 跳过字段布局与外层 skip(';') */
 }
 ```
-(需要 `tok_next_is` 或先 `next()` 再回退 —— 实现时用 `tok1 = next(); if (tok1 == '(') ... else { tok = tok1; 走字段路径 }` 模式,注意 TCC 无单字符前瞻辅助,用局部变量保存。)
+(内层 while(1) 后的 `skip(';')` 处加标签 `method_member_done:`。)
 
-- [ ] **步骤 4:实现 — try_method_call 辅助**
+struct_decl 收尾 (`struct_layout` 之后) 调 `method_emit_all(s)`。
 
-新静态函数 `try_method_call(int ident)`(返回非 NULL 表示已处理):
-1. 从 `vtop->type` 取类型名:VT_STRUCT/VT_UNION 且 `ref->v & ~SYM_STRUCT` 为标签名;若 `type.t & VT_TYPEDEF`(typedef 别名)用 ref 的 typedef 名;否则返回 NULL(匿名无法命名)
-2. 拼内部名:`Type_ident`(用 `pstrcpy/pstrcat` 或 `table_ident` 查表注册新名),`sym_find()` 查函数;无 → 返回 NULL
-3. 校验 v 是左值(`test_lvalue()`),`gaddrof()` 取地址,`mk_pointer()` 得 `Type *`
-4. 手动调用解析:遇 `(` 逐参数 `expr_eq()` + `gfunc_param_typed()`,`gfunc_call(nb_args)`(复用任务 1 步骤 5 的参数循环模式)
-5. 返回非 NULL
+**method_parse 收集方法体** (tok 在 `{` 上):
+1. 花括号深度计数收集 token 到 `m->body`
+2. 字段替换:tok >= TOK_IDENT 且在 `s->next` 字段链 (方法前的字段) → 输出 `self` `TOK_ARROW` 字段名 三 token (注意 tokc.i 同步:标识符 token 的 tokc.i = tok 值)
+3. 方法名重复检测在 emit 时做
 
-**报错区分**:类型可命名但方法不存在 → `tcc_error("%s has no method %s", Type, ident)`;类型不可命名(匿名 struct 无 typedef)→ 返回 NULL 走原字段报错路径。
+**method_emit_all 两阶段** (struct 完成后):
+- 阶段 1 (符号注册, 支持方法互调):合成函数名 `__method_<id>_<名>` (tok_alloc_const),在 `m->sig.ref->next` 参数链头插入 self 参数符号 (`tcc_malloc` 构造,`v = tok_self()`,type = struct 指针,next/prev 双向链接),`external_sym(func_tok, &sig, 0, &ad)` 注册
+- 阶段 2 (方法体编译):逐个 `begin_macro(&m->body, 1); next(); gen_function(m->sym); end_macro();` — gen_function 要求 tok 在 `{` 上,自包含 (参数由 sym_push_params 从参数链推入)。**必须保存/恢复 cur_scope/root_scope/local_scope** (gen_function 会改它们, 局部 struct 场景会破坏外层作用域)
 
-- [ ] **步骤 5:运行测试验证通过**
+- [ ] **步骤 5:实现 — 调用点注入 (unary `.`/`->` 分支 + `(` 分支)**
 
-运行:`bash install.sh && ./test.sh`
-预期:t030_method PASS;全回归 PASS。
+`.`/`->` 分支:find_field 探测失败 (SYM_FIELD 静默模式) 且标识符且后跟 `(` → `method_lookup(ident)`:
 
-- [ ] **步骤 6:Commit**
+```c
+next();
+s = find_field(&vtop->type, tok | SYM_FIELD, &cumofs);
+if (!s && tok >= TOK_UIDENT) {
+    int ident = tok, t1 = next();
+    if (t1 == '(' && method_lookup(ident))
+        continue;              /* tok = '(' → '(' 分支完成调用 */
+    tok = t1;
+    s = find_field(&vtop->type, tok, &cumofs);   /* 报错路径 */
+}
+```
+
+**method_lookup**:查方法表得 id → 拼 `__method_<id>_<名>` → sym_find;无 → tcc_error;有 → `gaddrof(); mk_pointer();` 得 self 指针 → `vset(&m->type, m->r, m->c)` 压函数值 (vtop->sym = m,VT_SYM 时 c.i = 0)→ `vswap()` 得 [func, self] → `method_pending_self = 1` → 返回 1。
+
+`(` 分支开头 (unary 内, 局部取 method_pending_self 并清零):
+```c
+if (method_self) vswap();          /* vtop: self→func, 供类型检查 */
+...类型检查 + s = vtop->type.ref + next()...
+if (method_self) {
+    vswap();                       /* 还原 [func, self], vtop = self */
+    nb_args = 1;                   /* self 已入栈 */
+    if (sa) sa = sa->next;         /* 跳过 self 原型参数 */
+}
+```
+
+- [ ] **步骤 6:运行测试验证通过**
+
+运行:`bash install.sh && ./test.sh` 预期:t030_method PASS;全回归 PASS (含 t029_defer)。
+
+- [ ] **步骤 7:Commit**
 
 ```bash
 git add src/tccgen.c tests/t030_method.c
-git commit -m "feat: 对象方法调用 v.func() → Type_func(&v) (. 与 -> 均支持)"
+git commit -m "feat: 对象方法 (C++ 式 struct 体内定义, 隐式 self, . 与 -> 自动注入)"
 ```
-
----
 
 ## 任务 3:model struct/union
 
