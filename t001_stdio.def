@@ -1,4 +1,0 @@
-LIBRARY t001_stdio.exe
-
-EXPORTS
-ntapi_init
