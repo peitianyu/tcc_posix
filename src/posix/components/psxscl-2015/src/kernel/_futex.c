@@ -80,6 +80,23 @@ static void __futex_wake_woa(int *uaddr)
 		pRtlWakeAddressSingle((volatile void *)uaddr);
 }
 
+/* ntdll RtlWakeAddressAll: 一次唤醒该地址上的全部等待线程。
+   musl 以 cnt=-1 表示"唤醒所有" (__wake 内转 INT_MAX, barrier/
+   cond_broadcast 用); 若逐个 RtlWakeAddressSingle 循环 INT_MAX 次
+   ≈ 21 秒级卡顿。唤醒过多是合法的假唤醒, musl 等待循环都会重查值。 */
+static void __futex_wake_all_woa(int *uaddr)
+{
+	typedef void (__stdcall *rwba_fn)(volatile void *);
+	static rwba_fn pRtlWakeAddressAll;
+
+	if (!pRtlWakeAddressAll) {
+		pRtlWakeAddressAll = (rwba_fn)pe_get_procedure_address(
+			pe_get_ntdll_module_handle(), "RtlWakeAddressAll");
+	}
+	if (pRtlWakeAddressAll)
+		pRtlWakeAddressAll((volatile void *)uaddr);
+}
+
 __psx_api
 intptr_t __sys_futex(
 	int *		uaddr,
@@ -118,7 +135,7 @@ intptr_t __sys_futex(
 
 		/* fallback: 忙等 (老系统无 RtlWaitOnAddress) */
 		if (timeout) {
-			intptr_t		deadline;
+			intptr_t		deadline = 0;
 			for (;;) {
 				struct timespec cur;
 				intptr_t elapsed;
@@ -142,9 +159,15 @@ intptr_t __sys_futex(
 	case __FUTEX_WAKE: {
 		int n = val > 0 ? val : 1;
 
+		/* musl __wake(addr, -1, ...) → val=INT_MAX (唤醒所有):
+		   用 RtlWakeAddressAll 一次搞定, 避免 2^31 次单唤醒循环 */
+		if (n >= 2) {
+			__futex_wake_all_woa(uaddr);
+			return 0;
+		}
+
 		/* WakeByAddressSingle 一次唤醒一个; 无等待者立即返回 */
-		while (n--)
-			__futex_wake_woa(uaddr);
+		__futex_wake_woa(uaddr);
 		return 0;
 	}
 	}
