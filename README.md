@@ -88,15 +88,19 @@ bin/tcc.exe hello.c -o hello.exe
 | time / getcwd | ✅ | ✅ |
 | memcpy/memmove/memset/memcmp | ✅ | ✅ |
 | 大栈帧 (16KB, __chkstk) | ✅ | ✅ |
-| pthread create/join (4 线程) | ⚠️ join 卡死 | ✅ |
+| pthread create/join/返回值 | ✅ (真 futex 阻塞) | ✅ |
+| pthread mutex/cond/barrier/sem/detach | ✅ | ✅ |
+| 线程压力 (100 顺序 + 80 并发) | ✅ | ✅ |
+| main 提前退出 (不等子线程) | ✅ | ✅ |
 | 静态链接 (无动态依赖) | ✅ (PE) | ✅ (ELF) |
 | tcc -run (内存执行) | ✅ printf/malloc/time/opendir | — |
 
 ## 测试套件 (tests/ + test.sh)
 
 ```bash
-./test.sh              # Windows 编译+运行 (12 测试)
-./test.sh -run         # 追加 tcc -run 模式 (12 测试)
+./test.sh              # Windows 编译+运行 (19 测试)
+./test.sh -run         # 追加 tcc -run 模式
+./test.sh -linux       # 追加 Linux (WSL) 测试
 ./test.sh -clean       # 清理测试产物
 ```
 
@@ -106,23 +110,47 @@ bin/tcc.exe hello.c -o hello.exe
 数值转换+数学 (strtol/floor/sqrt/fmod) / 宽字符函数 / 编译正确性
 (递归/对齐/64位) / 信号 (raise/sigaction) / /tmp 映射 (t013)。
 
+线程系列 (t014-t019):
+- t014_thread: 8 线程 create/join/返回值校验
+- t015_stress: 100 顺序 + 80 并发 create/join (ctx 槽复用 + 计数平衡)
+- t016_mutex: 8 线程 × 20 万锁竞争精确计数
+- t017_cond: condvar + timedwait (CLOCK_REALTIME 超时)
+- t018_mainexit: main 提前退出进程立即结束
+- t019_sync: barrier + semaphore + detach
+
 `/tmp` 映射: psxscl 兼容层把 `/tmp` 重写到环境变量 TMP 指向的
 用户临时目录 (字节拷贝 tt_generic_memcpy, tt_aligned_block_memcpy
 按 uintptr_t 块会截断路径).
 
-当前: **Windows 13 + -run 13 + Linux 13 = 39/39 通过**。
+当前: **Windows 19 + Linux 19 = 38/38 通过**。
 
 ## 已知限制
 
-1. **Windows 端 pthread join 卡死** — psxscl 2015 的 futex/ctid 机制在
-   TCC 编译下不完整 (ctid 清除不可靠); 单线程程序无影响, Linux 端线程正常
+1. **`__thread` / `thread_local` 不可用** — TCC PE 目标生成 `%fs:TPOFF32`
+   (负偏移, fs:0 为 TLS 基址), 而 musl x86-64 的 TLS 变量在 fs 正偏移
+   (TP_ADJ = pthread+sizeof(pthread)-16, 16 字节 TIB 头) → worker 访问
+   __thread 段错误。修需改 TCC 的 TLS 代码生成 + PE TLS 重定位。
 2. **宽字符字面量 (L"...") 不可用** — TCC 的 PE 目标 wchar_t 字面量是
    2 字节, musl 的 wchar_t 是 4 字节 → 宽字符串/宽格式串错乱;
    宽字符函数 (isw*/tow*/wcslen 等) 正常 (t010 用非字面量测试)
-3. **`-run` 模式完整支持 musl** — runmain.o 的 `_runmain` 转发到
+3. **musl-nt64 头缺 `PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP`** —
+   递归锁需用 pthread_mutexattr_settype(PTHREAD_MUTEX_RECURSIVE);
+   NORMAL 锁同一线程递归锁死锁是 musl 标准语义
+4. **`-run` 模式** — runmain.o 的 `_runmain` 转发到
    `__libc_entry_routine` (crt_glue): psx_init 初始化后端 + `__libc_start_main`
-   (stdio/TLS) + exit(main)。printf/malloc/time/opendir/getcwd/write 全可用。
-   已知: Windows 端 pthread join 卡死 (同限制 1)
+   (stdio/TLS) + exit(main)。printf/malloc/time/opendir/getcwd/write 全可用
+
+## Windows 线程实现 (psxscl 后端)
+
+- 线程 = kernel32 CreateThread; join/互斥等待 = **ntdll RtlWaitOnAddress**
+  真阻塞 (WaitOnAddress 在 KernelBase 不在 kernel32, 用 ntdll Rtl 版更稳),
+  futex WAIT/WAKE 语义与 Linux 一致, 等待零 CPU
+- daemon 线程通过 LPC 端口 (ZwRequestPort) 收线程退出消息, 维护全局
+  pthreads 计数 — 最后一个线程退出时终止进程 (main 提前返回即进程结束)
+- worker 的 tlca 由 __clone_tlca_init 独立初始化 (zw_allocate_virtual_memory),
+  简化版不调完整 __psx_tlca_init, 需手动 at_locked_inc(&pthreads) 补计数
+- ntapi 哈希装载: midipix 用自定义 CRC32 多项式 0xd35a6b40 (非标准), 已验证
+  与哈希表一致, 250 个 ntdll API 全部装载成功
 
 ## 链接细节 (TCC 特性 workaround)
 
