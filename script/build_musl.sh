@@ -71,8 +71,10 @@ find "$MUSL/src" -name '*.c' \
 	awk '/^OK:/{ok++} /^FAIL:/{fail++; f=f" "$2} END{print "C: "ok" ok, "fail" fail" f}'
 
 # nt64 架构汇编: setjmp/longjmp (src/setjmp/{setjmp,longjmp}.c 是 0 字节占位,
-# 实现全在 arch 汇编; 其余 arch 汇编符号已由 C 实现提供, 不重复编译避免重定义)
-for f in "$MUSL/src/setjmp/nt64/setjmp.s" "$MUSL/src/setjmp/nt64/longjmp.s"; do
+# 实现全在 arch 汇编) + syscall_cp (可取消系统调用底层, mq/timer/aio 需要);
+# 其余 arch 汇编符号已由 C 实现提供, 不重复编译避免重定义)
+for f in "$MUSL/src/setjmp/nt64/setjmp.s" "$MUSL/src/setjmp/nt64/longjmp.s" \
+	"$MUSL/src/thread/nt64/syscall_cp.s"; do
 	rel="${f#$MUSL/src/}"
 	obj="$OUT/musl_${rel//\//_}.o"
 	if "$TCC" $CFLAGS "$f" -o "$obj" 2>"$OUT/.err.${obj##*/}"; then
