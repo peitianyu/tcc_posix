@@ -5663,11 +5663,8 @@ ST_FUNC void unary(void)
         tokc.str.data = tokcstr.data;
         goto case_TOK_STR;
     case TOK_LSTR:
-#ifdef TCC_TARGET_PE
-        t = VT_SHORT | VT_UNSIGNED;
-#else
+        /* tcc_posix: wchar_t 统一 4 字节 (musl), PE 不再用 unsigned short */
         t = VT_INT;
-#endif
         goto str_init;
     case TOK_STR:
     case_TOK_STR:
@@ -8059,13 +8056,8 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
 
         /* only parse strings here if correct type (otherwise: handle
            them as ((w)char *) expressions */
-        if ((tok == TOK_LSTR && 
-#ifdef TCC_TARGET_PE
-             (t1->t & VT_BTYPE) == VT_SHORT && (t1->t & VT_UNSIGNED)
-#else
-             (t1->t & VT_BTYPE) == VT_INT
-#endif
-            ) || (tok == TOK_STR && (t1->t & VT_BTYPE) == VT_BYTE)) {
+        if ((tok == TOK_LSTR && (t1->t & VT_BTYPE) == VT_INT) /* tcc_posix: wchar_t 统一 4 字节 */
+            || (tok == TOK_STR && (t1->t & VT_BTYPE) == VT_BYTE)) {
 	    len = 0;
             cstr_reset(&initstr);
             if (size1 != (tok == TOK_STR ? 1 : sizeof(nwchar_t)))

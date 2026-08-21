@@ -2077,9 +2077,9 @@ static void pe_add_runtime(TCCState *s1, struct pe_info *pe)
     set_global_sym(s1, start_symbol, NULL, 0);
 
     if (0 == s1->nostdlib) {
+        const char *p;
 #ifdef CONFIG_TCC_POSIX
         /* tcc_posix: default link = musl libc + psxscl backend (no msvcrt) */
-        const char *p;
         /* crt_crt1.o is inside libc.a: set_global_sym(_start) above
            registers the entry as undefined before libc.a loads, so
            alacarte pulls the member defining _start.  chkstk, init_array,
