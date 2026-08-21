@@ -127,7 +127,9 @@ intptr_t __sys_futex(
 					return 0;
 				__sys_clock_gettime(1 /*CLOCK_MONOTONIC*/,&cur);
 				elapsed = cur.tv_sec * 1000 + cur.tv_nsec / 1000000;
-				if (elapsed >= (intptr_t)ms)
+				if (!deadline)
+					deadline = elapsed + (intptr_t)ms; /* 相对 → 绝对 */
+				if (elapsed >= deadline)
 					return -110;
 				__futex_delay();
 			}
