@@ -56,6 +56,9 @@ extern "C" {
 
 
 #define PTHREAD_MUTEX_INITIALIZER {{{0}}}
+/* tcc_posix: 补充 glibc 兼容初始化宏 (musl 1.1.11 原版只有类型常量) */
+#define PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP { { { PTHREAD_MUTEX_RECURSIVE, 0, 0, 0, 0, 0 } } }
+#define PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP { { { PTHREAD_MUTEX_ERRORCHECK, 0, 0, 0, 0, 0 } } }
 #define PTHREAD_RWLOCK_INITIALIZER {{{0}}}
 #define PTHREAD_COND_INITIALIZER {{{0}}}
 #define PTHREAD_ONCE_INIT 0
