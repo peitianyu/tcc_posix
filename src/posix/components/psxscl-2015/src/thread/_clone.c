@@ -24,7 +24,6 @@ struct __clone_thunk_ctx {
 	uintptr_t	arg;
 	uintptr_t	tls;
 	uintptr_t	ctid;
-	void *		ptlca;	/* tcc_posix: 主线程预分配的 worker tlca */
 };
 
 static struct __clone_thunk_ctx	__clone_ctxs[64];
@@ -98,33 +97,16 @@ static void * __stdcall __clone_thunk(void * p)
 	int i = (int)(c - __clone_ctxs);
 	int32_t status;
 
-	/* psxscl per-thread context (TEB sys slot; __tlca_self needs it)
-	   主线程预分配的 tlca: worker 线程自身调用
-	   zw_allocate_virtual_memory 会卡 (TLS 未初始化) */
-	if (c->ptlca) {
-		struct __psx_tlca *tlca = (struct __psx_tlca *)c->ptlca;
-		nt_tib *tib;
-		tlca->tlca_addr  = tlca;
-		tlca->tlca_size  = __PSX_PAGE_SIZE;
-		tlca->buflen     = __PSX_PAGE_SIZE - (size_t)&((struct __psx_tlca *)0)->buffer;
-		tlca->cfalert    = NT_SYNC_ALERTABLE;
-		tlca->cfnonalert = NT_SYNC_NON_ALERTABLE;
-		tlca->cfzerowait = &tlca->zerowait;
-		tlca->cfinfinity = 0;
-		tlca->ctx        = &rtctx;
-		tib = pe_get_teb_address();
-		tlca->tib_system.stack_base  = tib->stack_base;
-		tlca->tib_system.stack_limit = tib->stack_limit;
-		*(__tls_slot_addr()) = tlca;
-	}
+	/* psxscl per-thread context (TEB sys slot; __tlca_self needs it) */
+	if ((status = __clone_tlca_init()))
+		return (void *)(uintptr_t)status;
 
 	/* musl __pthread_self: *sys_slot -> tlca->pthread_self */
 	((struct __psx_tlca *)*__tls_slot_addr())->pthread_self = (void *)c->tls;
 
-	/* tcc_posix: 计数 pthreads (原版 __psx_tlca_init 会 inc, 但我们
-	   绕过它用主线程预分配 tlca; 不补计数则 daemon 在 worker 退出时
-	   把 pthreads 减到 0 误判为"最后一个线程" → ZwTerminateProcess
-	   杀进程, main 的 join 永远等不到) */
+	/* tcc_posix: 计数 pthreads (musl 适配的 __clone_tlca_init 是简化版,
+	   不调 __psx_tlca_init; 不补计数则 daemon 在 worker 退出时把
+	   pthreads 减到 0 误判为"最后一个线程" → ZwTerminateProcess 杀进程) */
 	at_locked_inc(&pthreads);
 
 	/* pthread self -> TEB libc slot */
@@ -134,9 +116,17 @@ static void * __stdcall __clone_thunk(void * p)
 	__sys_set_tid_address((int *)c->ctid);
 
 	/* entry(arg): musl start() never returns (SYS_exit loop) */
-	status = ((int32_t (*)(void *))c->entry)((void *)c->arg);
+	/* 槽释放必须在此: musl start() 内部走 __pthread_exit→SYS_exit→
+	   ZwTerminateThread, 永不返回, thunk 尾部代码执行不到。
+	   先拷出 entry/arg 再释放, 避免主线程复用槽的竞态 */
+	{
+		uintptr_t entry = c->entry;
+		uintptr_t arg   = c->arg;
+		__clone_ctx_busy[i] = 0;
+		status = ((int32_t (*)(void *))entry)((void *)arg);
+	}
 
-	__clone_ctx_busy[i] = 0;
+	/* 兜底: musl start() 永不返回 (内部 SYS_exit 终止线程); 意外返回则终止 */
 	__ntapi->zw_terminate_thread(
 		NT_CURRENT_THREAD_HANDLE,
 		status);
@@ -185,24 +175,8 @@ long __sys_clone(
 	ctx->tls   = regs->rdx;
 	ctx->ctid  = (uintptr_t)ctid;
 
-	/* tcc_posix: 主线程预分配 worker tlca (worker 线程自身调用
-	   zw_allocate_virtual_memory 会卡, 因 TLS 未初始化) */
-	ctx->ptlca = 0;
-	{
-		void *tmp = 0;
-		size_t sz = __PSX_PAGE_SIZE;
-		if (!__ntapi->zw_allocate_virtual_memory(
-				NT_CURRENT_PROCESS_HANDLE, &tmp, 0, &sz,
-				NT_MEM_COMMIT, NT_PAGE_READWRITE)) {
-			unsigned char *cp = (unsigned char *)tmp;
-			size_t n = sz;
-			while (n--) *cp++ = 0;
-			ctx->ptlca = tmp;
-		}
-	}
-
-	/* tcc_posix: TCC 的 6 参函数指针调用不遵循 Win64 shadow space
-	   约定, 用汇编转换 (源自 cosmopolitan __sysv2nt) */
+	/* tcc_posix: CreateThread 调用包装 (TCC PE 目标本身已是 Win64
+	   约定, 此包装等价恒等变换, 防御性保留) */
 	{
 		extern void *psx_sysv2nt6(void *fn, unsigned long long a1,
 			unsigned long long a2, unsigned long long a3,
