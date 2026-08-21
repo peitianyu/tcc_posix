@@ -227,9 +227,9 @@ int main(void) {
     /* 2. 缓存复用: 同参类型一致 (sizeof 相同) */
     Array(float) b;
     if (sizeof a != sizeof b) return 2;
-    /* 3. 多类型参数 / 不同实例互不影响 */
-    Array(int) ai = { 0, 0 };
-    if (sizeof a == sizeof ai) return 3;   /* int 数组与 float 数组布局不同即可 */
+    /* 3. 多类型参数 / 不同实例互不影响 (T 直接作成员, size 随 T 变) */
+    model struct Box(T) { T v; };
+    if (sizeof(Box(double)) == sizeof(Box(int))) return 3;  /* 8 vs 4 */
     /* 4. union 实例化 */
     Val(int) u;
     u.v = 42;
@@ -302,6 +302,7 @@ git commit -m "feat: model 泛型 struct/union (token 重放 + 类型参数替�
 ## 任务 4:model function
 
 **文件:**
+- 修改:`src/tcctok.h`(function 关键字)
 - 修改:`src/tccgen.c`(函数记录 + 实例化调用)
 - 创建:`tests/t032_model_fn.c`
 
@@ -337,6 +338,8 @@ int main(void) {
 预期:编译错误(`model function` 未识别)。
 
 - [ ] **步骤 3:实现 — model function 定义记录**
+
+`src/tcctok.h`:`DEF(TOK_FUNCTION, "function")`。
 
 扩展任务 3 步骤 4 的 TOK_MODEL 分支:kind == VT_FUNC 时:
 1. `next()` 后解析 `(T1, ...)` 类型参数列表(与 struct 一致)
