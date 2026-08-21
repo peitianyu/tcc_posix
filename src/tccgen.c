@@ -118,6 +118,19 @@ static struct scope {
     Sym *lstk, *llstk;
 } *cur_scope, *loop_scope, *root_scope;
 
+/* defer 语句记录: 参数类型/偏移/记录区帧偏移 (Go 式: 注册点求值) */
+#define MAX_DEFER_ARGS 8
+#define MAX_DEFER_DESC 64
+typedef struct DeferDesc {
+    Sym *fn;                            /* 被调函数符号 */
+    int nargs;                          /* 参数个数 */
+    CType argtypes[MAX_DEFER_ARGS];     /* 参数类型 (转换后) */
+    int argoffs[MAX_DEFER_ARGS];        /* 参数在记录区 D 中的偏移 */
+    int d_off;                          /* 记录区 D 的帧偏移 */
+} DeferDesc;
+static DeferDesc defer_descs[MAX_DEFER_DESC];
+static int nb_defer_descs;
+
 typedef struct {
     Section *sec;
     int local_offset;
@@ -156,6 +169,8 @@ static void free_inline_functions(TCCState *s);
 static void skip_or_save_block(TokenString **str);
 static void gv_dup(void);
 static int get_temp_local_var(int size,int align,int *r2);
+static void defer_statement(void);
+static void emit_defer_call(struct DeferDesc *dd);
 static void cast_error(CType *st, CType *dt);
 static void end_switch(void);
 static void do_Static_assert(void);
@@ -6991,13 +7006,136 @@ static void try_call_scope_cleanup(Sym *stop)
 	Sym *fs = cls->cleanup_func;
 	Sym *vs = cls->cleanup_sym;
 	save_lvalues();
-	vpushsym(&fs->type, fs);
-	vset(&vs->type, vs->r, vs->c);
-	vtop->sym = vs;
-        mk_pointer(&vtop->type);
-	gaddrof();
-	gfunc_call(1);
+	if (fs->v & SYM_DEFER) {
+	    /* defer 记录: 重放保存的参数并调用 (cleanup_func 的 c 存 desc 索引) */
+	    emit_defer_call(&defer_descs[fs->c]);
+	} else {
+	    vpushsym(&fs->type, fs);
+	    vset(&vs->type, vs->r, vs->c);
+	    vtop->sym = vs;
+	    mk_pointer(&vtop->type);
+	    gaddrof();
+	    gfunc_call(1);
+	}
     }
+}
+
+/* defer 语句: 注册点求值参数并保存到函数帧上的记录区 D;
+   离开作用域时由 scope cleanup 机制逆序重放调用 (Go 式语义)。
+   语法: defer func(args...); */
+static void defer_statement(void)
+{
+    int t, n, i, size, align, max_align, off, r;
+    Sym *s, *sa, *dummy;
+    DeferDesc *dd;
+
+    if (!funcname[0] || !local_stack)
+        tcc_error("defer outside of function");
+    if (nb_defer_descs >= MAX_DEFER_DESC)
+        tcc_error("too many defer statements in function");
+
+    t = tok;
+    if (t < TOK_UIDENT)
+        tcc_error("defer requires a function call");
+    next();
+    s = sym_find(t);
+    if (!s || (s->type.t & VT_BTYPE) != VT_FUNC)
+        tcc_error("defer requires a function call");
+
+    dd = &defer_descs[nb_defer_descs];
+    dd->fn = s;
+    dd->nargs = 0;
+
+    /* 函数符号压栈 (与 unary 调用一致) */
+    r = s->r;
+    if ((r & VT_VALMASK) < VT_CONST)
+        r = (r & ~VT_VALMASK) | VT_LOCAL;
+    vset(&s->type, r, s->c);
+    vtop->sym = s;
+
+    n = 0;
+    if (tok == '(') {
+        next();
+        sa = s->type.ref->next;   /* 第一原型参数 */
+        if (tok != ')') for (;;) {
+            expr_eq();
+            /* 原型/旧式参数类型转换 (与普通调用一致) */
+            gfunc_param_typed(s, sa);
+            if (sa)
+                sa = sa->next;
+            if (vtop->type.t & (VT_VLA | VT_ARRAY))
+                tcc_error("defer: variable-length or array argument not supported");
+            if (n >= MAX_DEFER_ARGS)
+                tcc_error("defer: too many arguments (max %d)", MAX_DEFER_ARGS);
+            dd->argtypes[n] = vtop->type;
+            n++;
+            if (tok == ')')
+                break;
+            skip(',');
+        }
+        skip(')');
+    }
+    dd->nargs = n;
+    if (tok != ';')
+        tcc_error("defer requires a function call");
+    next();
+
+    /* 计算记录区 D 布局: 参数按类型对齐连续存放 */
+    off = 0;
+    max_align = 1;
+    for (i = 0; i < n; i++) {
+        size = type_size(&dd->argtypes[i], &align);
+        off = (off + align - 1) & -align;
+        dd->argoffs[i] = off;
+        off += size;
+        if (align > max_align)
+            max_align = align;
+    }
+    off = (off + max_align - 1) & -max_align;
+    /* D 以普通局部变量方式分配在函数帧 (不被临时变量复用机制回收) */
+    loc = (loc - off) & -max_align;
+    dd->d_off = loc;
+
+    /* 参数值从后往前存入 D (vstack: [fn, arg1..argN], vtop=argN;
+       fn 是替换语句前栈顶而非压栈, store 后深度已回语句前, 不弹) */
+    for (i = n - 1; i >= 0; i--) {
+        SValue save = *vtop;
+        vset(&dd->argtypes[i], VT_LOCAL | VT_LVAL, dd->d_off + dd->argoffs[i]);
+        vpushv(&save);
+        vstore();
+        vpop();   /* 弹值槽 */
+        vpop();   /* 弹 arg_i 槽 → 下移到 arg_{i-1} */
+    }
+    vpop();   /* 弹函数符号, 语句前后深度一致 */
+
+    /* 挂到当前作用域 cleanup 链; cleanup_func 用伪 Sym 标记 defer,
+       cl 链自身 v 保持 SYM_FIELD|n 干净 (不影响 goto 跨块编号比较) */
+    dummy = sym_push2(&all_cleanups, SYM_FIELD | SYM_DEFER, 0, 0);
+    dummy->type.t = VT_VOID;
+    dummy->c = nb_defer_descs;   /* desc 索引 */
+    {
+        Sym *cls = sym_push2(&all_cleanups, SYM_FIELD | ++cur_scope->cl.n, 0, 0);
+        cls->cleanup_func = dummy;
+        cls->next = cur_scope->cl.s;
+        cur_scope->cl.s = cls;
+    }
+    nb_defer_descs++;
+}
+
+/* 在作用域退出点重放 defer 调用: load 记录区参数并调用 (逆序由 cl 链保证) */
+static void emit_defer_call(DeferDesc *dd)
+{
+    int i;
+    CValue cv;
+    /* 函数符号压栈 (符号引用, 无副作用) */
+    vpushsym(&dd->fn->type, dd->fn);
+    /* 参数从左到右压槽并指向 D; gfunc_call 期望 vtop = 最右参数,
+       压栈顺序天然满足 (与 unary 的 reverse_funcargs+vrev 殊途同归) */
+    for (i = 0; i < dd->nargs; i++) {
+        cv.i = dd->d_off + dd->argoffs[i];
+        vsetc(&dd->argtypes[i], VT_LOCAL | VT_LVAL, &cv);
+    }
+    gfunc_call(dd->nargs);
 }
 
 
@@ -7249,6 +7387,9 @@ again:
             next();
         else if (!nocode_wanted)
             check_func_return();
+
+    } else if (t == TOK_DEFER) {
+        defer_statement();
 
     } else if (t == TOK_RETURN) {
         b = (func_vt.t & VT_BTYPE) != VT_VOID;
@@ -8580,6 +8721,7 @@ static void gen_function(Sym *sym)
     func_vt = sym->type.ref->type;
     func_var = sym->type.ref->f.func_type == FUNC_ELLIPSIS;
     func_old = sym->type.ref->f.func_type == FUNC_OLD;
+    nb_defer_descs = 0;   /* defer 记录区每函数重置 */
 
     /* NOTE: we patch the symbol size later */
     put_extern_sym(sym, cur_text_section, ind, 0);

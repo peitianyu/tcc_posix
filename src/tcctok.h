@@ -12,6 +12,7 @@
      DEF(TOK_SWITCH, "switch")
      DEF(TOK_CASE, "case")
      DEF(TOK_DEFAULT, "default")
+     DEF(TOK_DEFER, "defer")
      DEF(TOK_ASM1, "asm")
      DEF(TOK_ASM2, "__asm")
      DEF(TOK_ASM3, "__asm__")
