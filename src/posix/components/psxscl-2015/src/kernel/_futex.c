@@ -14,10 +14,6 @@
 #include "psx_tlca.h"
 #include "psx.h"
 
-int __futex_waits;
-void * __futex_last_addr;
-int __futex_last_val;
-
 #define __FUTEX_WAIT		0
 #define __FUTEX_WAKE		1
 #define __FUTEX_PRIVATE_FLAG	128
@@ -97,15 +93,6 @@ intptr_t __sys_futex(
 
 	(void)uaddr2;
 	(void)val3;
-
-	{
-		extern int __futex_waits;
-		extern void *__futex_last_addr;
-		extern int __futex_last_val;
-		__futex_waits++;
-		__futex_last_addr = uaddr;
-		__futex_last_val = val;
-	}
 
 	switch (cmd) {
 	case __FUTEX_WAIT: {

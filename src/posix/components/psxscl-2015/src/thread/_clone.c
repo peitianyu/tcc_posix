@@ -88,11 +88,8 @@ static void __clone_set_teb_libc_slot(uintptr_t val)
 	}
 }
 
-volatile int __tcc_thunk_enter = 0;
-
 static void * __stdcall __clone_thunk(void * p)
 {
-	__tcc_thunk_enter++;
 	struct __clone_thunk_ctx * c = (struct __clone_thunk_ctx *)p;
 	int i = (int)(c - __clone_ctxs);
 	int32_t status;
@@ -194,24 +191,6 @@ long __sys_clone(
 	if (!hthread) {
 		__clone_ctx_busy[i] = 0;
 		return -EAGAIN;
-	}
-
-	/* tcc_posix: 新线程创建后主动让出, 否则 Windows 调度器可能
-	   让 worker 饿死 (musl 链里 CreateThread 后不主动让出时,
-	   worker 长时间不被调度; SwitchToThread 密集让出可 100% 启动) */
-	{
-		typedef int (__stdcall *swt_fn)(void);
-		static swt_fn pSwitchToThread;
-		int k;
-		if (!pSwitchToThread) {
-			void *k32 = pe_get_kernel32_module_handle();
-			pSwitchToThread = (swt_fn)pe_get_procedure_address(
-				k32, "SwitchToThread");
-		}
-		for (k = 0; k < 20000 && pSwitchToThread; k++) {
-			pSwitchToThread();
-			if (__tcc_thunk_enter) break;
-		}
 	}
 
 	__clone_pCloseHandle(hthread);
