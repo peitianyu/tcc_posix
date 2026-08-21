@@ -150,6 +150,7 @@ static void gen_cast(CType *type);
 static void gen_cast_s(int t);
 static inline CType *pointed_type(CType *type);
 static int is_compatible_types(CType *type1, CType *type2);
+static void struct_decl(CType *type, int u);
 static int parse_btype(CType *type, AttributeDef *ad, int ignore_label);
 static CType *type_decl(CType *type, AttributeDef *ad, int *v, int td);
 static void parse_expr_type(CType *type);
@@ -172,6 +173,7 @@ static int get_temp_local_var(int size,int align,int *r2);
 static void defer_statement(void);
 static void emit_defer_call(struct DeferDesc *dd);
 static void gen_function(Sym *sym);
+static void method_compile_all(void);
 static int method_lookup(int ident);
 static void cast_error(CType *st, CType *dt);
 static void end_switch(void);
@@ -435,6 +437,7 @@ ST_FUNC int tccgen_compile(TCCState *s1)
     next();
     decl(VT_CONST);
     gen_inline_functions(s1);
+    method_compile_all();   /* 延迟编译方法体 (避免插入函数中途) */
     check_vstack();
     /* end of translation unit info */
 #if TCC_EH_FRAME
@@ -4478,12 +4481,18 @@ typedef struct MethodType {
     Sym *ref;              /* struct 符号 */
     int id;                /* -1 = 未分配 (收集期), emit 时分配 */
     MethodDef *methods;    /* 方法链 */
+    int pending;           /* 已挂待编译链 (去重) */
+    struct MethodType *next_pending;  /* 待编译链 */
 } MethodType;
 
 static MethodType *method_types;   /* 方法表: 调用点查 ref → id */
 static int method_id_counter;
 static int method_pending_self;    /* '(' 分支的 self 注入标记 */
 static int tok_self;               /* "self" 标识符 token (惰性分配) */
+/* 待编译方法链表: struct_decl 收集期只注册符号, 方法体编译延迟到
+   文件末尾 (gen_inline_functions 同款机制), 避免在函数中途
+   gen_function 把代码插入正在生成的函数内部 */
+static MethodType *method_pending;
 
 static int method_self_tok(void)
 {
@@ -4638,15 +4647,23 @@ static void method_emit_all(Sym *s)
         memset(&ad, 0, sizeof ad);
         m->sym = external_sym(m->func_tok, &m->sig, 0, &ad);
     }
-    /* 阶段 2: 方法体编译 (保存/恢复作用域状态, gen_function 会改写) */
-    {
-        struct scope *save_scope = cur_scope;
-        struct scope *save_root = root_scope;
-        Sym *save_lstack = local_stack;
-        int save_lscope = local_scope;
-        Section *save_section = cur_text_section;
-        int save_nocode = nocode_wanted;
+    /* 阶段 2 延迟: 挂到待编译链, 文件末尾统一编译
+       (直接在此编译会破坏正在生成的函数代码段) */
+    if (!mt->pending) {
+        mt->pending = 1;
+        mt->next_pending = method_pending;
+        method_pending = mt;
+    }
+}
 
+/* 文件末尾: 编译所有待编译方法体 (gen_inline_functions 同款,
+   cur_text_section 切到 text_section, gen_function 自包含) */
+static void method_compile_all(void)
+{
+    MethodType *mt;
+    MethodDef *m;
+
+    for (mt = method_pending; mt; mt = mt->next_pending) {
         for (m = mt->methods; m; m = m->next) {
             int save_tok = tok;
             CValue save_tokc = tokc;
@@ -4654,19 +4671,16 @@ static void method_emit_all(Sym *s)
             next();
             /* gen_inline_functions 同款: gen_function 用 cur_text_section */
             cur_text_section = text_section;
+            /* gen_function 末尾 sym_pop(&local_stack, NULL, 0) 会清空
+               整个局部符号栈: 文件末尾无外层局部变量, 无需隔离 */
             gen_function(m->sym);
             end_macro();
             /* gen_function 末尾 next() 会推进 tok, 恢复外部解析状态 */
             tok = save_tok;
             tokc = save_tokc;
         }
-        cur_scope = save_scope;
-        root_scope = save_root;
-        local_stack = save_lstack;
-        local_scope = save_lscope;
-        cur_text_section = save_section;
-        nocode_wanted = save_nocode;
     }
+    method_pending = NULL;
 }
 
 /* 调用点: v.func(…) 方法回退。tok 已在 '(' 上; 成功 → 注入 self+func, 返回 1 */
@@ -4698,6 +4712,274 @@ static int method_lookup(int ident)
     vswap();
     method_pending_self = 1;
     return 1;
+}
+
+/* ------------------------------------------------------------------------- */
+/* model 泛型 (struct/union 模板, 类型参数替换 + token 重放)                 */
+
+/* 模型定义记录: 模板名 + 类型参数名数组 + 成员声明 token 流 */
+typedef struct ModelDef {
+    int kind;              /* VT_STRUCT / VT_UNION / VT_FUNC */
+    int name;              /* 模板名 tok */
+    int nparams;           /* 类型参数个数 */
+    int *params;           /* 类型参数名 tok 数组 */
+    TokenString *body;     /* 成员声明/函数体 token 流 (tok_str_alloc) */
+    struct ModelDef *next; /* 全局模型表 */
+} ModelDef;
+
+static ModelDef *model_list;   /* 全局模型表 */
+
+static ModelDef *model_find(int name)
+{
+    ModelDef *md;
+    for (md = model_list; md; md = md->next)
+        if (md->name == name)
+            return md;
+    return NULL;
+}
+
+/* 记录模式: 收集 model 定义 token 流 (tok 在 '{' 上, 含 '{' 与匹配 '}'),
+   花括号深度计数以支持嵌套 struct 成员与方法体 */
+static void model_collect_body(TokenString *body)
+{
+    int depth = 0;
+    for (;;) {
+        if (tok == '{') {
+            depth++;
+        } else if (tok == '}') {
+            depth--;
+            if (depth == 0) {
+                tok_str_add_tok(body);
+                tok_str_add(body, 0);   /* 0 结尾: 遍历靠 0 停止 */
+                next();
+                return;
+            }
+        } else if (tok == TOK_EOF) {
+            expect("'}'");
+        }
+        tok_str_add_tok(body);
+        next();
+    }
+}
+
+/* 记录模式: 解析 model 定义 (tok 在 TOK_STRUCT/TOK_UNION 上),
+   登记到 model_list, 不生成任何代码 */
+static void model_decl(void)
+{
+    ModelDef *md = tcc_malloc(sizeof *md);
+
+    memset(md, 0, sizeof *md);
+    md->kind = (tok == TOK_STRUCT) ? VT_STRUCT : VT_UNION;
+    next();   /* struct/union */
+    if (tok < TOK_IDENT)
+        expect("model name");
+    md->name = tok;
+    next();
+    skip('(');
+    /* 类型参数列表: (T1, T2, ...) */
+    while (tok != ')') {
+        if (tok < TOK_IDENT)
+            expect("type parameter");
+        md->params = tcc_realloc(md->params,
+                                 (md->nparams + 1) * sizeof(int));
+        md->params[md->nparams++] = tok;
+        next();
+        if (tok == ',')
+            next();
+        else
+            break;
+    }
+    skip(')');
+    if (tok != '{')
+        expect("'{'");
+    md->body = tok_str_alloc();
+    model_collect_body(md->body);
+    /* 类型参数名不得与成员名重复: 实例化替换会把成员名也换掉。
+       特征: 参数名 token 后跟 ';' ',' ':' '[' '=' 之一 = 成员名位置 */
+    {
+        int *toks = NULL, n = 0, i;
+        const int *p = md->body->str;
+        while (*p) {
+            int t;
+            CValue cv;
+            TOK_GET(&t, &p, &cv);
+            toks = tcc_realloc(toks, (n + 1) * sizeof(int));
+            toks[n++] = t;
+        }
+        for (i = 0; i < n - 1; i++) {
+            int j;
+            if (toks[i + 1] != ';' && toks[i + 1] != ',' &&
+                toks[i + 1] != ':' && toks[i + 1] != '[' &&
+                toks[i + 1] != '=')
+                continue;
+            for (j = 0; j < md->nparams; j++) {
+                if (toks[i] == md->params[j])
+                    tcc_error("type parameter '%s' conflicts with member name",
+                              get_tok_str(md->params[j], NULL));
+            }
+        }
+        tcc_free(toks);
+    }
+    md->next = model_list;
+    model_list = md;
+}
+
+/* 实参 token 流 → 合成内部名 (Name_Arg1_Arg2...), 非字母数字转 '_' */
+static int model_synth_name(ModelDef *md, TokenString **args)
+{
+    CString name;
+    int i;
+
+    cstr_new(&name);
+    {
+        const char *s0 = get_tok_str(md->name, NULL);
+        for (; *s0; s0++)
+            cstr_ccat(&name, *s0);
+    }
+    for (i = 0; i < md->nparams; i++) {
+        const int *p = args[i]->str;
+        int t;
+        CValue cv;
+        cstr_ccat(&name, '_');
+        while (*p) {
+            const char *str;
+            const char *q;
+            TOK_GET(&t, &p, &cv);
+            if (t == TOK_LINENUM)
+                continue;   /* 行号标记不参与合成名 */
+            str = get_tok_str(t, &cv);
+            for (q = str; *q; q++) {
+                char c = *q;
+                if (!isalnum((unsigned char)c) && c != '_')
+                    c = '_';
+                cstr_ccat(&name, c);
+            }
+        }
+    }
+    cstr_ccat(&name, 0);
+    return tok_alloc_const(name.data);
+}
+
+/* 实例化: tok 在 '(' 上。记录实参原始 token (顶层逗号分隔),
+   合成内部名, 缓存查重, 未命中则替换 body 并重放 struct_decl */
+static void model_instantiate(CType *type, ModelDef *md)
+{
+    TokenString **args;
+    TokenString *ts;
+    Sym *s;
+    int i, synth, depth;
+
+    args = tcc_malloc(md->nparams * sizeof *args);
+    for (i = 0; i < md->nparams; i++)
+        args[i] = tok_str_alloc();
+    next();   /* '(' */
+    /* 记录实参原始 token: 括号深度计数支持嵌套实例化 Box(double),
+       顶层逗号分隔多个实参 */
+    i = 0;
+    depth = 0;
+    for (;;) {
+        if (tok == '(')
+            depth++;
+        else if (tok == ')') {
+            if (depth == 0)
+                break;   /* 实参列表结束 */
+            depth--;
+        } else if (tok == ',' && depth == 0) {
+            tok_str_add(args[i], 0);   /* 0 结尾: 后续遍历靠 0 停止 */
+            i++;
+            if (i >= md->nparams)
+                tcc_error("too many type arguments for model '%s'",
+                          get_tok_str(md->name, NULL));
+            next();
+            continue;
+        } else if (tok == TOK_EOF) {
+            expect("'('");
+        }
+        tok_str_add_tok(args[i]);
+        next();
+    }
+    tok_str_add(args[i], 0);   /* 0 结尾: 后续遍历靠 0 停止 */
+    next();   /* ')' */
+    if (i != md->nparams - 1)
+        tcc_error("wrong number of type arguments for model '%s'",
+                  get_tok_str(md->name, NULL));
+    /* 缓存查重: 合成名已定义过 → 直接复用 */
+    synth = model_synth_name(md, args);
+    s = struct_find(synth);
+    if (s && (s->type.t & ~VT_BTYPE) == (md->kind & ~VT_BTYPE) && s->c != -1) {
+        type->t = s->type.t;
+        type->ref = s;
+        tcc_free(args);
+        return;
+    }
+    /* 未命中: 复制 body, 类型参数 token → 实参 token 序列 */
+    ts = tok_str_alloc();
+    {
+        CValue cv;
+        cv.i = synth;
+        tok_str_add2(ts, md->kind == VT_STRUCT ? TOK_STRUCT : TOK_UNION, &cv);
+        tok_str_add2(ts, synth, &cv);
+    }
+    {
+        const int *p = md->body->str;
+        int t;
+        CValue cv;
+        while (*p) {
+            TOK_GET(&t, &p, &cv);
+            for (i = 0; i < md->nparams; i++) {
+                if (t == md->params[i]) {
+                    /* 替换为实参 token 序列 */
+                    const int *q = args[i]->str;
+                    int t2;
+                    CValue cv2;
+                    while (*q) {
+                        TOK_GET(&t2, &q, &cv2);
+                        tok_str_add2(ts, t2, &cv2);
+                    }
+                    t = 0;
+                    break;
+                }
+            }
+            if (t)
+                tok_str_add2(ts, t, &cv);
+        }
+        /* 缓冲 token: struct_decl 内部 skip('}') 后不再 next(),
+           流以 ';' 收尾, end_macro() 显式弹出 (方法实现同款) */
+        cv.i = 0;
+        tok_str_add2(ts, ';', &cv);
+    }
+    /* 重放: struct 合成名 { 替换后成员 }; 走标准 struct_decl 布局。
+       struct_decl 内嵌方法时 method_emit_all 会改写局部作用域
+       (gen_function 同款), 完整保存/恢复 (与 method_emit_all 一致) */
+    {
+        int save_tok = tok;
+        CValue save_tokc = tokc;
+        struct scope *save_scope = cur_scope;
+        struct scope *save_root = root_scope;
+        Sym *save_lstack = local_stack;
+        int save_lscope = local_scope;
+        Section *save_section = cur_text_section;
+        int save_nocode = nocode_wanted;
+        begin_macro(ts, 1);
+        next();   /* struct/union */
+        /* 隔离 local_stack: 局部作用域实例化时 struct 字段符号若进
+           local_stack 会随函数结束失效, 方法符号跨函数调用变 UND。
+           文件级 struct 定义 (字段符号进 global_stack) 本就该在
+           干净环境重放 */
+        local_stack = NULL;
+        struct_decl(type, md->kind);
+        local_stack = save_lstack;
+        end_macro();
+        tok = save_tok;
+        tokc = save_tokc;
+        cur_scope = save_scope;
+        root_scope = save_root;
+        local_stack = save_lstack;
+        local_scope = save_lscope;
+        cur_text_section = save_section;
+        nocode_wanted = save_nocode;
+    }
+    tcc_free(args);
 }
 
 /* enum/struct/union declaration. u is VT_ENUM/VT_STRUCT/VT_UNION */
@@ -5003,6 +5285,13 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
 
     while(1) {
         switch(tok) {
+        case TOK_MODEL:
+            /* model 泛型定义: model struct/union Name(T...) { ... } */
+            next();
+            if (tok != TOK_STRUCT && tok != TOK_UNION)
+                tcc_error("'model' requires 'struct' or 'union'");
+            model_decl();
+            return 0;   /* 不生成类型, 由调用方继续解析后续声明 */
         case TOK_EXTENSION:
             /* currently, we really ignore extension */
             next();
@@ -5214,6 +5503,19 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
         default:
             if (typespec_found)
                 goto the_end;
+            /* model 泛型实例化: Name(类型实参...) → 合成 struct 类型 */
+            if (model_find(tok)) {
+                ModelDef *md = model_find(tok);
+                n = tok, next();
+                if (tok == '(') {
+                    model_instantiate(&type1, md);
+                    u = type1.t;
+                    type->ref = type1.ref;
+                    goto basic_type2;
+                }
+                unget_tok(n);
+                goto the_end;
+            }
             s = sym_find(tok);
             if (!s || !(s->type.t & VT_TYPEDEF))
                 goto the_end;
