@@ -51,12 +51,12 @@ bin/tcc.exe hello.c -o hello.exe   # 一条命令编译链接, 默认链 musl (�
 | 线程压力 (100 顺序 + 80 并发) | ✅ | ✅ |
 | main 提前退出 (不等子线程) | ✅ | ✅ |
 | 静态链接 (无动态依赖) | ✅ (PE) | ✅ (ELF) |
-| tcc -run (内存执行) | ✅ | — |
+| tcc -run (内存执行, 含线程/futex) | ✅ | — |
 
 ## 测试套件
 
 ```bash
-./test.sh              # Windows 编译+运行 (19 测试)
+./test.sh              # Windows 编译+运行 (21 测试)
 ./test.sh -run         # 追加 tcc -run 模式
 ./test.sh -linux       # 追加 Linux (WSL) 测试
 ./test.sh -clean       # 清理测试产物
@@ -65,7 +65,7 @@ bin/tcc.exe hello.c -o hello.exe   # 一条命令编译链接, 默认链 musl (�
 覆盖 stdio/字符串/内存/文件/目录/时间/mmap/环境/数学/宽字符/信号/tmp 映射,
 以及线程系列 t014-t021(create/join、压力、mutex 竞争、condvar、递归锁、宽字符字面量、main 提前退出、barrier/sem/detach)。
 
-当前: **Windows 21 + Linux 21 = 42/42 通过**。
+当前: **Windows 21 + -run 21 + Linux 21 = 63/63 通过** (`./test.sh -run -linux`)。
 
 ## 已知限制
 
@@ -74,5 +74,6 @@ bin/tcc.exe hello.c -o hello.exe   # 一条命令编译链接, 默认链 musl (�
    寄存器固定指向 TEB, 无法指向 musl 的 TLS 块 (musl-nt64 用 TEB 系统槽存
    pthread 指针 + dtv 访问); 修需重写 TCC 的 TLS 代码生成 (TEB 槽/dtv 路径),
    不支持 TLSGD 动态模型。
-2. **`-run` 模式** 支持 printf/malloc/time/opendir/getcwd/write 等,
-   完整 musl 链(非 msvcrt)。
+2. **`-run` 模式** 完整 musl 链(非 msvcrt): printf/malloc/time/opendir/
+   getcwd/write 及 pthread 全套 (create/join/mutex/cond/barrier/sem) —
+   futex 基于 ntdll RtlWaitOnAddress/RtlWakeAddressAll 真阻塞。
