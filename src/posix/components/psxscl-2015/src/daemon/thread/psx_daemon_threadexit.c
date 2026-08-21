@@ -20,8 +20,13 @@ int32_t __stdcall __psx_daemon_threadexit(struct __port_msg * msg)
 	/* no reply */
 	msg->msginfo.key = 0;
 
-	/* futex wake */
-	/* futex(msg->tlca->pthread_clear_child_tid, FUTEX_WAKE, 1, NULL, NULL, 0); */
+	/* futex wake: 唤醒 join 等待者 (musl CLONE_CHILD_CLEARTID) */
+	{
+		extern intptr_t __sys_futex(int *, int, int, void *, void *, int);
+		if (msg->tlca->pthread_clear_child_tid)
+			__sys_futex(msg->tlca->pthread_clear_child_tid,
+				1 /*FUTEX_WAKE*/, 1, 0, 0, 0);
+	}
 
 	/* tlca free */
 	addr = msg->tlca;
