@@ -6,8 +6,8 @@
 #   build/tcc-linux.exe   Linux 目标 TCC (ELF)
 #   build/win-musl-obj/   Windows musl libc.a + crt + 后端
 #   build/linux-musl-obj/ Linux musl libc.a + crt
-#   lib/*.a               固化库 (libc-win/libc-linux/psxscl/ntapi/pemagine/dalist)
-#   include/              固化 musl 头 (Linux)
+#   lib/libc-win.a        固化 Windows musl libc (install.sh 消费)
+#   include/              固化 Linux musl 头 (test.sh -linux 消费)
 set -u
 BASE="$(cd "$(dirname "$0")" && pwd)"
 BOOT_TCC=/d/work/tinycc/win32/tcc.exe   # 自举用宿主 TCC (仅第一次需要)
@@ -29,19 +29,14 @@ bash "$BASE/script/build_psxscl.sh" && bash "$BASE/script/build_ntapi.sh" \
 echo "=== [3/4] musl libc (Windows + Linux) ==="
 bash "$BASE/script/build_musl.sh" && bash "$BASE/script/build_musl_linux.sh"
 
-echo "=== [4/4] 固化 include/ 与 lib/ ==="
-# Linux musl 头
+echo "=== [4/4] 固化 include/ 与 lib/libc-win.a ==="
+# Linux musl 头 (test.sh -linux 用 -I include/ 编译)
 rm -rf "$BASE/include" && mkdir -p "$BASE/include"
 cp -r "$BASE/src/posix/musl-1.1.11/include/"* "$BASE/include/"
 cp -r "$BASE/build/linux-musl-inc/bits" "$BASE/include/"
 cp "$BASE/build/linux-musl-inc/version.h" "$BASE/include/"
-# 库
-cp "$BASE/build/win-musl-obj/libc.a"      "$BASE/lib/libc-win.a"
-cp "$BASE/build/linux-musl-obj/libc.a"    "$BASE/lib/libc-linux.a"
-cp "$BASE/build/psxscl-2015/libpsxscl.a"  "$BASE/lib/"
-cp "$BASE/build/ntapi/libntapi.a"         "$BASE/lib/"
-cp "$BASE/build/pemagine/libpemagine.a"   "$BASE/lib/"
-cp "$BASE/build/dalist/libdalist.a"       "$BASE/lib/"
+# Windows musl libc (install.sh 消费; 后端/内核库已在 build_musl.sh 并入 libc.a,
+# Linux libc 由 build_musl_linux.sh 直用 build/linux-musl-obj/libc.a, 均无需再固化)
 
 echo "=== 完成 ==="
 ls -la "$BASE/lib/"*.a | awk '{print "  ", $5, $9}'
