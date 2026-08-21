@@ -30,6 +30,19 @@ intptr_t __sys_clock_gettime(clockid_t clock_id, struct timespec * tp)
 	tlca = __tlca_self();
 	__psx_sig_prolog(tlca);
 
+	/* tcc_posix: CLOCK_MONOTONIC 用 QPC (单调, 不受校时影响);
+	   REALTIME 用系统时间 (墙钟) */
+	if (clock_id == 1 /*CLOCK_MONOTONIC*/) {
+		nt_large_integer pc, pf;
+
+		if ((status = __ntapi->zw_query_performance_counter(&pc, &pf)))
+			return __psx_sig_epilog(tlca,-EINVAL,status);
+		if (!pf.quad) pf.quad = 10000000; /* 防御 */
+		tp->tv_sec  = pc.quad / pf.quad;
+		tp->tv_nsec = (pc.quad % pf.quad) * 1000000000LL / pf.quad;
+		return __psx_sig_epilog(tlca,0,status);
+	}
+
 	if ((status = __ntapi->zw_query_system_time(&systime)))
 		return __psx_sig_epilog(tlca,-EINVAL,status);
 
