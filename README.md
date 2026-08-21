@@ -46,8 +46,8 @@ bin/tcc.exe hello.c -o hello.exe   # 一条命令编译链接, 默认链 musl (�
 | 功能 | Windows | Linux |
 |---|---|---|
 | stdio / malloc / mmap / 文件 IO / dirent / time | ✅ | ✅ |
-| 字符串 / 数学 / 宽字符函数 / 信号 | ✅ | ✅ |
-| pthread create/join/mutex/cond/barrier/sem/detach | ✅ | ✅ |
+| 字符串 / 数学 / 宽字符函数 / 宽字符字面量 L"..." / 信号 | ✅ | ✅ |
+| pthread create/join/mutex/cond/barrier/sem/detach/递归锁 | ✅ | ✅ |
 | 线程压力 (100 顺序 + 80 并发) | ✅ | ✅ |
 | main 提前退出 (不等子线程) | ✅ | ✅ |
 | 静态链接 (无动态依赖) | ✅ (PE) | ✅ (ELF) |
@@ -63,17 +63,16 @@ bin/tcc.exe hello.c -o hello.exe   # 一条命令编译链接, 默认链 musl (�
 ```
 
 覆盖 stdio/字符串/内存/文件/目录/时间/mmap/环境/数学/宽字符/信号/tmp 映射,
-以及线程系列 t014-t019(create/join、压力、mutex 竞争、condvar、main 提前退出、barrier/sem/detach)。
+以及线程系列 t014-t021(create/join、压力、mutex 竞争、condvar、递归锁、宽字符字面量、main 提前退出、barrier/sem/detach)。
 
-当前:**Windows 19 + Linux 19 = 38/38 通过**。
+当前: **Windows 21 + Linux 21 = 42/42 通过**。
 
 ## 已知限制
 
-1. **`__thread` / `thread_local` 不可用** — TCC PE 目标与 musl x86-64 的 TLS
-   ABI 不兼容(fs 基址布局不同),需改 TCC TLS 代码生成才能修。
-2. **宽字符字面量 (L"...") 不可用** — TCC PE 目标 wchar_t 为 2 字节,
-   musl 为 4 字节;宽字符**函数** (isw*/wcslen 等) 正常。
-3. **musl-nt64 头缺 `PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP`** —
-   递归锁用 `pthread_mutexattr_settype(PTHREAD_MUTEX_RECURSIVE)`。
-4. **`-run` 模式** 支持 printf/malloc/time/opendir/getcwd/write 等,
+1. **`__thread` / `thread_local` 不可用** — TCC 的 x86-64 TLS 代码生成只用
+   `%fs:TPOFF32`(initial-exec, fs 基址 = TLS 块末尾), 而 Windows 的 fs
+   寄存器固定指向 TEB, 无法指向 musl 的 TLS 块 (musl-nt64 用 TEB 系统槽存
+   pthread 指针 + dtv 访问); 修需重写 TCC 的 TLS 代码生成 (TEB 槽/dtv 路径),
+   不支持 TLSGD 动态模型。
+2. **`-run` 模式** 支持 printf/malloc/time/opendir/getcwd/write 等,
    完整 musl 链(非 msvcrt)。
