@@ -15,7 +15,9 @@ __psx_tlca_prolog:
 	ret
 
 __psx_tlca_epilog:
-	movq	%rcx,	%rsp
+	/* tcc_posix: 不切栈 (切到 stack_limit 后 ZwTerminateThread 的
+	   syscall stub 若失败会 ret, 从栈底读返回地址 → 崩/进程消失;
+	   worker 栈未释放, 直接用它调 ZwTerminateThread 安全) */
 	movq	%rdx,	%rax
 	movq	(%rcx),	%rdx
 	movq	$-2,	%rcx

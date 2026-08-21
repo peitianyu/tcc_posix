@@ -23,11 +23,22 @@ int __futex_last_val;
 
 static void __futex_delay(void)
 {
-	nt_large_integer delay;
-
-	delay.quad = 10000; /* 100ns units: 1ms */
-
-	__ntapi->zw_delay_execution(0,&delay);
+	/* tcc_posix: 用 SwitchToThread 让出 (zw_delay_execution 的
+	   1ms 延迟会让 Windows 把唤醒线程排后, 新线程/等待线程
+	   可能长时间饿死; SwitchToThread 明确让给就绪线程) */
+	typedef int (__stdcall *swt_fn)(void);
+	static swt_fn pSwitchToThread;
+	if (!pSwitchToThread) {
+		pSwitchToThread = (swt_fn)pe_get_procedure_address(
+			pe_get_kernel32_module_handle(), "SwitchToThread");
+	}
+	if (pSwitchToThread)
+		pSwitchToThread();
+	else {
+		nt_large_integer delay;
+		delay.quad = 10000; /* 100ns units: 1ms */
+		__ntapi->zw_delay_execution(0,&delay);
+	}
 }
 
 __psx_api

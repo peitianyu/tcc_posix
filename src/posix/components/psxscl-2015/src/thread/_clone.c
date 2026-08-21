@@ -12,6 +12,7 @@
 #include <psxtypes/psxtypes.h>
 #include <pemagine/pemagine.h>
 #include <ntapi/ntapi.h>
+#include <ntapi/nt_atomic.h>
 #include "psx_impl.h"
 #include "psx_tlca.h"
 #include "psx_helper.h"
@@ -23,6 +24,7 @@ struct __clone_thunk_ctx {
 	uintptr_t	arg;
 	uintptr_t	tls;
 	uintptr_t	ctid;
+	void *		ptlca;	/* tcc_posix: 主线程预分配的 worker tlca */
 };
 
 static struct __clone_thunk_ctx	__clone_ctxs[64];
@@ -87,18 +89,43 @@ static void __clone_set_teb_libc_slot(uintptr_t val)
 	}
 }
 
+volatile int __tcc_thunk_enter = 0;
+
 static void * __stdcall __clone_thunk(void * p)
 {
+	__tcc_thunk_enter++;
 	struct __clone_thunk_ctx * c = (struct __clone_thunk_ctx *)p;
 	int i = (int)(c - __clone_ctxs);
 	int32_t status;
 
-	/* psxscl per-thread context (TEB sys slot; __tlca_self needs it) */
-	if ((status = __clone_tlca_init()))
-		return (void *)(uintptr_t)status;
+	/* psxscl per-thread context (TEB sys slot; __tlca_self needs it)
+	   主线程预分配的 tlca: worker 线程自身调用
+	   zw_allocate_virtual_memory 会卡 (TLS 未初始化) */
+	if (c->ptlca) {
+		struct __psx_tlca *tlca = (struct __psx_tlca *)c->ptlca;
+		nt_tib *tib;
+		tlca->tlca_addr  = tlca;
+		tlca->tlca_size  = __PSX_PAGE_SIZE;
+		tlca->buflen     = __PSX_PAGE_SIZE - (size_t)&((struct __psx_tlca *)0)->buffer;
+		tlca->cfalert    = NT_SYNC_ALERTABLE;
+		tlca->cfnonalert = NT_SYNC_NON_ALERTABLE;
+		tlca->cfzerowait = &tlca->zerowait;
+		tlca->cfinfinity = 0;
+		tlca->ctx        = &rtctx;
+		tib = pe_get_teb_address();
+		tlca->tib_system.stack_base  = tib->stack_base;
+		tlca->tib_system.stack_limit = tib->stack_limit;
+		*(__tls_slot_addr()) = tlca;
+	}
 
 	/* musl __pthread_self: *sys_slot -> tlca->pthread_self */
 	((struct __psx_tlca *)*__tls_slot_addr())->pthread_self = (void *)c->tls;
+
+	/* tcc_posix: 计数 pthreads (原版 __psx_tlca_init 会 inc, 但我们
+	   绕过它用主线程预分配 tlca; 不补计数则 daemon 在 worker 退出时
+	   把 pthreads 减到 0 误判为"最后一个线程" → ZwTerminateProcess
+	   杀进程, main 的 join 永远等不到) */
+	at_locked_inc(&pthreads);
 
 	/* pthread self -> TEB libc slot */
 	__clone_set_teb_libc_slot(c->tls);
@@ -158,10 +185,59 @@ long __sys_clone(
 	ctx->tls   = regs->rdx;
 	ctx->ctid  = (uintptr_t)ctid;
 
-	hthread = __clone_pCreateThread(0,0,__clone_thunk,ctx,0,&tid);
+	/* tcc_posix: 主线程预分配 worker tlca (worker 线程自身调用
+	   zw_allocate_virtual_memory 会卡, 因 TLS 未初始化) */
+	ctx->ptlca = 0;
+	{
+		void *tmp = 0;
+		size_t sz = __PSX_PAGE_SIZE;
+		if (!__ntapi->zw_allocate_virtual_memory(
+				NT_CURRENT_PROCESS_HANDLE, &tmp, 0, &sz,
+				NT_MEM_COMMIT, NT_PAGE_READWRITE)) {
+			unsigned char *cp = (unsigned char *)tmp;
+			size_t n = sz;
+			while (n--) *cp++ = 0;
+			ctx->ptlca = tmp;
+		}
+	}
+
+	/* tcc_posix: TCC 的 6 参函数指针调用不遵循 Win64 shadow space
+	   约定, 用汇编转换 (源自 cosmopolitan __sysv2nt) */
+	{
+		extern void *psx_sysv2nt6(void *fn, unsigned long long a1,
+			unsigned long long a2, unsigned long long a3,
+			unsigned long long a4, unsigned long long a5,
+			unsigned long long a6);
+		hthread = psx_sysv2nt6(
+			(void *)__clone_pCreateThread,
+			(unsigned long long)0,          /* lpThreadAttributes */
+			(unsigned long long)0,          /* dwStackSize */
+			(unsigned long long)(uintptr_t)__clone_thunk,
+			(unsigned long long)(uintptr_t)ctx,
+			(unsigned long long)0,          /* flags */
+			(unsigned long long)(uintptr_t)&tid);
+	}
 	if (!hthread) {
 		__clone_ctx_busy[i] = 0;
 		return -EAGAIN;
+	}
+
+	/* tcc_posix: 新线程创建后主动让出, 否则 Windows 调度器可能
+	   让 worker 饿死 (musl 链里 CreateThread 后不主动让出时,
+	   worker 长时间不被调度; SwitchToThread 密集让出可 100% 启动) */
+	{
+		typedef int (__stdcall *swt_fn)(void);
+		static swt_fn pSwitchToThread;
+		int k;
+		if (!pSwitchToThread) {
+			void *k32 = pe_get_kernel32_module_handle();
+			pSwitchToThread = (swt_fn)pe_get_procedure_address(
+				k32, "SwitchToThread");
+		}
+		for (k = 0; k < 20000 && pSwitchToThread; k++) {
+			pSwitchToThread();
+			if (__tcc_thunk_enter) break;
+		}
 	}
 
 	__clone_pCloseHandle(hthread);

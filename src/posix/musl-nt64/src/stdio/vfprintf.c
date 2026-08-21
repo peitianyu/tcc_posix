@@ -190,12 +190,15 @@ static char *fmt_o(uintmax_t x, char *s)
 
 static char *fmt_u(uintmax_t x, char *s)
 {
-	/* tcc-win64 workaround: no local vars */
+	/* tcc-win64 workaround: no local vars (musl 原版用局部变量 y;
+	   语义: x==0 时不写字符, 由调用处 pad 补 '0' — 若这里也写,
+	   pad 再补一个会输出 "00") */
 	while (x > 9) {
 		*--s = '0' + x % 10;
 		x /= 10;
 	}
-	*--s = '0' + x;
+	if (x)
+		*--s = '0' + x;
 	return s;
 }
 

@@ -5,6 +5,7 @@
 /********************************************************/
 
 #include <ntapi/ntapi.h>
+#include <pemagine/pemagine.h>
 #include "psx_systypes.h"
 #include "psx_tlca.h"
 #include "psx_errno.h"
@@ -78,8 +79,25 @@ intptr_t __sys_nanosleep(const struct timespec * req, struct timespec * rem)
 
 	delay.quad = (int64_t)req->tv_sec * 10000000LL + (req->tv_nsec + 99) / 100;
 
-	if ((status = __ntapi->zw_delay_execution(0,&delay)))
+	{
+	/* tcc_posix: ntapi 哈希表对 ZwDelayExecution 的哈希与 TCC 不匹配,
+	   直接 GetProcAddress 获取 */
+	typedef int32_t (__stdcall *delay_fn)(int32_t, nt_large_integer *);
+	static delay_fn pDelayExec;
+	static int delay_init = 0;
+	if (!delay_init) {
+		void *hntdll = pe_get_ntdll_module_handle();
+		pDelayExec = (delay_fn)pe_get_procedure_address(
+			hntdll, "ZwDelayExecution");
+		delay_init = 1;
+	}
+	if (pDelayExec)
+		status = pDelayExec(0, &delay);
+	else
+		status = __ntapi->zw_delay_execution(0,&delay);
+	if (status)
 		return __psx_sig_epilog(tlca,-EINTR,status);
+	}
 
 	return __psx_sig_epilog(tlca,0,status);
 }
