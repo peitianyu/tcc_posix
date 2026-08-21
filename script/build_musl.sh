@@ -179,9 +179,9 @@ fi
 # --- libtcc1 (TCC 运行时) 并入 libc.a ---
 # -run 在 musl 链下不可用, 故 libtcc1 无需独立; 完整并入 (含 crt1.o 亦无冲突,
 # 因 crt_crt1.o 先加载定义 _start, 闭包提取不会碰 crt1.o)。
-# 随后剔除 msvcrt 时代 CRT 成员 (crt1/crt1w/wincrt1/wincrt1w/tcov/dllcrt1/
-# dllmain/winex): 它们引用 kernel32 API, 而 musl/psxscl 零 Windows 依赖 →
-# 剔除后 libc.a 完全自足, 无需 kernel32.def
+# 随后仅追加剔除 msvcrt 时代 CRT 成员 (crt1/crt1w/wincrt1/wincrt1w/tcov/dllcrt1/
+# dllmain/winex) 之外的成员, 它们引用 kernel32 API, 而 musl/psxscl 零 Windows
+# 依赖 → 剔出后 libc.a 完全自足, 无需 kernel32.def
 if [ -x /c/msys64/mingw64/bin/ar ]; then
 	BK_DIR="$OUT/.libtcc1"
 	rm -rf "$BK_DIR" && mkdir -p "$BK_DIR"

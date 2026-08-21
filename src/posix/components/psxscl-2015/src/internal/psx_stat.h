@@ -48,6 +48,23 @@ struct __stat {
 	struct timespec st_birthtime;
 };
 
+/* 卷信息 (statfs/fstatfs), 布局对齐 musl x86_64 struct statfs
+   (f_type..f_ffree 各 u64, f_fsid[2], 余下各 u64) */
+struct __statfs {
+	uint64_t	f_type;
+	uint64_t	f_bsize;
+	uint64_t	f_blocks;
+	uint64_t	f_bfree;
+	uint64_t	f_bavail;
+	uint64_t	f_files;
+	uint64_t	f_ffree;
+	int32_t		f_fsid[2];
+	uint64_t	f_namelen;
+	uint64_t	f_frsize;
+	uint64_t	f_flags;
+	uint64_t	f_spare[4];
+};
+
 struct __psx_tlca;
 
 int32_t	__fastcall __psx_stat(struct __psx_tlca *, struct __ofd *, struct __stat *);

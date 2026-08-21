@@ -44,6 +44,8 @@ static void __populate_syscall_vtbl(void)
 
 	/* fs */
 	set_syscall_pointer(access);
+	set_syscall_pointer(statfs);
+	set_syscall_pointer(fstatfs);
 	set_syscall_pointer(faccessat);
 	set_syscall_pointer(chdir);
 	set_syscall_pointer(fchdir);
@@ -78,6 +80,7 @@ static void __populate_syscall_vtbl(void)
 	set_syscall_pointer(clock_settime);
 	set_syscall_pointer(gettimeofday);
 	set_syscall_pointer(sched_setscheduler);
+	set_syscall_pointer(sched_yield);
 	set_syscall_pointer(sysinfo);
 	set_syscall_pointer(uname);
 
@@ -100,6 +103,35 @@ static void __populate_syscall_vtbl(void)
 	/* profile */
 	set_syscall_pointer(times);
 
+	/* timer (R4) -- musl timer 库层恢复: src/time/timer_*.c */
+	set_syscall_pointer(timer_create);
+	set_syscall_pointer(timer_settime);
+	set_syscall_pointer(timer_gettime);
+	set_syscall_pointer(timer_getoverrun);
+	set_syscall_pointer(timer_delete);
+
+	/* mq (R10a) -- musl mq 库层补全: src/mq/mq_*.c */
+	set_syscall_pointer(mq_open);
+	set_syscall_pointer(mq_unlink);
+	set_syscall_pointer(mq_timedsend);
+	set_syscall_pointer(mq_timedreceive);
+	set_syscall_pointer(mq_notify);
+	set_syscall_pointer(mq_getsetattr);
+
+	/* ipc (R10b) -- musl ipc 库层补全: src/ipc/{msg,sem,shm}_*.c */
+	set_syscall_pointer(msgget);
+	set_syscall_pointer(msgsnd);
+	set_syscall_pointer(msgrcv);
+	set_syscall_pointer(msgctl);
+	set_syscall_pointer(semget);
+	set_syscall_pointer(semop);
+	set_syscall_pointer(semtimedop);
+	set_syscall_pointer(semctl);
+	set_syscall_pointer(shmget);
+	set_syscall_pointer(shmat);
+	set_syscall_pointer(shmdt);
+	set_syscall_pointer(shmctl);
+
 	/* resource */
 	set_syscall_pointer(getrlimit);
 	set_syscall_pointer(getrusage);
@@ -115,6 +147,13 @@ static void __populate_syscall_vtbl(void)
 	set_syscall_pointer(setpgid);
 	set_syscall_pointer(wait4);
 	set_syscall_pointer(waitid);
+
+	/* select/poll (R5) -- musl poll()/select() 走 SYS_poll(7)/SYS_select(23);
+	   pselect6/ppoll 一并注册供直调 */
+	set_syscall_pointer(poll);
+	set_syscall_pointer(select);
+	set_syscall_pointer(pselect6);
+	set_syscall_pointer(ppoll);
 
 	/* signal */
 	set_syscall_pointer(rt_sigaction);

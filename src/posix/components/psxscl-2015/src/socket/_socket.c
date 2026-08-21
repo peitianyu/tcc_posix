@@ -60,13 +60,21 @@ static intptr_t __socket(struct __psx_tlca * tlca, int domain, int type, int pro
 	else
 		return -EINVAL;
 
-	/* type */
-	if (!type && (protocol == NT_IPPROTO_TCP))
-		type = NT_SOCK_STREAM;
+	/* type (由 protocol 反推, 当 type 缺省) */
+	if (!type) {
+		if (protocol == NT_IPPROTO_TCP)
+			type = NT_SOCK_STREAM;
+		else if (protocol == NT_IPPROTO_UDP)
+			type = NT_SOCK_DGRAM;
+	}
 
-	/* protocol */
-	if (!protocol && (type == NT_SOCK_DGRAM))
-		protocol = NT_IPPROTO_UDP;
+	/* protocol (由 type 反推; AFD open packet 需具体传输协议) */
+	if (!protocol) {
+		if (type == NT_SOCK_DGRAM)
+			protocol = NT_IPPROTO_UDP;
+		else if (type == NT_SOCK_STREAM)
+			protocol = NT_IPPROTO_TCP;
+	}
 
 	/* ofd */
 	if (!(ofd = __psx_ofd_alloc(ctx,&ofdidx)))

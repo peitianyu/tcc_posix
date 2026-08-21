@@ -16,33 +16,42 @@ static int __is_alpha(char ch)
 		|| ((ch >= 'A') && (ch <= 'Z')));
 }
 
+/* case-insensitive equal (a == b), a 已是大写化 */
+static int __env_ceq(const char * a, const char * b)
+{
+	while (*a && (*a == *b)) { a++; b++; }
+	return (*a == *b);
+}
+
+/* tcc_posix: Windows 环境用 "Path" (首字母大写) 而非 POSIX 的 "PATH",
+   musl getenv 大小写敏感 → getenv("PATH") 会 NULL。这里大小写不敏感识别
+   路径类变量, 并在拷贝时规范化为规范大写。识别集: PATH/PATH_/TEMP/TMP。 */
 static int __is_path(char * var, char * val)
 {
-	char * ch;
-	char * equal;
+	char *	equal;
+	char	buf[8];
+	size_t	len;
+	size_t	i;
+	char	c;
 
-	ch    = val - 1;
 	equal = val - 1;
 
 	if (*equal != '=')
 		return 0;
 
-	if ((*--ch == 'H') && (*--ch == 'T') && (*--ch == 'A') && (*--ch == 'P') && (ch == var))
-		return 1;
-	else
-		ch = equal;
+	len = (size_t)(equal - var);
 
-	if ((*--ch == 'H') && (*--ch == 'T') && (*--ch == 'A') && (*--ch == 'P') && (*--ch == '_'))
-		return 1;
-	else
-		ch = equal;
+	if (!len || (len >= sizeof(buf)))
+		return 0;
 
-	if ((*--ch == 'P') && (*--ch == 'M') && (*--ch == 'E') && (*--ch == 'T') && (ch == var))
-		return 1;
-	else
-		ch = equal;
+	for (i = 0; i < len; i++) {
+		c = var[i];
+		buf[i] = ((c >= 'a') && (c <= 'z')) ? (char)(c - 'a' + 'A') : c;
+	}
+	buf[len] = '\0';
 
-	return ((*--ch == 'P') && (*--ch == 'M') && (*--ch == 'T') && (ch == var));
+	return (__env_ceq(buf,"PATH") || __env_ceq(buf,"PATH_")
+		|| __env_ceq(buf,"TEMP") || __env_ceq(buf,"TMP"));
 }
 
 static void __copy_var_name(char ** src, char ** next)
@@ -158,14 +167,21 @@ int32_t __psx_init_env(void)
 	next = (char *)addr;
 
 	for (; *envp; envp++) {
-		src  = *envp;
-		mark = next;
+		char *	np;
+
+		src   = *envp;
+		mark  = next;
 
 		__copy_var_name(&src,&next);
 
-		if (__is_path(*envp,src))
+		if (__is_path(*envp,src)) {
+			/* 规范化为大写名字 (Path->PATH); mark..next-2 是名字, next-1 是 '=' */
+			for (np = mark; np < (next - 1); np++)
+				if ((*np >= 'a') && (*np <= 'z'))
+					*np = (char)(*np - 'a' + 'A');
+
 			__copy_path_value(src,&next);
-		else
+		} else
 			__copy_var_value(src,&next);
 
 		*envp = mark;

@@ -45,8 +45,11 @@ static intptr_t __pid_get_set(pid_t pid, int32_t pgid, enum __pid_type type, int
 		return __psx_sig_epilog(tlca,0,NT_STATUS_SUCCESS);
 	}
 
-	if (pid && (type = __PGID))
-		return __psx_sig_epilog(tlca,rec->pgid,NT_STATUS_SUCCESS);
+	if (type == __PGID)
+		return __psx_sig_epilog(
+			tlca,
+			pid ? rec->pgid : rtdata->alt_cid_self.pgid,
+			NT_STATUS_SUCCESS);
 
 	if (type == __PPID)
 		return __psx_sig_epilog(tlca,rtdata->alt_cid_self.pgid,NT_STATUS_SUCCESS);

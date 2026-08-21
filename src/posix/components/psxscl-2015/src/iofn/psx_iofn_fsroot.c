@@ -34,30 +34,34 @@ static int32_t __fastcall __psx_iofn_fsroot_open_next(
 	}
 
 	/* virtual folder? */
-	if ((path.strlen == 3*sizeof(wchar16_t))
-			&& (*path.buffer++ == 'd')
-			&& (*path.buffer++ == 'e')
-			&& (*path.buffer++ == 'v')) {
-		path_info->fdtype = PSX_FD_OS_DEVICE;
-		return NT_STATUS_SUCCESS;
+	/* 修复: 原实现用 *buf++ 跨分支共享递增同一指针, 3 字符目录 "etc" 会在
+	 * "dev" 分支的 strlen==3 判断通过后被 +1 跳过 'e', 导致 /etc 永远失配.
+	 * 改为按索引比较, 不破坏 path.buffer. */
+	{
+		const wchar16_t *	cand;
+		uint32_t		n;
 
-	} else if ((path.strlen == 4*sizeof(wchar16_t))
-			&& (*path.buffer++ == 'p')
-			&& (*path.buffer++ == 'r')
-			&& (*path.buffer++ == 'o')
-			&& (*path.buffer++ == 'c')) {
-		path_info->fdtype = PSX_FD_OS_PROCFS;
-		return NT_STATUS_SUCCESS;
+		cand = path.buffer;
+		n    = path.strlen / sizeof(wchar16_t);
 
-	} else if ((path.strlen == 3*sizeof(wchar16_t))
-			&& (*path.buffer++ == 'e')
-			&& (*path.buffer++ == 't')
-			&& (*path.buffer++ == 'c')) {
-		path_info->fdtype = PSX_FD_OS_CONFIG;
-		return NT_STATUS_SUCCESS;
+		if ((n == 3) && (cand[0]=='d') && (cand[1]=='e') && (cand[2]=='v')) {
+			path_info->fdtype = PSX_FD_OS_DEVICE;
+			return NT_STATUS_SUCCESS;
+		}
 
-	} else
-		return status;
+		if ((n == 4) && (cand[0]=='p') && (cand[1]=='r')
+				&& (cand[2]=='o') && (cand[3]=='c')) {
+			path_info->fdtype = PSX_FD_OS_PROCFS;
+			return NT_STATUS_SUCCESS;
+		}
+
+		if ((n == 3) && (cand[0]=='e') && (cand[1]=='t') && (cand[2]=='c')) {
+			path_info->fdtype = PSX_FD_OS_CONFIG;
+			return NT_STATUS_SUCCESS;
+		}
+	}
+
+	return status;
 }
 
 

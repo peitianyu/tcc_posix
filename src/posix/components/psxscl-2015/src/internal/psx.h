@@ -57,6 +57,8 @@ typedef intptr_t	__sys_routine(getcwd)(char * buf, size_t size);
 typedef intptr_t	__sys_routine(getdents)(int, struct __dirent *, unsigned int);
 typedef intptr_t	__sys_routine(fstat)(int, struct __stat * xstat);
 typedef intptr_t	__sys_routine(fstatat)(int, const unsigned char * path, struct __stat * xstat, int flag);
+typedef intptr_t	__sys_routine(statfs)(const unsigned char * path, struct __statfs * xstatfs);
+typedef intptr_t	__sys_routine(fstatfs)(int fdidx, struct __statfs * xstatfs);
 typedef intptr_t	__sys_routine(lstat)(const unsigned char * path, struct __stat * xstat);
 typedef intptr_t	__sys_routine(stat)(const unsigned char * path, struct __stat * xstat);
 typedef intptr_t	__sys_routine(mkdir)(const unsigned char * path, mode_t mode);
@@ -84,6 +86,7 @@ typedef intptr_t	__sys_routine(nanosleep)(const struct timespec * req, struct ti
 typedef intptr_t	__sys_routine(clock_nanosleep)(int, int, const struct timespec *, struct timespec *);
 typedef intptr_t	__sys_routine(time)(int *);
 typedef intptr_t	__sys_routine(sched_setscheduler)(pid_t, int, const struct sched_param *);
+typedef intptr_t	__sys_routine(sched_yield)(void);
 typedef intptr_t	__sys_routine(sysinfo)(struct __sysinfo * info);
 typedef intptr_t	__sys_routine(uname)(struct __utsname *);
 
@@ -160,6 +163,53 @@ typedef ssize_t		__sys_routine(readv)(int,const struct iovec *,int);
 typedef ssize_t		__sys_routine(write)(int,const void *,size_t);
 typedef ssize_t		__sys_routine(writev)(int,const struct iovec *,int);
 
+/* select/poll (R5) -- struct __psx_pollfd 定义见 src/select/_poll.c,
+   struct __psx_fdset / __psx_timeval / __psx_timespec 见 src/select/_select.c */
+struct __psx_pollfd;
+struct __psx_fdset;
+struct __psx_timeval;
+struct __psx_timespec;
+typedef intptr_t	__sys_routine(poll)(struct __psx_pollfd *, unsigned long, int);
+typedef intptr_t	__sys_routine(ppoll)(struct __psx_pollfd *, unsigned long, const void *, const void *, size_t);
+typedef intptr_t	__sys_routine(select)(int, struct __psx_fdset *, struct __psx_fdset *, struct __psx_fdset *, struct __psx_timeval *);
+typedef intptr_t	__sys_routine(pselect6)(int, struct __psx_fdset *, struct __psx_fdset *, struct __psx_fdset *, const struct __psx_timespec *, const void *);
+
+/* timer (R4) -- struct __psx_itimerspec 定义见 src/timer/_timer.c */
+struct __psx_itimerspec;
+typedef intptr_t	__sys_routine(timer_create)(clockid_t clk, void * ksev, int * res);
+typedef intptr_t	__sys_routine(timer_settime)(int t, int flags, const struct __psx_itimerspec * val, struct __psx_itimerspec * old);
+typedef intptr_t	__sys_routine(timer_gettime)(int t, struct __psx_itimerspec * val);
+typedef intptr_t	__sys_routine(timer_getoverrun)(int t);
+typedef intptr_t	__sys_routine(timer_delete)(int t);
+
+/* mq (R10a) -- 消息队列 syscall 补全: src/mq/_mq.c */
+typedef intptr_t	__sys_routine(mq_open)(const unsigned char * name, int flags, mode_t mode, void * kattr);
+typedef intptr_t	__sys_routine(mq_unlink)(const unsigned char * name);
+typedef intptr_t	__sys_routine(mq_timedsend)(int mqd, const unsigned char * msg, size_t len, unsigned prio, const struct timespec * at);
+typedef intptr_t	__sys_routine(mq_timedreceive)(int mqd, unsigned char * msg, size_t len, unsigned * prio, const struct timespec * at);
+typedef intptr_t	__sys_routine(mq_notify)(int mqd, const void * ksev);
+typedef intptr_t	__sys_routine(mq_getsetattr)(int mqd, const void * knew, void * kold);
+
+/* ipc (R10b) -- System V IPC syscall 补全: src/ipc/_ipc.c.
+   struct __psx_msqid_ds/semid_ds/shmid_ds 定义见 src/ipc/_ipc.c,
+   struct __psx_sembuf 与 musl struct sembuf 布局一致 */
+struct __psx_msqid_ds;
+struct __psx_semid_ds;
+struct __psx_shmid_ds;
+struct __psx_sembuf;
+typedef intptr_t	__sys_routine(msgget)(key_t, int);
+typedef intptr_t	__sys_routine(msgsnd)(int, const void *, size_t, int);
+typedef intptr_t	__sys_routine(msgrcv)(int, void *, size_t, long, int);
+typedef intptr_t	__sys_routine(msgctl)(int, int, struct __psx_msqid_ds *);
+typedef intptr_t	__sys_routine(semget)(key_t, int, int);
+typedef intptr_t	__sys_routine(semop)(int, const struct __psx_sembuf *, size_t);
+typedef intptr_t	__sys_routine(semtimedop)(int, const struct __psx_sembuf *, size_t, const struct timespec *);
+typedef intptr_t	__sys_routine(semctl)(int, int, int, void *);
+typedef intptr_t	__sys_routine(shmget)(key_t, size_t, int);
+typedef intptr_t	__sys_routine(shmat)(int, const void *, int);
+typedef intptr_t	__sys_routine(shmdt)(const void *);
+typedef intptr_t	__sys_routine(shmctl)(int, int, struct __psx_shmid_ds *);
+
 /* thread */
 typedef long		__sys_routine(clone)(uintptr_t,void *,void *,void *,struct pt_regs *);
 typedef intptr_t	__sys_routine(gettid)(void);
@@ -205,6 +255,8 @@ __sys_interface(fstat);
 __sys_interface(fstatat);
 __sys_interface(lstat);
 __sys_interface(stat);
+__sys_interface(statfs);
+__sys_interface(fstatfs);
 __sys_interface(mkdir);
 __sys_interface(mkdirat);
 __sys_interface(readlink);
@@ -230,6 +282,7 @@ __sys_interface(nanosleep);
 __sys_interface(clock_nanosleep);
 __sys_interface(time);
 __sys_interface(sched_setscheduler);
+__sys_interface(sched_yield);
 __sys_interface(sysinfo);
 __sys_interface(uname);
 
@@ -300,6 +353,41 @@ __sys_interface(read);
 __sys_interface(readv);
 __sys_interface(write);
 __sys_interface(writev);
+
+/* select/poll */
+__sys_interface(poll);
+__sys_interface(ppoll);
+__sys_interface(select);
+__sys_interface(pselect6);
+
+/* timer (R4) */
+__sys_interface(timer_create);
+__sys_interface(timer_settime);
+__sys_interface(timer_gettime);
+__sys_interface(timer_getoverrun);
+__sys_interface(timer_delete);
+
+/* mq (R10a) */
+__sys_interface(mq_open);
+__sys_interface(mq_unlink);
+__sys_interface(mq_timedsend);
+__sys_interface(mq_timedreceive);
+__sys_interface(mq_notify);
+__sys_interface(mq_getsetattr);
+
+/* ipc (R10b) */
+__sys_interface(msgget);
+__sys_interface(msgsnd);
+__sys_interface(msgrcv);
+__sys_interface(msgctl);
+__sys_interface(semget);
+__sys_interface(semop);
+__sys_interface(semtimedop);
+__sys_interface(semctl);
+__sys_interface(shmget);
+__sys_interface(shmat);
+__sys_interface(shmdt);
+__sys_interface(shmctl);
 
 /* thread */
 __sys_interface(clone);

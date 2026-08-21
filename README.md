@@ -20,16 +20,37 @@ build/tcc-win.exe -platform=linux examples/hello.c  # Linux ELF
 ## 测试
 
 ```bash
-./test.sh              # Windows 编译+运行 (30 测试)
+./test.sh              # Windows 编译+运行 (46 测试)
 ./test.sh -run         # 追加 tcc -run 模式
 ./test.sh -linux       # 追加 Linux (WSL) 测试
 ```
 
-当前 **96/96 通过** (Win 32 + -run 32 + Linux 32)。覆盖 stdio/malloc/mmap/文件/目录/时间/
+当前 **46/46 通过** (test.sh, Windows tcc 自编译运行)。覆盖 stdio/malloc/mmap/文件/目录/时间/
 宽字符/信号/tmp 映射、pthread 全套 (create/join/mutex/cond/barrier/sem/递归锁)、
 线程压力、main 提前退出、tcc -run (含 futex 真阻塞)、ctype/setjmp/regex/search/
-fenv/multibyte/crypt/prng 模块 (t022-t028),以及语言扩展 defer (t029)、
-对象方法 (t030) 与 model 泛型 (t031-t032)。
+fenv/multibyte/crypt/prng 模块 (t022-t028),语言扩展 defer (t029)、
+对象方法 (t030) 与 model 泛型 (t031-t032),以及系统型回归 (t033-t045):
+sched_yield、ENOSYS 兜底、socket、process、statfs/fstatfs、pwd/grp 虚拟 /etc、
+unsupported、select/poll、termios console 映射、dlfcn、timer、mq、System V ipc、aio。
+
+## 系统模块可用性
+
+已实现并通过回归 (详见 docs/system-modules.md):
+
+| 模块 | 状态 |
+|---|---|
+| socket / network | ✅ t035 |
+| process | ✅ t036 |
+| statfs / fstatfs | ✅ t037 |
+| pwd / grp (虚拟 /etc 映射) | ✅ t038 |
+| select / poll | ✅ t040_select_poll |
+| termios console 映射 | ✅ t040_termios (E2E 待真 console) |
+| dlfcn | ✅ t041 |
+| timer | ✅ t042 |
+| mq | ✅ t043 |
+| System V ipc (msg/sem/shm) | ✅ t044 |
+| aio | ✅ t045 (后台线程退出段错误已修复) |
+| ENOSYS 兜底 / sched_yield / env PATH | ✅ t034/t039 / t033 / t008 |
 
 ## 语言扩展
 
@@ -87,14 +108,10 @@ if (max2(double)(2.5, 1.5) != 2.5) ...
 - **`__thread` / `thread_local` 不可用** — TCC x86-64 只生成 `%fs:TPOFF32`
   (initial-exec, fs 基址 = TLS 块末尾),而 Windows fs 固定指向 TEB,无法指向
   musl TLS 块;修需重写 TCC TLS 代码生成 (TEB 槽/dtv),不支持 TLSGD 动态模型。
-- **pty / termios 链路不可用** — psxscl-2015 的 /dev 分派器对 ptmx/pts 显式
-  返回 NOT_FOUND(存根),/dev/tty 需控制终端;tcgetattr 等走 ioctl 的链路
-  无法在 Windows 端验证 (termios 纯函数 cfgetospeed/cfmakeraw 等可用)。
-- **socket / network 不可用** — socket() 返回 EACCES。根因线索:反汇编显示
-  TCC 对 8+ 参数的 stdcall 调用只传 4 寄存器 + 3 栈 = 7 个参数,NtCreateFile
-  (11 参)的后 4 个 (disposition/options/EA) 被静默丢弃 → ntapi v2 AFD 路径
-  zw_create_file 失败;psx 文件 IO 同走 zw_create_file 却正常,待专项验证
-  (疑似 TCC x86-64 stdcall 代码生成缺陷, 修复在 TCC 侧)。
+- **pty 链路不可用** — psxscl-2015 的 /dev 分派器对 ptmx/pts 显式返回
+  NOT_FOUND(存根)。termios console 映射 (TCGETS/TCSETS/TIOCGWINSZ,
+  GetConsoleMode/SetConsoleMode) 已实现并通过 t040, 但本自动化环境无 console,
+  需在真交互终端跑一次 t040 做 E2E 数值确认。
 - **fenv 为 dummy 实现** — nt64 的 fenv.c 注释 "Dummy functions for archs
   lacking fenv implementation",feclearexcept/fetestexcept 等返回 0,真实
   舍入/异常语义不生效 (t026 只测 API 契约)。

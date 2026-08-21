@@ -204,15 +204,26 @@ static int __psx_init_impl(
 	__psx_populate_syscall_vtbl(0);
 	ctx->sys_vtbl = (void ***)__sysvtbl;
 
-	/* token (stub) */
+	/* token (stub)
+	   tcc_posix (R9): __gid/__egid 一并置 1000, 与虚拟 /etc/passwd|group
+	   保持自洽 (getuid/getgid->getpwuid/getgrgid 能查到同一身份). */
 	__psx.__uid  = 1000;
 	__psx.__euid = 1000;
+	__psx.__gid  = 1000;
+	__psx.__egid = 1000;
 
 	/* context */
 	ctx->teb_sys_idx  = wintls_sys_idx;
 	ctx->teb_libc_idx = wintls_libc_idx;
 	ctx->do_global_ctors_fn = __psx_do_global_ctors;
 	ctx->do_global_dtors_fn = __psx_do_global_dtors;
+
+	/* psx_vtbl (R12): musl __unmapself -> __psx_vtbl->unmapself;
+	   musl-nt64 crt_glue.c 据此初始化全局 __psx_vtbl */
+	{
+		extern struct __psx_vtbl * __psx_get_psx_vtbl(void);
+		ctx->psx_vtbl = __psx_get_psx_vtbl();
+	}
 
 	/* virtual mount system */
 	if (rtctx.root.hat && (ctx->options & __PSXOPT_POSIX))

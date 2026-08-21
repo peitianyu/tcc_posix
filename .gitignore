@@ -24,3 +24,6 @@ Desktop.ini
 
 # 测试残留
 *.bin
+
+# IDE 内部目录
+.pi/
