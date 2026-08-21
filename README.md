@@ -25,9 +25,10 @@ build/tcc-win.exe -platform=linux examples/hello.c  # Linux ELF
 ./test.sh -linux       # 追加 Linux (WSL) 测试
 ```
 
-当前 **63/63 通过** (Win 21 + -run 21 + Linux 21)。覆盖 stdio/malloc/mmap/文件/目录/时间/
-宽字符/信号/tmp 映射,及 pthread 全套 (create/join/mutex/cond/barrier/sem/递归锁)、
-线程压力、main 提前退出、tcc -run (含 futex 真阻塞)。
+当前 **84/84 通过** (Win 28 + -run 28 + Linux 28)。覆盖 stdio/malloc/mmap/文件/目录/时间/
+宽字符/信号/tmp 映射、pthread 全套 (create/join/mutex/cond/barrier/sem/递归锁)、
+线程压力、main 提前退出、tcc -run (含 futex 真阻塞),以及 ctype/setjmp/regex/search/
+fenv/multibyte/crypt/prng 模块 (t022-t028)。
 
 ## 已知限制
 

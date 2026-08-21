@@ -70,6 +70,18 @@ find "$MUSL/src" -name '*.c' \
 	xargs -P "${JOBS:-8}" -n "${BATCH:-25}" bash -c 'mkobj "$@"' _ 2>/dev/null | \
 	awk '/^OK:/{ok++} /^FAIL:/{fail++; f=f" "$2} END{print "C: "ok" ok, "fail" fail" f}'
 
+# nt64 架构汇编: setjmp/longjmp (src/setjmp/{setjmp,longjmp}.c 是 0 字节占位,
+# 实现全在 arch 汇编; 其余 arch 汇编符号已由 C 实现提供, 不重复编译避免重定义)
+for f in "$MUSL/src/setjmp/nt64/setjmp.s" "$MUSL/src/setjmp/nt64/longjmp.s"; do
+	rel="${f#$MUSL/src/}"
+	obj="$OUT/musl_${rel//\//_}.o"
+	if "$TCC" $CFLAGS "$f" -o "$obj" 2>"$OUT/.err.${obj##*/}"; then
+		echo "OK: $rel"
+	else
+		echo "FAIL: $rel"; head -3 "$OUT/.err.${obj##*/}" >&2
+	fi
+done
+
 # tcc-win64 大栈帧 chkstk (真实现, 替代 TCC 空桩)
 "$TCC" -c "$MM/arch/nt64/src/chkstk.s" -o "$OUT/chkstk.o" 2>/dev/null || true
 
