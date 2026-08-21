@@ -79,7 +79,7 @@ v.print(args);                        // 调用:自动重写为 Array_print(&v, 
    - 找不到 → 报错 "`Array` has no method `tok`"
 3. **左值要求**:v 必须左值;非左值报错(第一阶段)
 4. **歧义**:字段与重名方法 → 字段优先(标准 C 兼容)
-5. `->` 方法调用:第一阶段不做
+5. **`->` 方法调用**:与 `.` 共享同一解析分支(6169 行 `indir()` 解引用后走相同路径),方法回退分支天然覆盖,顺带支持(`p->func()` → `Array_func(p, args)`)
 
 ### 改动量
 
@@ -119,7 +119,7 @@ tccpp.c ~40 行 + tccgen.c ~300 行,总 ~340 行
 | 阶段 | 新增测试 | 验证点 |
 |------|----------|--------|
 | defer | t029_defer | 单/多 defer 逆序、块级、return 路径、goto 跨块、break/continue、参数快照语义(注册后改值不影响)、与 cleanup 属性共存 |
-| 对象方法 | t030_method | 基本调用、参数传递、self 修改、字段与方法同名歧义、无方法报错 |
+| 对象方法 | t030_method | 基本调用、参数传递、self 修改、`.` 与 `->` 两种调用形式、字段与方法同名歧义、无方法报错 |
 | model | t031_model | struct/union 实例化、多类型参数、嵌套实例化、缓存复用(同类型一致性)、typedef 复用;泛型实例与对象方法配合(`Array(float) a; a.print()`) |
 
 每阶段完成即跑 `test.sh` 全回归(现有 84 测试不受影响——均为新增语法,不触标准 C 路径)。
@@ -128,6 +128,5 @@ tccpp.c ~40 行 + tccgen.c ~300 行,总 ~340 行
 
 - function 泛型(model function,第二阶段)
 - defer 优先级调度(defer_prio,opt.txt 扩展项)
-- `->` 方法调用
 - model 泛型变量(顶层 `model T x`)
 - 矩阵字面量等 opt.txt 其他特性
