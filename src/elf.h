@@ -19,7 +19,8 @@
 #ifndef _ELF_H
 #define	_ELF_H 1
 
-#ifndef _WIN32
+#if !defined(_WIN32) || defined(CONFIG_TCC_MUSL)
+/* musl line: real <inttypes.h> present, PE target still sets _WIN32 */
 #include <inttypes.h>
 #else
 #ifndef __int8_t_defined

@@ -94,8 +94,8 @@ static void rt_exit(rt_frame *f, int code);
 /* defined when included from lib/bt-exe.c */
 #ifndef CONFIG_TCC_BACKTRACE_ONLY
 
-#ifndef _WIN32
-# include <sys/mman.h>
+#if !defined(_WIN32) || defined(CONFIG_TCC_MUSL)
+# include <sys/mman.h>   /* musl line uses mprotect/mmap/munmap for run memory */
 #endif
 
 static int protect_pages(void *ptr, unsigned long length, int mode);
@@ -128,7 +128,7 @@ static void win64_del_function_table(void *);
 #endif
 
 /* use VirtualAlloc() instead of tcc_malloc() */
-#if defined _WIN32 && !defined CONFIG_RUNMEM_VIRTUALALLOC
+#if defined _WIN32 && !defined CONFIG_TCC_MUSL && !defined CONFIG_RUNMEM_VIRTUALALLOC
 # define CONFIG_RUNMEM_VIRTUALALLOC 1
 #endif
 
@@ -204,7 +204,7 @@ ST_FUNC void tcc_run_free(TCCState *s1)
     for ( i = 0; i < s1->nb_loaded_dlls; i++) {
         DLLReference *ref = s1->loaded_dlls[i];
         if ( ref->handle )
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(CONFIG_TCC_MUSL)
             FreeLibrary((HMODULE)ref->handle);
 #else
             dlclose(ref->handle);
@@ -451,7 +451,7 @@ redo:
             }
             if (protect_pages((void*)addr, n, f) < 0)
                 return tcc_error_noabort(
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(CONFIG_TCC_MUSL)
                     "VirtualProtect failed");
 #else
                     "mprotect failed (did you mean to configure --with-selinux?)");
@@ -494,7 +494,7 @@ redo:
 
 static int protect_pages(void *ptr, unsigned long length, int mode)
 {
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(CONFIG_TCC_MUSL)
     static const unsigned char protect[] = {
         PAGE_EXECUTE_READ,
         PAGE_READONLY,
@@ -525,6 +525,20 @@ static int protect_pages(void *ptr, unsigned long length, int mode)
 }
 
 #ifdef _WIN64
+#if defined(CONFIG_TCC_MUSL)
+/* pure musl line: no winapi winnt.h -> no RUNTIME_FUNCTION/RtlAddFunctionTable.
+   unwind info registration is a SEH concern; musl handles crashes via sigaction,
+   so just drop the .pdata registration (no-op). */
+static void *win64_add_function_table(TCCState *s1)
+{
+    s1->uw_pdata = NULL;
+    return NULL;
+}
+static void win64_del_function_table(void *p)
+{
+    (void)p;
+}
+#else
 static void *win64_add_function_table(TCCState *s1)
 {
     void *p = NULL;
@@ -546,6 +560,7 @@ static void win64_del_function_table(void *p)
         RtlDeleteFunctionTable((RUNTIME_FUNCTION*)p);
     }
 }
+#endif
 #endif
 
 static void bt_link(TCCState *s1)
@@ -1280,7 +1295,7 @@ static int rt_error(rt_frame *f, const char *fmt, ...)
 
 /* ------------------------------------------------------------- */
 
-#ifndef _WIN32
+#if !defined(_WIN32) || defined(CONFIG_TCC_MUSL)
 # include <signal.h>
 # ifndef __OpenBSD__
 #  include <sys/ucontext.h>
@@ -1292,7 +1307,14 @@ static int rt_error(rt_frame *f, const char *fmt, ...)
 /* translate from ucontext_t* to internal rt_context * */
 static void rt_getcontext(ucontext_t *uc, rt_frame *rc)
 {
-#if defined _WIN64 && defined __aarch64__
+#if defined(CONFIG_TCC_MUSL) && defined(__x86_64__)
+    /* musl-nt64 delivers a POSIX ucontext_t whose mcontext_t is laid out as
+       the NT x64 CONTEXT: read the named fields (equal to the raw offsets
+       0xf8/0xa0/0x98 used by the VEH path, but from uc_mcontext). */
+    rc->ip = uc->uc_mcontext.uc_rip;
+    rc->fp = uc->uc_mcontext.uc_rbp;
+    rc->sp = uc->uc_mcontext.uc_rsp;
+#elif defined _WIN64 && defined __aarch64__
     rc->ip = uc->Pc;      /* Program Counter */
     rc->fp = uc->Fp;      /* Frame Pointer (X29) */
     rc->sp = uc->Sp;      /* Stack Pointer (X30 is LR, but SP is separate) */
@@ -1390,7 +1412,7 @@ static void rt_getcontext(ucontext_t *uc, rt_frame *rc)
 }
 
 /* ------------------------------------------------------------- */
-#ifndef _WIN32
+#if !defined(_WIN32) || defined(CONFIG_TCC_MUSL)
 /* signal handler for fatal errors */
 static void sig_error(int signum, siginfo_t *siginf, void *puc)
 {

@@ -51,49 +51,60 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #endif
 
 #ifdef _WIN32
-# define WIN32_LEAN_AND_MEAN 1
-# ifndef _WIN32_WINNT
-#  define _WIN32_WINNT 0x502 /* AddVectoredExceptionHandler */
+# ifndef CONFIG_TCC_MUSL
+#  define WIN32_LEAN_AND_MEAN 1
+#  ifndef _WIN32_WINNT
+#   define _WIN32_WINNT 0x502 /* AddVectoredExceptionHandler */
+#  endif
+#  include <windows.h>
 # endif
-# include <windows.h>
-# include <io.h> /* open, close etc. */
-# include <direct.h> /* getcwd */
-# include <malloc.h> /* alloca */
-# ifndef _MSC_VER
+# ifdef CONFIG_TCC_MUSL
+#  include <unistd.h>   /* write, ssize_t ... for the musl-only build */
+#  include <malloc.h>   /* alloca */
 #  include <stdint.h>
-# endif
-# define inline __inline
-# define snprintf _snprintf
-# define vsnprintf _vsnprintf
-# ifndef __GNUC__
-#  define strtold (long double)strtod
-#  define strtof (float)strtod
-#  define strtoll _strtoi64
-#  define strtoull _strtoui64
-# endif
-# ifdef LIBTCC_AS_DLL
-#  define LIBTCCAPI __declspec(dllexport)
-#  define PUB_FUNC LIBTCCAPI
-# endif
-# ifdef _MSC_VER
-#  pragma warning (disable : 4244)  // conversion from 'uint64_t' to 'int', possible loss of data
-#  pragma warning (disable : 4267)  // conversion from 'size_t' to 'int', possible loss of data
-#  pragma warning (disable : 4996)  // The POSIX name for this item is deprecated. Instead, use the ISO C and C++ conformant name
-#  pragma warning (disable : 4018)  // signed/unsigned mismatch
-#  pragma warning (disable : 4146)  // unary minus operator applied to unsigned type, result still unsigned
-#  define ssize_t intptr_t
-#  ifdef _X86_
-#   define __i386__ 1
-#  endif
-#  ifdef _AMD64_
-#   define __x86_64__ 1
+#  include <dlfcn.h>    /* dlopen/dlsym/dlclsoe: psxscl dlfcn resolves via ntdll */
+# else
+#  include <io.h> /* open, close etc. */
+#  include <direct.h> /* getcwd */
+#  include <malloc.h> /* alloca */
+#  ifndef _MSC_VER
+#   include <stdint.h>
 #  endif
 # endif
-# if defined(_M_ARM64) && !defined(__aarch64__)
-#  define __aarch64__ 1
-# endif
-# ifndef va_copy
-#  define va_copy(a,b) a = b
+# ifndef CONFIG_TCC_MUSL
+#  define inline __inline
+#  define snprintf _snprintf
+#  define vsnprintf _vsnprintf
+#  ifndef __GNUC__
+#   define strtold (long double)strtod
+#   define strtof (float)strtod
+#   define strtoll _strtoi64
+#   define strtoull _strtoui64
+#  endif
+#  ifdef LIBTCC_AS_DLL
+#   define LIBTCCAPI __declspec(dllexport)
+#   define PUB_FUNC LIBTCCAPI
+#  endif
+#  ifdef _MSC_VER
+#   pragma warning (disable : 4244)  // conversion from 'uint64_t' to 'int', possible loss of data
+#   pragma warning (disable : 4267)  // conversion from 'size_t' to 'int', possible loss of data
+#   pragma warning (disable : 4996)  // The POSIX name for this item is deprecated. Instead, use the ISO C and C++ conformant name
+#   pragma warning (disable : 4018)  // signed/unsigned mismatch
+#   pragma warning (disable : 4146)  // unary minus operator applied to unsigned type, result still unsigned
+#   define ssize_t intptr_t
+#   ifdef _X86_
+#    define __i386__ 1
+#   endif
+#   ifdef _AMD64_
+#    define __x86_64__ 1
+#   endif
+#  endif
+#  if defined(_M_ARM64) && !defined(__aarch64__)
+#   define __aarch64__ 1
+#  endif
+#  ifndef va_copy
+#   define va_copy(a,b) a = b
+#  endif
 # endif
 #endif
 
@@ -126,7 +137,12 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #ifdef _WIN32
 # define IS_DIRSEP(c) (c == '/' || c == '\\')
 # define IS_ABSPATH(p) (IS_DIRSEP(p[0]) || (p[0] && p[1] == ':' && IS_DIRSEP(p[2])))
-# define PATHCMP stricmp
+# ifdef CONFIG_TCC_MUSL
+/* musl line has no stricmp; case-insensitive (Windows filesystem) compare */
+#  define PATHCMP strcasecmp
+# else
+#  define PATHCMP stricmp
+# endif
 # define PATHSEP ";"
 #else
 # define IS_DIRSEP(c) (c == '/')
@@ -253,7 +269,9 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # define CONFIG_SYSROOT ""
 #endif
 
-#if !defined CONFIG_TCCDIR && !defined _WIN32
+#if !defined CONFIG_TCCDIR && (!defined _WIN32 || defined CONFIG_TCC_MUSL)
+/* musl line: no GetModuleFileNameA -> exe-path discovery unavailable, so the
+   compiler must be told its private dir (build-time -D or -B option) */
 # define CONFIG_TCCDIR "/usr/local/lib/tcc"
 #endif
 
@@ -761,6 +779,7 @@ struct TCCState {
     unsigned char warn_unsupported;
     unsigned char warn_implicit_function_declaration;
     unsigned char warn_discarded_qualifiers;
+    unsigned char warn_nonnull_deref;
     #define WARN_ON  1 /* warning is on (-Woption) */
     unsigned char warn_num; /* temp var for tcc_warning_c() */
 
@@ -1035,6 +1054,8 @@ struct filespec {
                                 dereferencing value */
 #define VT_BOUNDED   0x8000  /* value is bounded. The address of the
                                 bounding function call point is in vc */
+#define VT_MAYNULL  0x2000  /* pointer may be NULL (e.g. allocator return);
+                                warn if dereferenced unchecked (memtrack) */
 /* types */
 #define VT_BTYPE       0x000f  /* mask for basic type */
 #define VT_VOID             0  /* void type */

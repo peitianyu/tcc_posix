@@ -117,12 +117,14 @@ static inline char *config_tccdir_w32(char *path)
 #endif
 
 #ifdef TCC_IS_NATIVE
+#ifndef CONFIG_TCC_MUSL /* musl line has no windows system-dir search (no winapi) */
 static void tcc_add_systemdir(TCCState *s)
 {
     char buf[1000];
     GetSystemDirectoryA(buf, sizeof buf);
     tcc_add_library_path(s, normalize_slashes(buf));
 }
+#endif
 #endif
 /* for tcc -E : On windows (depending on compiler) a FILE*
    must be created by the same module where it is used. */
@@ -491,7 +493,7 @@ PUB_FUNC void tcc_memcheck(int d)
 
 #endif /* MEM_DEBUG */
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(CONFIG_TCC_MUSL)
 # define realpath(file, buf) _fullpath(buf, file, 260)
 #endif
 
@@ -995,8 +997,10 @@ LIBTCCAPI int tcc_set_output_type(TCCState *s, int output_type)
 
 #ifdef TCC_TARGET_PE
 # ifdef TCC_IS_NATIVE
+#  ifndef CONFIG_TCC_MUSL
     /* allow linking with system dll's directly */
     tcc_add_systemdir(s);
+#  endif
 # endif
 
 #elif defined TCC_TARGET_MACHO
@@ -1713,6 +1717,7 @@ static const FlagDef options_W[] = {
     { offsetof(TCCState, warn_unsupported), 0, "unsupported" },
     { offsetof(TCCState, warn_implicit_function_declaration), WD_ALL, "implicit-function-declaration" },
     { offsetof(TCCState, warn_discarded_qualifiers), WD_ALL, "discarded-qualifiers" },
+    { offsetof(TCCState, warn_nonnull_deref), 0, "nonnull-deref" },
     { 0, 0, NULL }
 };
 

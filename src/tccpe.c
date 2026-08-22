@@ -23,7 +23,7 @@
 #define PE_MERGE_DATA 1
 #define PE_PRINT_SECTIONS 0
 
-#ifndef _WIN32
+#if !defined(_WIN32) || defined(CONFIG_TCC_MUSL)
 #define stricmp strcasecmp
 #define strnicmp strncasecmp
 #include <sys/stat.h> /* chmod() */
@@ -961,9 +961,17 @@ static void pe_build_imports(struct pe_info *pe)
 #ifdef TCC_IS_NATIVE
                 if (pe->type == PE_RUN) {
                     if (dllref) {
+#if defined(_WIN32) && defined(CONFIG_TCC_MUSL)
+                        /* pure musl: no LoadLibraryA/GetProcAddress (no winapi).
+                           resolve DLLs at runtime via musl/psxscl dlfcn (ntdll LDR). */
+                        if (!dllref->handle)
+                            dllref->handle = dlopen(dllref->name, RTLD_LAZY);
+                        v = (ADDR3264)dlsym(dllref->handle, ordinal?(char*)0+ordinal:name);
+#else
                         if ( !dllref->handle )
                             dllref->handle = LoadLibraryA(dllref->name);
                         v = (ADDR3264)GetProcAddress(dllref->handle, ordinal?(char*)0+ordinal:name);
+#endif
                     }
                     if (!v)
                         tcc_error_noabort("could not resolve symbol '%s'", name);

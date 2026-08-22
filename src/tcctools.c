@@ -370,7 +370,7 @@ ST_FUNC int tcc_tool_impdef(int argc, char **argv)
     char *p, *q;
     FILE *fp, *op;
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(CONFIG_TCC_MUSL)
     char path[260];
 #endif
 
@@ -415,7 +415,7 @@ usage:
     }
 
     file = infile;
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(CONFIG_TCC_MUSL)
     if (SearchPath(NULL, file, ".dll", sizeof path, path, NULL))
         file = path;
 #endif
@@ -494,7 +494,7 @@ ST_FUNC int tcc_tool_cross(char **argv, int option)
 }
 
 #else
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(CONFIG_TCC_MUSL)
 #include <process.h>
 
 /* - Empty argument or with space/tab (not newline) requires quoting.
@@ -611,7 +611,7 @@ ST_FUNC int tcc_tool_platform(char **argv, const char *platform)
 /* -------------------------------------------------------------- */
 /* enable commandline wildcard expansion (tcc -o x.exe *.c) */
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(CONFIG_TCC_MUSL)
 const int _CRT_glob = 1;
 #ifndef _CRT_glob
 const int _dowildcard = 1;

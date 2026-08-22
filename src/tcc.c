@@ -23,11 +23,12 @@
 #endif
 
 #include "tcc.h"
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(CONFIG_TCC_MUSL)
 #include <process.h>
 #else
 #include <unistd.h>
 #include <sys/wait.h>
+#include <spawn.h>
 #endif
 #if ONE_SOURCE
 # include "libtcc.c"
@@ -286,7 +287,7 @@ static char *default_outputfile(TCCState *s, const char *first_file)
 
 static unsigned getclock_ms(void)
 {
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(CONFIG_TCC_MUSL)
     return GetTickCount();
 #else
     struct timeval tv;
@@ -304,7 +305,7 @@ static char tcc_run_temp_exe_name[64];
 
 static char *tcc_run_temp_name(void)
 {
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(CONFIG_TCC_MUSL)
     snprintf(tcc_run_temp_exe_name, sizeof tcc_run_temp_exe_name,
              "tcc-run-%lu.exe", (unsigned long)GetCurrentProcessId());
 #else
@@ -320,7 +321,43 @@ static char *tcc_run_temp_name(void)
    its exit code; then remove the temp file. */
 static int tcc_run_temp_exe(const char *path, int argc, char **argv)
 {
-#ifdef _WIN32
+#if defined(_WIN32) && defined(CONFIG_TCC_MUSL)
+    {
+        char **nargv, *dp;
+        pid_t pid;
+        int i, st, ret;
+        size_t l;
+        extern char **environ;
+        /* child.main sees argv[0]=temp exe path and the program args from
+           argv[1..] (mirrors what `-run`'s in-memory tcc_run passed to main,
+           where argv[0] is the source). */
+        nargv = tcc_malloc(((size_t)argc + 1) * sizeof(char*));
+        nargv[0] = (char*)path;
+        for (i = 1; i < argc; i++)
+            nargv[i] = argv[i];
+        nargv[argc] = NULL;
+        ret = posix_spawn(&pid, path, NULL, NULL, nargv, environ);
+        tcc_free(nargv);
+        { /* PE also writes `<name>.def` next to the exe; remove it too */
+            l = strlen(path);
+            if (l > 4) {
+                dp = tcc_malloc(l + 1);
+                memcpy(dp, path, l - 4); dp[l - 4] = 0;
+                strcat(dp, ".def");
+                unlink(dp);
+                tcc_free(dp);
+            }
+        }
+        if (ret == 0) {
+            waitpid(pid, &st, 0);
+            unlink(path);
+            return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+        }
+        unlink(path);
+        fprintf(stderr, "tcc: could not run '%s'\n", path);
+        return 127;
+    }
+#elif defined(_WIN32)
     {
         char **nargv;
         int i, ret;
