@@ -68,23 +68,31 @@ build/tcc-win.exe -b -bt hello.c -o hello.exe
 为使 `-run -b` 可用, 现**透明回退**: 自动编译成临时 exe 再运行(边界检查走请求的独立 exe
 路径, 完全正常), 用毕删除, 并透传程序参数与退出码; 故 `-run -b` 现可正常使用。
 
-## TLS (thread-local storage) — 进行中(runtime 已可用)
+## TLS (thread-local storage) — ✅ 已完成
 
-`__thread`/`thread_local`: 编译器侧仍在接入中。当前 `__thread int x;` **编译通过但一访问即段错误**
-(tcc 沿用 Linux x86-64 ABI 的 `%fs` 段前缀访 TLS, 在 Windows/musl-nt64 上无效, 需改为 emutls)。
+`__thread`/`thread_local` 已通过 emutls 完整打通(编译器 + 运行时), 回归 `t047_tls`。
 
-**已完成并验证(提交 6cc6b5c)**: 运行时 emutls 分配器 —— `mmglue/arch/nt64/src/crt_tls.c`
-的 `__emutls_get_address` 由平凡 stub(`pthread_tls+offset`, 不分配)改为**懒分配**: 进程级布局游标给
-每个 `__emutls_object` 分配对齐 offset, 首次访问把 `defval`(初始值) 物化进自管 region(64KiB), 单线程
-语义完整正确、不越界进 musl/psx 内部 TLS 块。已用手工 emutls 对象独立验证(对齐偏移/初始值物化/可写)。
+**设计(runtime, 提交 6cc6b5c 起)**: `musl-nt64/arch/nt64/src/crt_tls.c` 的
+`__emutls_get_address` 为**单线程懒分配器**: 进程级布局游标(初始 `used=1`, 保证
+offset=0 始终是"未分配"哨兵)给每个 `__emutls_object` 分配对齐 offset, 首次访问把
+`defval`(初始值) 物化进自管 region(64KiB), 单线程语义完整正确、不越界进 musl/psx
+内部 TLS 块、多个 TLS 对象互不别名。任何时刻都返回同一地址(offset 持久化)。
 
-**待办(编译器 emutls 生成, 精确接入点)**:
-1. `src/tccgen.c` 约 9979: `__thread` 全局不再放 `.tdata/.tbss`, 改为生成
-   `struct __emutls_object __emutls_v_<name> = { size=T_size, align=T_align, offset=0, defval=&INIT }`;
-2. 为 `__thread` 符号记录其描述符(`Sym` 增一关联字段);
-3. `src/x86_64-gen.c` 的 `%fs` 访点(约 562/573/713/2040): 改为
-   `lea rdi,[rip+__emutls_v_x]; call __emutls_get_address; rax→变量地址`;
-4. 用 `t_tls_base.c`-类探针回归(读/写/取址/数组)。
+**设计(编译器, `src/tccgen.c`)**: `__thread` 全局不再放 `.tdata/.tbss`:
+- 声明期: 在 `.data` 生成 `struct __emutls_object __emutls_v_<name>`
+  `{ size, align, offset=0, defval }`; 对应的 C 符号占据"死占位"section(存初始值)。
+  带初始化的 `__thread`, `defval` 通过 `R_DATA_PTR` 重定位指向占位的初始值拷贝,
+  供运行时首次访问时物化(after `put_extern_sym`)。
+- 标识符引用: 拦截 `VT_TLS` 符号, 生成
+  `rax = __emutls_get_address(&__emutls_v_<name>)`; 标量/结构体设 `[rax]` 为 lvalue
+  (`REG_IRET|VT_LVAL`), 数组则 `REG_IRET`(rax 即基址, 不再二次解引用)。
+- 已知坑: `gfunc_call` 会弹掉函数+参数, 结果需 `vpushi(0)` 占位后填 `REG_IRET`;
+  描述符 offset 用 `tls_desc_ofs>=0` 作哨兵(首个描述符 offset 恰为 0)。
+- 函数内 `__thread` 局部变量按普通自动变量处理(无需 emutls): 自动局部天然
+  per-thread, 不拦截也不报错。
+
+**验证**: `tests/t047_tls.c` 覆盖初始化物化 / 数组 / 复合赋值 / 跨函数 / 取址 /
+结构体 TLS / 多对象不冲突; 全部通过。`bin/tcc.exe tests/t047_tls.c -o t.exe && t.exe`。
 
 详见 docs/system-modules.md。
 

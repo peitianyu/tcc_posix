@@ -24,7 +24,9 @@ void * __emutls_get_address (struct __emutls_object * obj)
 	   (per-thread copies) is out of scope here; within a single thread this
 	   is fully correct and safe. */
 	static char region[1 << 16];   /* 64KiB thread-local area */
-	static size_t used;
+	static size_t used = 1;        /* start at 1: offset 0 stays the
+	                                * "not yet allocated" sentinel, never a
+	                                * valid allocation target */
 
 	if (!obj->offset) {
 		size_t align = ((size_t)obj->align & 0xFFFF);

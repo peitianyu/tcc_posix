@@ -7571,29 +7571,64 @@ special_math_val:
             s = external_global_sym(t, &func_old_type);
         }
 
-        r = s->r;
-        /* A symbol that has a register is a local register variable,
-           which starts out as VT_LOCAL value.  */
-        if ((r & VT_VALMASK) < VT_CONST)
-            r = (r & ~VT_VALMASK) | VT_LOCAL;
-
-        vset(&s->type, r, s->c);
-        /* Point to s as backpointer (even without r&VT_SYM).
-	   Will be used by at least the x86 inline asm parser for
-	   regvars.  */
-	vtop->sym = s;
-
-        if (r & VT_SYM) {
-            vtop->c.i = 0;
-#ifdef TCC_TARGET_PE
-            if (s->a.dllimport) {
-                mk_pointer(&vtop->type);
-                vtop->r |= VT_LVAL;
-                indir();
+        if (s->type.t & VT_TLS) {
+            /* tcc_posix `__thread` -> emutls: the lvalue is
+               *(T*)__emutls_get_address(&__emutls_v_<name>).  The descriptor
+               was emitted at declaration (tccgen decl, VT_TLS branch). */
+            char nbuf[96];
+            Sym *ds, *fn;
+            snprintf(nbuf, sizeof nbuf, "__emutls_v_%s",
+                     get_tok_str(s->v, NULL));
+            ds = sym_find(tok_alloc_const(nbuf));
+            if (!ds)
+                tcc_error("missing emutls descriptor for __thread '%s'",
+                          get_tok_str(s->v, NULL));
+            fn = external_global_sym(tok_alloc_const("__emutls_get_address"),
+                                     &func_old_type);
+            vpushsym(&func_old_type, fn);       /* the function    */
+            vpushsym(&char_pointer_type, ds);   /* arg: &descriptor */
+            gfunc_call(1);                      /* rax = T*         */
+            /* gfunc_call pops func+args; push a fresh slot for the result */
+            vpushi(0);
+            vtop->type = s->type;
+            /* Strip the __thread marker; the storage is already materialized. */
+            vtop->type.t &= ~VT_TLS;
+            if (s->type.t & VT_ARRAY) {
+                /* Array: `rax` IS the per-thread base address, so no VT_LVAL
+                   (the array must not be dereferenced first).  Treated like a
+                   symbol whose address lives in `rax`. */
+                vtop->r = REG_IRET;
+            } else {
+                /* Scalar / struct: `[rax]` is the lvalue. */
+                vtop->r = REG_IRET | VT_LVAL;
             }
+            vtop->c.i = 0;
+            vtop->sym = NULL;
+        } else {
+            r = s->r;
+            /* A symbol that has a register is a local register variable,
+               which starts out as VT_LOCAL value.  */
+            if ((r & VT_VALMASK) < VT_CONST)
+                r = (r & ~VT_VALMASK) | VT_LOCAL;
+
+            vset(&s->type, r, s->c);
+            /* Point to s as backpointer (even without r&VT_SYM).
+               Will be used by at least the x86 inline asm parser for
+               regvars.  */
+            vtop->sym = s;
+
+            if (r & VT_SYM) {
+                vtop->c.i = 0;
+#ifdef TCC_TARGET_PE
+                if (s->a.dllimport) {
+                    mk_pointer(&vtop->type);
+                    vtop->r |= VT_LVAL;
+                    indir();
+                }
 #endif
-        } else if (r == VT_CONST && IS_ENUM_VAL(s->type.t)) {
-            vtop->c.i = s->enum_val;
+            } else if (r == VT_CONST && IS_ENUM_VAL(s->type.t)) {
+                vtop->c.i = s->enum_val;
+            }
         }
         break;
     }
@@ -9825,6 +9860,7 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
     Sym *flexible_array;
     Sym *sym = NULL;
     int saved_nocode_wanted = nocode_wanted;
+    int tls_desc_ofs = -1;  /* data_section offset of the emutls descriptor, or -1 */
 #ifdef CONFIG_TCC_BCHECK
     int bcheck = tcc_state->do_bounds_check && !NODATA_WANTED;
 #endif
@@ -9929,6 +9965,12 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
         size = 0, align = 1;
 
     if ((r & VT_VALMASK) == VT_LOCAL) {
+        CType ltype = *type;
+        /* local __thread: function-locals are already per-thread on the
+           stack, so treat them as a plain automatic variable (no emutls
+           descriptor / no interception). */
+        ltype.t &= ~VT_TLS;
+        type = &ltype;
         sec = NULL;
 #ifdef CONFIG_TCC_BCHECK
         if (bcheck && v) {
@@ -9977,9 +10019,36 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
             while ((tp->t & (VT_BTYPE|VT_ARRAY)) == (VT_PTR|VT_ARRAY))
                 tp = &tp->ref->type;
             if (type->t & VT_TLS) {
-                sec = find_section(tcc_state, has_init ? ".tdata" : ".tbss");
-                sec->sh_flags = SHF_ALLOC | SHF_WRITE | SHF_TLS;
-                sec->sh_type = has_init ? SHT_PROGBITS : SHT_NOBITS;
+                /* tcc_posix: __thread -> emutls.  The C symbol gets a dead
+                   placeholder section (the real per-thread storage is
+                   allocated by the emutls runtime allocator at runtime); we
+                   also emit a `struct __emutls_object` descriptor
+                   { size; align; offset; defval } for it. */
+                sec = bss_section;
+                if (has_init)
+                    sec = data_section;  /* hold the (dead) initializer safely */
+                if (v) {
+                    char nbuf[96];
+                    Sym *ds;
+                    int da;
+                    snprintf(nbuf, sizeof nbuf, "__emutls_v_%s",
+                             get_tok_str(v, NULL));
+                    da = section_add(data_section, 24, 8);
+                    write32le(data_section->data + da + 0, size);    /* size   */
+                    write32le(data_section->data + da + 4, align);   /* align  */
+                    write32le(data_section->data + da + 8, 0);       /* offset
+                                                                        patched by
+                                                                        runtime   */
+                    write32le(data_section->data + da + 12, 0);
+                    write32le(data_section->data + da + 16, 0);      /* defval
+                                                                        patched below
+                                                                        (reloc->init) */
+                    write32le(data_section->data + da + 20, 0);
+                    ds = sym_push(tok_alloc_const(nbuf), &char_pointer_type,
+                                  VT_CONST | VT_SYM, 0);
+                    put_extern_sym(ds, data_section, da, 24);
+                    tls_desc_ofs = da;
+                }
             } else if (tp->t & VT_CONSTANT) {
 		sec = rodata_section;
             } else if (has_init) {
@@ -10009,6 +10078,18 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
             }
             /* update symbol definition */
 	    put_extern_sym(sym, sec, addr, size);
+            if ((type->t & VT_TLS) && tls_desc_ofs >= 0) {
+                /* defval: for an initialized __thread, point the descriptor's
+                   defval field at the (single-thread) initializer copy, which
+                   decl_initializer writes into the placeholder above.  The
+                   runtime materializes *defval into per-thread storage on
+                   first access.  Uninitialized __thread keeps defval = NULL
+                   → zero-init. */
+                if (has_init)
+                    greloca(data_section, sym, tls_desc_ofs + 16,
+                            R_DATA_PTR, 0);
+                tls_desc_ofs = -1;
+            }
         } else {
             /* push global reference */
             vpush_ref(type, sec, addr, size);
