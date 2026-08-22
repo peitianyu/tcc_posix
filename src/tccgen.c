@@ -173,8 +173,6 @@ static int get_temp_local_var(int size,int align,int *r2);
 static void defer_statement(void);
 static void emit_defer_call(struct DeferDesc *dd);
 static void gen_function(Sym *sym);
-static void method_compile_all(void);
-static int method_lookup(int ident);
 static void model_fn_compile_all(void);
 static void cast_error(CType *st, CType *dt);
 static void end_switch(void);
@@ -438,7 +436,6 @@ ST_FUNC int tccgen_compile(TCCState *s1)
     next();
     decl(VT_CONST);
     gen_inline_functions(s1);
-    method_compile_all();   /* 延迟编译方法体 (避免插入函数中途) */
     model_fn_compile_all();  /* 延迟编译 model function 实例 */
     check_vstack();
     /* end of translation unit info */
@@ -4466,257 +4463,6 @@ static int in_range(long long n, int t)
 }
 
 /* ------------------------------------------------------------------------- */
-/* 对象方法 (C++ 式: struct 体内函数定义 = 方法, 隐式 self)                  */
-
-/* 方法定义记录: 收集期保存签名 CType + 方法体 token 流, 编译期重放 */
-typedef struct MethodDef {
-    struct MethodDef *next;
-    int name;              /* 方法名 tok */
-    CType sig;             /* 函数类型 (返回 + 参数链 ref->next, 不含 self) */
-    TokenString *body;     /* 方法体 token 流 (tok_str_alloc, 字段已替换) */
-    Sym *sym;              /* 内部函数符号 */
-    int func_tok;          /* 内部函数名 token (__method_<id>_<名>) */
-} MethodDef;
-
-typedef struct MethodType {
-    struct MethodType *next;
-    Sym *ref;              /* struct 符号 */
-    int id;                /* -1 = 未分配 (收集期), emit 时分配 */
-    MethodDef *methods;    /* 方法链 */
-    int pending;           /* 已挂待编译链 (去重) */
-    struct MethodType *next_pending;  /* 待编译链 */
-} MethodType;
-
-static MethodType *method_types;   /* 方法表: 调用点查 ref → id */
-static int method_id_counter;
-static int method_pending_self;    /* '(' 分支的 self 注入标记 */
-static int tok_self;               /* "self" 标识符 token (惰性分配) */
-/* 待编译方法链表: struct_decl 收集期只注册符号, 方法体编译延迟到
-   文件末尾 (gen_inline_functions 同款机制), 避免在函数中途
-   gen_function 把代码插入正在生成的函数内部 */
-static MethodType *method_pending;
-
-static int method_self_tok(void)
-{
-    if (!tok_self)
-        tok_self = tok_alloc_const("self");
-    return tok_self;
-}
-
-/* 查/建类型的方法表项 (收集期 id = -1, emit 时分配) */
-static MethodType *method_type_get(Sym *ref)
-{
-    MethodType *mt;
-    for (mt = method_types; mt; mt = mt->next)
-        if (mt->ref == ref)
-            return mt;
-    mt = tcc_malloc(sizeof *mt);
-    memset(mt, 0, sizeof *mt);
-    mt->ref = ref;
-    mt->id = -1;
-    mt->next = method_types;
-    method_types = mt;
-    return mt;
-}
-
-/* 调用点: 查类型的方法表 id, 无方法 → -1 */
-static int method_type_id(CType *type)
-{
-    MethodType *mt;
-    if ((type->t & VT_BTYPE) != VT_STRUCT)
-        return -1;
-    for (mt = method_types; mt; mt = mt->next)
-        if (mt->ref == type->ref)
-            return mt->id;
-    return -1;
-}
-
-/* tok 是否为 struct s 已声明字段 (方法前的字段, 收集时替换用) */
-static int method_is_field(Sym *s, int tok)
-{
-    Sym *f;
-    for (f = s->next; f; f = f->next)
-        if ((f->v & ~SYM_FIELD) == tok)
-            return 1;
-    return 0;
-}
-
-/* 收集方法定义 (tok 在方法体 '{' 上): 字段名 → self->字段 替换 + token 流保存 */
-static void method_parse(Sym *s, int name, CType *type1)
-{
-    MethodDef *m = tcc_malloc(sizeof *m);
-    MethodType *mt = method_type_get(s);
-    int depth = 0;
-    int prev_tok = 0;   /* 前一个 token: 遇 . / -> 时字段名不替换 (用户显式 self->x) */
-
-    memset(m, 0, sizeof *m);
-    m->name = name;
-    m->sig = *type1;
-    m->body = tok_str_alloc();
-
-    for (;;) {
-        if (tok == '{') {
-            depth++;
-            tok_str_add_tok(m->body);
-            prev_tok = tok;
-            next();
-            continue;
-        }
-        if (tok == '}') {
-            tok_str_add_tok(m->body);
-            next();
-            if (--depth == 0)
-                break;
-            prev_tok = tok;
-            continue;
-        }
-        if (tok >= TOK_IDENT && method_is_field(s, tok)
-            && prev_tok != '.' && prev_tok != TOK_ARROW) {
-            /* 裸字段名 → self->字段; 显式 self->x / p->x 不替换 */
-            int ftok = tok;
-            tok = method_self_tok();
-            tokc.i = tok;
-            tok_str_add_tok(m->body);
-            tok = TOK_ARROW;
-            tokc.i = 0;
-            tok_str_add_tok(m->body);
-            tok = ftok;
-            tokc.i = ftok;
-        }
-        tok_str_add_tok(m->body);
-        prev_tok = tok;
-        next();
-    }
-    /* 缓冲 token: block() 会消费 '}', gen_function 末尾 next() 再读一个。
-       若流已尽, next() 会读到外部流破坏解析; 追加 ';' 让 next() 停在流内,
-       由循环里的 end_macro() 显式弹出恢复。注意: 不能改全局 tok,
-       直接 tok_str_add2 写入 */
-    {
-        CValue cv;
-        cv.i = 0;
-        tok_str_add2(m->body, ';', &cv);
-    }
-    m->next = mt->methods;
-    mt->methods = m;
-}
-
-/* struct 完成后: 分配 id, 注册内部函数符号 (阶段1), 编译方法体 (阶段2) */
-static void method_emit_all(Sym *s)
-{
-    MethodType *mt = method_type_get(s);
-    MethodDef *m, *m2;
-    AttributeDef ad;
-    int id;
-
-    if (!mt->methods)
-        return;
-    /* 方法名重复检测 */
-    for (m = mt->methods; m; m = m->next)
-        for (m2 = m->next; m2; m2 = m2->next)
-            if (m2->name == m->name)
-                tcc_error("duplicate method '%s'",
-                          get_tok_str(m->name, NULL));
-    id = mt->id;
-    if (id < 0)
-        mt->id = id = method_id_counter++;
-    /* 阶段 1: 符号注册 (self 参数注入 + 内部函数名) */
-    for (m = mt->methods; m; m = m->next) {
-        char buf[128];
-        Sym *self;
-        CType st;
-
-        snprintf(buf, sizeof buf, "__method_%d_%s", id,
-                 get_tok_str(m->name, NULL));
-        m->func_tok = tok_alloc_const(buf);
-        /* self 参数: 类型 = struct 指针, 插到参数链头 */
-        st.t = s->type.t;
-        st.ref = s;
-        mk_pointer(&st);
-        self = tcc_malloc(sizeof *self);
-        memset(self, 0, sizeof *self);
-        self->v = method_self_tok();
-        self->type = st;
-        /* 与 decl() 创建的参数符号一致: 栈参数是 lvalue。
-           gfunc_set_param 对寄存器参数 (byref=0) 只设 c 不设 r */
-        self->r = VT_LOCAL | VT_LVAL;
-        self->next = m->sig.ref->next;
-        self->prev = m->sig.ref;
-        m->sig.ref->next = self;
-        if (self->next)
-            self->next->prev = self;
-        /* 内部函数符号 (static, 编译器合成名) */
-        m->sig.t |= VT_STATIC;
-        memset(&ad, 0, sizeof ad);
-        m->sym = external_sym(m->func_tok, &m->sig, 0, &ad);
-    }
-    /* 阶段 2 延迟: 挂到待编译链, 文件末尾统一编译
-       (直接在此编译会破坏正在生成的函数代码段) */
-    if (!mt->pending) {
-        mt->pending = 1;
-        mt->next_pending = method_pending;
-        method_pending = mt;
-    }
-}
-
-/* 文件末尾: 编译所有待编译方法体 (gen_inline_functions 同款,
-   cur_text_section 切到 text_section, gen_function 自包含) */
-static void method_compile_all(void)
-{
-    MethodType *mt;
-    MethodDef *m;
-
-    for (mt = method_pending; mt; mt = mt->next_pending) {
-        for (m = mt->methods; m; m = m->next) {
-            int save_tok = tok;
-            CValue save_tokc = tokc;
-            begin_macro(m->body, 1);
-            next();
-            /* gen_inline_functions 同款: gen_function 用 cur_text_section */
-            cur_text_section = text_section;
-            /* gen_function 末尾 sym_pop(&local_stack, NULL, 0) 会清空
-               整个局部符号栈: 文件末尾无外层局部变量, 无需隔离 */
-            gen_function(m->sym);
-            end_macro();
-            /* gen_function 末尾 next() 会推进 tok, 恢复外部解析状态 */
-            tok = save_tok;
-            tokc = save_tokc;
-        }
-    }
-    method_pending = NULL;
-}
-
-/* 调用点: v.func(…) 方法回退。tok 已在 '(' 上; 成功 → 注入 self+func, 返回 1 */
-static int method_lookup(int ident)
-{
-    char buf[128];
-    Sym *m;
-    int id = method_type_id(&vtop->type);
-
-    if (id < 0)
-        return 0;
-    snprintf(buf, sizeof buf, "__method_%d_%s", id,
-             get_tok_str(ident, NULL));
-    m = sym_find(tok_alloc(buf, strlen(buf))->tok);
-    if (!m || (m->type.t & VT_BTYPE) != VT_FUNC) {
-        int tv = vtop->type.ref->v & ~SYM_STRUCT;
-        tcc_error("'%s' has no method '%s'",
-                  tv >= SYM_FIRST_ANOM ? "<anonymous struct>"
-                                       : get_tok_str(tv, NULL),
-                  get_tok_str(ident, NULL));
-    }
-    /* self 指针入参 + 函数值压栈 → [func, self] (vtop = self) */
-    gaddrof();
-    mk_pointer(&vtop->type);
-    vset(&m->type, m->r, m->c);
-    vtop->sym = m;
-    if (m->r & VT_SYM)
-        vtop->c.i = 0;
-    vswap();
-    method_pending_self = 1;
-    return 1;
-}
-
-/* ------------------------------------------------------------------------- */
 /* model 泛型 (struct/union 模板, 类型参数替换 + token 重放)                 */
 
 /* 模型定义记录: 模板名 + 类型参数名数组 + 成员声明 token 流 */
@@ -5170,8 +4916,8 @@ static void model_instantiate(CType *type, ModelDef *md)
         tok_str_add2(ts, ';', &cv);
     }
     /* 重放: struct 合成名 { 替换后成员 }; 走标准 struct_decl 布局。
-       struct_decl 内嵌方法时 method_emit_all 会改写局部作用域
-       (gen_function 同款), 完整保存/恢复 (与 method_emit_all 一致) */
+       struct_decl 会改写局部作用域 (gen_function 同款),
+       完整保存/恢复拼装期间被破坏的解析状态 */
     {
         int save_tok = tok;
         CValue save_tokc = tokc;
@@ -5386,7 +5132,7 @@ static int model_function_call(int name, ModelDef *md)
     return 1;
 }
 
-/* 文件末尾: 编译所有待编译函数实例 (与 method_compile_all 同款) */
+/* 文件末尾: 编译所有待编译函数实例 */
 static void model_fn_compile_all(void)
 {
     ModelFn *fn;
@@ -5559,16 +5305,6 @@ do_decl:
                     if (tok != ':') {
 			if (tok != ';')
                             type_decl(&type1, &ad1, &v, TYPE_DIRECT);
-                        if ((type1.t & VT_BTYPE) == VT_FUNC) {
-                            /* C++ 式方法: struct 体内函数定义 */
-                            if (tok != '{')
-                                tcc_error("method '%s' needs a body",
-                                          get_tok_str(v, NULL));
-                            method_parse(s, v, &type1);
-                            if (tok == ';')   /* 方法后可选 ';' */
-                                next();
-                            goto method_member_done;
-                        }
                         if (v == 0) {
                     	    if ((type1.t & VT_BTYPE) != VT_STRUCT)
                         	expect("identifier");
@@ -5654,7 +5390,6 @@ do_decl:
                     skip(',');
                 }
                 skip(';');
-method_member_done: ;
             }
             skip('}');
 	    parse_attribute(&ad);
@@ -5664,7 +5399,6 @@ method_member_done: ;
 	    check_fields(type, 1);
 	    check_fields(type, 0);
             struct_layout(type, &ad);
-            method_emit_all(s);
         }
         if (debug_modes)
             tcc_debug_fix_forw(tcc_state, type);
@@ -7654,15 +7388,6 @@ special_math_val:
             /* expect pointer on structure */
             next();
 	    s = find_field(&vtop->type, tok | SYM_FIELD, &cumofs);
-            if (!s && tok >= TOK_UIDENT) {
-                /* C++ 式方法回退: v.func(…) → __method_<id>_func(&v, …) */
-                int ident = tok;
-                next();
-                if (tok == '(' && method_lookup(ident))
-                    continue;              /* tok = '(' → '(' 分支完成调用 */
-                /* 回退: 恢复成员名, 走原字段报错路径 */
-                s = find_field(&vtop->type, tok, &cumofs);
-            }
             /* add field offset to pointer */
             gaddrof();
             vtop->type = char_pointer_type; /* change type to 'char *' */
@@ -7693,14 +7418,8 @@ special_math_val:
             Sym *sa;
             int nb_args, ret_nregs, ret_align, regsize, variadic;
             TokenString *p, *p2;
-            int method_self = method_pending_self;
 
             /* function call  */
-            if (method_self) {
-                /* 对象方法: 交换使 vtop = func 供类型检查, 下面取回 self */
-                method_pending_self = 0;
-                vswap();
-            }
             if ((vtop->type.t & VT_BTYPE) != VT_FUNC) {
                 /* pointer test (no array accepted) */
                 if ((vtop->type.t & (VT_BTYPE | VT_ARRAY)) == VT_PTR) {
@@ -7719,13 +7438,6 @@ special_math_val:
             next();
             sa = s->next; /* first parameter */
             nb_args = regsize = 0;
-            if (method_self) {
-                /* 还原 [func, self], vtop = self (self 已入参) */
-                vswap();
-                nb_args = 1;
-                if (sa)
-                    sa = sa->next;
-            }
             ret.r2 = VT_CONST;
             /* compute first implicit argument if a structure is returned */
             if ((s->type.t & VT_BTYPE) == VT_STRUCT) {

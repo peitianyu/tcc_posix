@@ -28,8 +28,8 @@ build/tcc-win.exe -platform=linux examples/hello.c  # Linux ELF
 当前 **48/48 通过** (test.sh, Windows tcc 自编译运行)。覆盖 stdio/malloc/mmap/文件/目录/时间/
 宽字符/信号/tmp 映射、pthread 全套 (create/join/mutex/cond/barrier/sem/递归锁)、
 线程压力、main 提前退出、tcc -run (含 futex 真阻塞)、ctype/setjmp/regex/search/
-fenv/multibyte/crypt/prng 模块 (t022-t028),语言扩展 defer (t029)、
-对象方法 (t030)、model 泛型 (t031-t032) 与 model 常量参数 (t032b),
+fenv/multibyte/crypt/prng 模块 (t022-t028),语言扩展 defer (t029) 与
+model 泛型 (t031-t032) 及 model 常量参数 (t032b),
 SIMD 打包 SSE 内建 (t046,v4f/v2d/v4i/v8h/v16b),
 以及系统型回归 (t033-t045):
 sched_yield、ENOSYS 兜底、socket、process、statfs/fstatfs、pwd/grp 虚拟 /etc、
@@ -170,26 +170,6 @@ offset=0 始终是"未分配"哨兵)给每个 `__emutls_object` 分配对齐 off
 { struct File f = open_file("x"); defer f.close(); }
 ```
 
-**对象方法** (t030):C++ 式 —— struct 体内函数定义即方法,无需关键字。隐式 `self`
-参数 (类型 `T*`),方法体可直接引用字段 (编译期替换为 `self->字段`),`v.func()` /
-`ptr->func()` 自动注入 self。方法编译为内部函数 `__method_<id>_<名>` (static),
-查表调用,零运行时开销:
-
-```c
-struct Point {
-    int x, y;
-    int sum(void) { return x + y; }          /* 隐式 self, 直接写字段 */
-    void set(int a, int b) { x = a; y = b; }
-    int combo(int k) { return self->sum() + self->mul(k); }  /* 方法互调 */
-};
-struct Point p = { 3, 4 };
-p.sum();        /* ≡ __method_0_sum(&p) */
-```
-
-已知限制:方法引用的字段须声明在方法之前;方法体局部变量/参数不得与字段同名
-(会被替换为 self->字段);方法间互调须 `self->`;方法必须带函数体;self 为方法
-保留参数名。
-
 **model 泛型** (t031-t032):编译期类型工厂 —— `model` 关键字定义类型/函数模板,
 使用处提供具体类型参数,编译器克隆模板并替换,生成与手写特定类型完全一致的
 零开销代码。struct/union 与 function 两类均支持:
@@ -208,9 +188,9 @@ if (max2(double)(2.5, 1.5) != 2.5) ...
 实现机制:模板定义仅记录 token 流 (不生成代码);实例化时记录实参 token,
 合成内部名 (`Array_float` / `max2_int`) 缓存查重,替换类型参数后重放走标准
 解析 (struct_decl / decl)。函数体延迟到文件末尾编译 (避免插入调用方函数)。
-支持多类型参数、嵌套实例化 (`Array(Box(int))`)、返回类型为模板实例、泛型内
-嵌方法/递归。已知限制:model 模板名与成员/参数名不得重复 (实例化替换会冲突);
-函数模板实参必须是类型 (非类型模板参数不支持);模板内方法引用字段需声明在前。
+支持多类型参数、嵌套实例化 (`Array(Box(int))`)、返回类型为模板实例、泛型内嵌
+结构/递归。已知限制:model 模板名与成员/参数名不得重复 (实例化替换会冲突);
+函数模板实参必须是类型 (非类型模板参数不支持)。
 
 **model 常量参数** (t032b):model 模板的常量(非类型)参数 —— `model struct Mat(T,int R,int C)`、
 `model (int N,T) T f(T a[N])`。编译期把每个常量实参归一化求值(`2+2`→`3`),
