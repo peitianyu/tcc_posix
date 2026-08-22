@@ -60,13 +60,16 @@ musl-only 适配 (`CONFIG_TCC_MUSL` 分支):
 **已知限制 (`-run 模式`)**: `-run -b` 组合存在预遗留崩溃 —— 宿主进程跨镜像调用
 `tcc_add_support()` 进入的 bcheck.o (`__bound_init` 指向合法可执行代码页但入函数即崩),
 自 `-b` 落地前即存在(test.sh 的 `-run` 用例从不带 `-b` 故未暴露); `-run -bt` 正常。
-故 `-b`/`-bt` 建议走独立 exe 路径。进一步定位 (指令级, 已排除 `.bounds` 数据问题):
-空 main 与**仅栈/堆**边界访问的 `-run -b` 均正常 (exit 0); **一旦存在全局/static 数组**即在
-边界检查路径以 `mov rcx,[rcx]` (`48 8b 09`) 解引用近空地址 (rcx≈0x60) 崩溃。宿主侧实测
-`rc->bounds_start` 的 `.bounds` 内容**正确** (如 `[0x1029490, 8]`=全局 g[2], 均落在 -run
-区域), 即非 `.bounds` 重定位问题; 崩溃发生在全局区域登记之后的检查/splay 执行路径, 属
-`-run` 对 bcheck 运行时 (宿主↔镜像交界处的寄存器/栈帧/静态区) 的深水区缺陷, 需专项攻克
-(建议先对照独立 exe 该处生成的代码与 -run 的差异)。`-run -bt` 正常。
+故 `-b`/`-bt` 建议走独立 exe 路径。深入定位 (对照实验, 已系统排除多项假因):
+- **排除 `.bounds` 数据问题**: 宿主实测 `rc->bounds_start` 的全局登记内容正确 (`[0x…,8]`=g[2], 落于 -run 区)。
+- **排除「预加载 .o 静态/内部调用普遍失败」**: 一个普通预加载 .o (static 变量 + static 内联互调) 在 `-run`
+  下完全正常 (`v=42`)。
+- **排除符号解析/宿主→镜像调用**: `tcc_get_symbol("__bound_init")` 返回合法入口 (`55 48 89 e5`), 宿主调用
+  bcheck.o 的 `__bound_ptr_indir4` 正常, 且 `__bound_init` 能进入。
+- **确证**: 崩溃发生在 bcheck.o 的 `__bound_init` 自初始化路径 (getenv/malloc/tree/add_bounds 一带), 且
+  **崩溃点在多次构建间游移**(同一探针时而在 splay_insert 时而在别处, 读 `tree` 为 0x60/0xA0 等不确定值) ——
+  属 `-run` 对「经 `tcc_add_support` 于链接期加入、且带 malloc/静态自举」的运行时的**非确定性内存破坏**,
+  非某一处重定位可安全修补。`-run -bt` 正常; `-run -b` 需专项攻 `-run` 对该运行时的自举/relocation。
 
 **对齐分配缺口已补齐**: 根因是三个函数不在编译器 `-b` 改名集 → 返回块不登记区域、
 越界无检。修复:
