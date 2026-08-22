@@ -35,6 +35,24 @@ SIMD 打包 SSE 内建 (t046,v4f/v2d/v4i/v8h/v16b),
 sched_yield、ENOSYS 兜底、socket、process、statfs/fstatfs、pwd/grp 虚拟 /etc、
 unsupported、select/poll、termios console 映射、dlfcn、timer、mq、System V ipc、aio。
 
+## 调试体验 (-b 边界检查 + -bt 回溯)
+
+编译时加 `-b`(数组/指针/堆越界检查)与 `-bt`(崩溃回溯, 文件:行 + 调用栈),
+让 C 脚本的调试体验接近 Python traceback —— 越界时报 `文件:行: RUNTIME ERROR`
+并附完整调用链:
+
+```bash
+build/tcc-win.exe -b -bt hello.c -o hello.exe
+./hello.exe     # 越界时: probe.c:9: at oob_fn: RUNTIME ERROR: invalid memory access
+                #           probe.c:22: by main
+```
+
+支持的越界检测:全局数组、栈上局部数组、堆 `malloc`、`memcpy`/字符串跨区,
+以及对齐分配 (`posix_memalign` / `aligned_alloc` / `memalign`)。运行时由
+`lib/bcheck.c`(CONFIG_TCC_MUSL 分支, 无 winapi/pthread/dlfcn 依赖)实现,
+`lib/bt-exe.c`/`tccrun.c` 提供基于 NT x64 固定偏移 (Rip=0xf8/Rbp=0xa0/Rsp=0x98)
+的堆栈回溯与向量异常处理。由 `script/build_bt.sh` 生成 `bcheck.o`/`bt-exe.o`/`bt-log.o`。
+
 ## 系统模块可用性
 
 已实现并通过回归 (详见 docs/system-modules.md):

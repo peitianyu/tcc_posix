@@ -1572,10 +1572,18 @@ static void add_init_array_defines(TCCState *s1, const char *section_name)
     } else {
         end_offset = s->data_offset;
     }
+    /* Array-boundary symbols must reflect the true merged section offsets.
+       Older crt/init_array.s defined them as strong symbols at a co-located
+       (trailing) offset, which overrode these and made musl's
+       __libc_start_main() see an empty array (start == end), so constructors
+       never ran.  The crt now leaves the .init_array/.fini_array sections
+       empty, so define the boundaries here with their correct offsets. */
     snprintf(buf, sizeof(buf), "__%s_start", section_name + 1);
-    set_global_sym(s1, buf, s, 0);
+    set_elf_sym(symtab_section, 0, 0,
+                ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0, s->sh_num, buf);
     snprintf(buf, sizeof(buf), "__%s_end", section_name + 1);
-    set_global_sym(s1, buf, s, end_offset);
+    set_elf_sym(symtab_section, end_offset, 0,
+                ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0, s->sh_num, buf);
 }
 
 ST_FUNC void add_array (TCCState *s1, const char *sec, int c)

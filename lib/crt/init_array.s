@@ -1,11 +1,6 @@
+/* Empty .init_array/.fini_array sections.  The boundary symbols
+   (__init_array_start/end, __fini_array_start/end) are emitted by the C
+   linker (tccelf.c:add_init_array_defines) from true merged offsets; see
+   src/posix/musl-nt64/crt/init_array.s for the rationale. */
 .section .init_array,"aw"
-.global __init_array_start
-.global __init_array_end
-__init_array_start:
-__init_array_end:
-
 .section .fini_array,"aw"
-.global __fini_array_start
-.global __fini_array_end
-__fini_array_start:
-__fini_array_end:

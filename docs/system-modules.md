@@ -12,6 +12,56 @@
 t043_mq / t044_ipc),
 当前 **46/46 通过** (test.sh, Windows tcc 自编译运行)。
 
+## R13: `-b` 边界检查 (bcheck.o, musl-only)
+
+移植 `lib/bcheck.c` 为 musl-only 构建 (与 `-bt` 运行时一并由 `script/build_bt.sh`
+编译, `bcheck.o` → `build/win-musl-obj/` + `build/lib/` + `bin/lib/bcheck.o`)。
+`tcc -b` 会把标准库调用重定向到 `__bound_*`, 由 bcheck.o 拦截 malloc/free/memcpy
+并校验数组访问。
+
+musl-only 适配 (`CONFIG_TCC_MUSL` 分支):
+- 禁用 winapi/pthread/dlfcn: `INIT_SEM/WAIT_SEM…` 等同步宏为空, `HAVE_TLS_*`,
+  `HAVE_PTHREAD_CREATE`, `HAVE_CTYPE/ERRNO/SIGNAL/FORK` 全 0。
+- 删除 `<stdatomic.h>` 依赖, `_Atomic` 的 `never_fatal`/`no_checking` 改普通 `int`。
+- **构造函数陷阱**: musl 的 `__libc_start_main` 以 `(void(*)())()` 空参调用
+  `.init_array`, 构造函数里的 `__bound_main_arg` 拿到垃圾 argc/argv
+  (曾 `argc=4592816 argv=0x1000`), 遍历 argv 即访问违规 0xC0000005。
+  修复: `CONFIG_TCC_MUSL` 下不给 `__bound_main_arg` 加 `__attribute__((constructor))`,
+  改由 `crt_glue.c` 声明弱符号 `__bound_main_arg` 并在 `__libc_entry_routine` 里以
+  **真实** argc/argv/envp 显式调用 (`if (__bound_main_arg) __bound_main_arg(...)`)。
+  bcheck.o 自身不带 -b 编译, 其 malloc 直达 musl 真实 malloc, 不会经 `__bound_malloc`
+  递归。
+
+验证 (探针 + `-bt`): 全局越界 `probe_b2` (g[2] 越界写, 命中
+`0x469a28 size 4 outside region 0x469a20..0x469a27`), 栈上局部数组越界 `probe_b3`
+(定位到越界写行)。均输出 `RUNTIME ERROR: invalid memory access` + 完整调用链。(注意:
+`build_bt.sh` 的 `INC` 须为 `musl-nt64/include`, 少 `/include` 时 bcheck.c 找不到 stdlib.h。)
+
+### -b 覆盖矩阵与已知限制 (`probe_b4` 实测)
+
+| 类别 | 探针 case | 结果 |
+|---|---|---|
+| 全局数组越界 | probe_b2 | ✓ 捕获 |
+| 栈局部数组越界 | probe_b3 | ✓ 捕获 |
+| **堆 malloc 越界** | b4 heap (`p[16]` past `malloc(16)`) | ✓ 捕获, rc=255 |
+| **memcpy / 字符串跨区** | b4 memcpy (dest 越界 0x8) | ✓ `invalid pointer ... in memcpy dest` |
+| **posix_memalign** | b4 align | ✓ **已修复** → `__bound_posix_memalign`, rc=255 捕获 |
+| **aligned_alloc** | 同路径 | ✓ `__bound_aligned_alloc`(改名+登记同构, 已编入 bcheck.o) |
+| **memalign** | 同路径 | ✓ `__bound_memalign`(原已在改名集) |
+
+**对齐分配缺口已补齐**: 根因是三个函数不在编译器 `-b` 改名集 → 返回块不登记区域、
+越界无检。修复:
+- `tccdefs_.h`: 把 `posix_memalign`/`aligned_alloc` 加入 `__BOUND` 改名(memalign 原已在
+  `__MAYBE_REDIR` 改名集)。`__BOUND` 生成仅依赖 `__TCC_BCHECK__`(非 -b 为空宏), 不需要
+  额外 TCC_TARGET_PE 守卫(曾加守卫, 因该宏未预定义而不生效)。
+- `lib/bcheck.c`: 新增 `__bound_posix_memalign`/`__bound_aligned_alloc`, 照 `__bound_memalign`
+  登记区域; bcheck.o 未 -b 编译, 内部调用即 musl 真实分配器。
+- 生效需重编 `bcheck.o` 并重建 `build/tcc-win.exe`(tccdefs_ 以字符串内嵌)。
+
+被禁的 `HAVE_CTYPE/ERRNO/SIGNAL/SIGACTION/FORK/TLS_*` 只影响"额外把若干全局符号登记为
+合法区域/动态插桩", 不削弱编译器发射的核心指针/数组/堆校验; 单线程 musl 下可忽略。
+`MALLOC_REDIR=0` 无损: tcc 静态链接靠符号重命名而非 dlsym/dlopen。
+
 ## R11: env 路径变量大小写规范化 (t008)
 
 t008_env 曾 rc=8: `getenv("PATH")` 返回 NULL。根因: Windows 真实环境变量名是

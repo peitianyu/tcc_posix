@@ -20,6 +20,24 @@
 
 #include "tcc.h"
 
+#ifdef CONFIG_TCC_MUSL_STDIO
+/* tcc_posix: when linked into a musl-executable, route stdio to musl,
+   not msvcrt.  msvcrt headers remap stderr->__iob_func()+2, snprintf->
+   _snprintf, vsnprintf->_vsnprintf; their FILE object model is incompatible
+   with musl's, so undo the macro remapping and let these names bind to
+   musl's own stderr/snprintf/vsnprintf/vfprintf/fflush at link time.
+   stdio.h already declares FILE *const stdin/stdout/stderr (the #define
+   stderr->(stderr) self-reference resolves to that extern), so we must NOT
+   redeclare them as `FILE *` — different const-ness is a redefinition error. */
+#undef stdin
+#undef stdout
+#undef stderr
+#undef snprintf
+#undef vsnprintf
+int snprintf(char *s, size_t n, const char *format, ...);
+int vsnprintf(char *s, size_t n, const char *format, va_list arg);
+#endif
+
 /* only native compiler supports -run */
 #ifdef TCC_IS_NATIVE
 
@@ -1228,9 +1246,16 @@ static void rt_getcontext(ucontext_t *uc, rt_frame *rc)
     rc->fp = uc->Fp;      /* Frame Pointer (X29) */
     rc->sp = uc->Sp;      /* Stack Pointer (X30 is LR, but SP is separate) */
 #elif defined _WIN64
-    rc->ip = uc->Rip;
-    rc->fp = uc->Rbp;
-    rc->sp = uc->Rsp;
+    /* musl-nt64: uc is the OS-provided x64 CONTEXT*.  Its layout is defined
+       by NT (winnt.h), NOT by our tcc-compiled windows.h — tcc packs the
+       local struct differently, so `uc->Rip` reads the wrong offset and
+       returns garbage/0.  Read the canonical NT x64 offsets directly. */
+    {
+	unsigned char *ucp = (unsigned char*)uc;
+	rc->ip = *(addr_t*)(ucp + 0xf8); /* Rip  */
+	rc->fp = *(addr_t*)(ucp + 0xa0); /* Rbp  */
+	rc->sp = *(addr_t*)(ucp + 0x98); /* Rsp  */
+    }
 #elif defined _WIN32
     rc->ip = uc->Eip;
     rc->fp = uc->Ebp;

@@ -943,6 +943,18 @@ static void asm_parse_directive(TCCState *s1, int global)
                    GAS does so, too, and musl relies on it. */
                 if (!strcmp(sname, ".init") || !strcmp(sname, ".fini"))
                     flags |= SHF_EXECINSTR;
+                /* tcc_posix: assign the canonical ELF sh_type for the
+                   *array sections, so a hand-written .section .init_array
+                   (crt init_array.s) agrees in type with constructors
+                   promoted to SHT_INIT_ARRAY by tccelf.c:add_array().
+                   Otherwise -bt/-b pushback reports:
+                   "section type conflict: .init_array 01 <> 0e". */
+                if (!strcmp(sname, ".init_array"))
+                    cur_text_section->sh_type = SHT_INIT_ARRAY;
+                else if (!strcmp(sname, ".fini_array"))
+                    cur_text_section->sh_type = SHT_FINI_ARRAY;
+                else if (!strcmp(sname, ".preinit_array"))
+                    cur_text_section->sh_type = SHT_PREINIT_ARRAY;
 	        cur_text_section->sh_flags = flags;
             }
         }

@@ -22,6 +22,14 @@ extern int __libc_start_main(
 	int	argc,
 	char **	argv);
 
+/* tcc_posix: weak hook so `-b` (bcheck.o) can register argv/envp regions with
+   the real argc/argv.  When bcheck.o is not linked the weakly-bound symbol is
+   NULL and this is a no-op; when it is linked, bcheck's __bound_main_arg is
+   NOT a constructor (see lib/bcheck.c CONFIG_TCC_MUSL) and must be called from
+   the one place that owns the true command line. */
+extern void __bound_main_arg(int argc, char **argv, char **envp)
+	__attribute__((weak));
+
 static struct __tls {
 	void *		pad[16/sizeof(void *)];
 	struct pthread	pt;
@@ -75,6 +83,10 @@ void __libc_entry_routine(
 	/* surrogate init/fini arrays */
 	*__init_array_start = ctx.do_global_ctors_fn;
 	*__fini_array_start = ctx.do_global_dtors_fn;
+
+	/* register argv/envp as valid bounds regions (no-op if no -b) */
+	if (__bound_main_arg)
+		__bound_main_arg(argc, argv, envp);
 
 	/* enter libc */
 	__libc_start_main(__main,argc,argv);

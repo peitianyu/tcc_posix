@@ -1299,7 +1299,7 @@ add_section:
         }
         //printf("%08x %05x %08x %s\n", si->sh_addr, si->sh_size, si->pe_flags, s->name);
     }
-#if 0
+#if 1
     for (i = 1; i < nbs; ++i) {
         Section *s = s1->sections[sec_order[i]];
         int type = s->sh_type;

@@ -301,6 +301,8 @@
     "__MAYBE_REDIR(void*,realloc,(void*,__SIZE_TYPE__))\n"
     "__MAYBE_REDIR(void*,calloc,(__SIZE_TYPE__,__SIZE_TYPE__))\n"
     "__MAYBE_REDIR(void*,memalign,(__SIZE_TYPE__,__SIZE_TYPE__))\n"
+    "__BOUND(int,posix_memalign,(void**,__SIZE_TYPE__,__SIZE_TYPE__))\n"
+    "__BOUND(void*,aligned_alloc,(__SIZE_TYPE__,__SIZE_TYPE__))\n"
     "__MAYBE_REDIR(void,free,(void*))\n"
     "__BOTH(void*,alloca,(__SIZE_TYPE__))\n"
     "void*alloca(__SIZE_TYPE__);\n"
