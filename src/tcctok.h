@@ -174,6 +174,105 @@
      DEF(TOK_builtin_return_address, "__builtin_return_address")
      DEF(TOK_builtin_expect, "__builtin_expect")
      DEF(TOK_builtin_unreachable, "__builtin_unreachable")
+     /* SIMD (B1: 内建函数发射打包 SSE 指令) */
+     DEF(TOK_mm_setzero_ps, "_mm_setzero_ps")
+     DEF(TOK_mm_load_ps, "_mm_load_ps")
+     DEF(TOK_mm_store_ps, "_mm_store_ps")
+     DEF(TOK_mm_add_ps, "_mm_add_ps")
+     DEF(TOK_mm_sub_ps, "_mm_sub_ps")
+     DEF(TOK_mm_mul_ps, "_mm_mul_ps")
+     DEF(TOK_mm_div_ps, "_mm_div_ps")
+     /* SIMD double: v2d (2xdouble, pd 指令尾码与 ps 相同 opcode) */
+     DEF(TOK_mm_setzero_pd, "_mm_setzero_pd")
+     DEF(TOK_mm_load_pd, "_mm_load_pd")
+     DEF(TOK_mm_store_pd, "_mm_store_pd")
+     DEF(TOK_mm_add_pd, "_mm_add_pd")
+     DEF(TOK_mm_sub_pd, "_mm_sub_pd")
+     DEF(TOK_mm_mul_pd, "_mm_mul_pd")
+     DEF(TOK_mm_div_pd, "_mm_div_pd")
+     /* SIMD int32: v4i (paddd/psubd/pmulld + 标量 idiv 兜底) */
+     DEF(TOK_mm_setzero_epi32, "_mm_setzero_epi32")
+     DEF(TOK_mm_load_epi32, "_mm_load_epi32")
+     DEF(TOK_mm_store_epi32, "_mm_store_epi32")
+     DEF(TOK_mm_add_epi32, "_mm_add_epi32")
+     DEF(TOK_mm_sub_epi32, "_mm_sub_epi32")
+     DEF(TOK_mm_mul_epi32, "_mm_mul_epi32")
+     DEF(TOK_mm_div_epi32, "_mm_div_epi32")
+     DEF(TOK_mm_div_epu32, "_mm_div_epu32")
+     /* SIMD int16: v8h (paddw/psubw/pmullw + 标量数除法) */
+     DEF(TOK_mm_setzero_epi16, "_mm_setzero_epi16")
+     DEF(TOK_mm_load_epi16, "_mm_load_epi16")
+     DEF(TOK_mm_store_epi16, "_mm_store_epi16")
+     DEF(TOK_mm_add_epi16, "_mm_add_epi16")
+     DEF(TOK_mm_sub_epi16, "_mm_sub_epi16")
+     DEF(TOK_mm_mul_epi16, "_mm_mul_epi16")
+     DEF(TOK_mm_div_epi16, "_mm_div_epi16")
+     DEF(TOK_mm_div_epu16, "_mm_div_epu16")
+     /* SIMD int8: v16b (paddb/psubb + 标量乘法/除法) */
+     DEF(TOK_mm_setzero_epi8, "_mm_setzero_epi8")
+     DEF(TOK_mm_load_epi8, "_mm_load_epi8")
+     DEF(TOK_mm_store_epi8, "_mm_store_epi8")
+     DEF(TOK_mm_add_epi8, "_mm_add_epi8")
+     DEF(TOK_mm_sub_epi8, "_mm_sub_epi8")
+     DEF(TOK_mm_mul_epi8, "_mm_mul_epi8")
+    DEF(TOK_mm_div_epi8, "_mm_div_epi8")
+    DEF(TOK_mm_div_epu8, "_mm_div_epu8")
+    /* ---- SIMD 常用扩展: 位运算 / min/max / sqrt / 比较 / 移位 / 类型转换 ---- */
+    /* float32: 位运算 (andps/orps/xorps/andnps) */
+    DEF(TOK_mm_and_ps, "_mm_and_ps")
+    DEF(TOK_mm_or_ps, "_mm_or_ps")
+    DEF(TOK_mm_xor_ps, "_mm_xor_ps")
+    DEF(TOK_mm_andnot_ps, "_mm_andnot_ps")
+    /* double: 位运算 (andpd/orpd/xorpd/andnpd) */
+    DEF(TOK_mm_and_pd, "_mm_and_pd")
+    DEF(TOK_mm_or_pd, "_mm_or_pd")
+    DEF(TOK_mm_xor_pd, "_mm_xor_pd")
+    DEF(TOK_mm_andnot_pd, "_mm_andnot_pd")
+    /* 128-bit 整型(v4i): 位运算 (pand/por/pxor/pandn) 以 _mm_*_si128 对外 */
+    DEF(TOK_mm_and_si128, "_mm_and_si128")
+    DEF(TOK_mm_or_si128, "_mm_or_si128")
+    DEF(TOK_mm_xor_si128, "_mm_xor_si128")
+    DEF(TOK_mm_andnot_si128, "_mm_andnot_si128")
+    /* float32: min/max (minps/maxps) */
+    DEF(TOK_mm_min_ps, "_mm_min_ps")
+    DEF(TOK_mm_max_ps, "_mm_max_ps")
+    /* double: min/max (minpd/maxpd) */
+    DEF(TOK_mm_min_pd, "_mm_min_pd")
+    DEF(TOK_mm_max_pd, "_mm_max_pd")
+    /* float32/64: sqrt (sqrtps/sqrtpd) */
+    DEF(TOK_mm_sqrt_ps, "_mm_sqrt_ps")
+    DEF(TOK_mm_sqrt_pd, "_mm_sqrt_pd")
+    /* float32: 比较 = 掩码槽 (cmpps, imm 谓词; 全 0/全 F) */
+    DEF(TOK_mm_cmpeq_ps, "_mm_cmpeq_ps")
+    DEF(TOK_mm_cmpneq_ps, "_mm_cmpneq_ps")
+    DEF(TOK_mm_cmplt_ps, "_mm_cmplt_ps")
+    DEF(TOK_mm_cmple_ps, "_mm_cmple_ps")
+    DEF(TOK_mm_cmpgt_ps, "_mm_cmpgt_ps")
+    DEF(TOK_mm_cmpge_ps, "_mm_cmpge_ps")
+    /* double: 比较 (cmppd) */
+    DEF(TOK_mm_cmpeq_pd, "_mm_cmpeq_pd")
+    DEF(TOK_mm_cmpneq_pd, "_mm_cmpneq_pd")
+    DEF(TOK_mm_cmplt_pd, "_mm_cmplt_pd")
+    DEF(TOK_mm_cmple_pd, "_mm_cmple_pd")
+    DEF(TOK_mm_cmpgt_pd, "_mm_cmpgt_pd")
+    DEF(TOK_mm_cmpge_pd, "_mm_cmpge_pd")
+    /* int32: 比较 = 掩码 (pcmpeqd/pcmpgtd) */
+    DEF(TOK_mm_cmpeq_epi32, "_mm_cmpeq_epi32")
+    DEF(TOK_mm_cmplt_epi32, "_mm_cmplt_epi32")
+    DEF(TOK_mm_cmpgt_epi32, "_mm_cmpgt_epi32")
+    /* int32: min/max 有符号/无符号 (pminsd/pmaxsd/pminud/pmaxud, SSE4.1) */
+    DEF(TOK_mm_min_epi32, "_mm_min_epi32")
+    DEF(TOK_mm_max_epi32, "_mm_max_epi32")
+    DEF(TOK_mm_min_epu32, "_mm_min_epu32")
+    DEF(TOK_mm_max_epu32, "_mm_max_epu32")
+    /* int32: 移位 imm (pslld/psrld/psrad) */
+    DEF(TOK_mm_slli_epi32, "_mm_slli_epi32")
+    DEF(TOK_mm_srli_epi32, "_mm_srli_epi32")
+    DEF(TOK_mm_srai_epi32, "_mm_srai_epi32")
+    /* 类型转换: int32<->float32 (cvtdq2ps / cvtps2dq 舍入 / cvttps2dq 截断) */
+    DEF(TOK_mm_cvtepi32_ps, "_mm_cvtepi32_ps")
+    DEF(TOK_mm_cvtps_epi32, "_mm_cvtps_epi32")
+    DEF(TOK_mm_cvttps_epi32, "_mm_cvttps_epi32")
      /*DEF(TOK_builtin_va_list, "__builtin_va_list")*/
 #if defined TCC_TARGET_PE && defined TCC_TARGET_X86_64
      DEF(TOK_builtin_va_start, "__builtin_va_start")

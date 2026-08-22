@@ -457,6 +457,26 @@ git commit -m "feat: model function 泛型 (函数体 token 重放, 实例化调
 
 ## 收尾
 
-- [ ] **全量验证**:`./test.sh && ./test.sh -run && ./test.sh -linux` 三模式全 PASS(win 30 + run 30 + linux 30)
-- [ ] **README 更新**:已知限制移除/新增语言特性说明;测试数 28 → 30/套
-- [ ] **Commit**:`git commit -m "docs: README 更新语言特性 (defer/对象方法/model 泛型)"`
+- [x] **全量验证**:`./test.sh` Windows 模式 48/48 全 PASS(含 t031_model / t032_model_fn / t032b_model_const / t046_simd)
+
+---
+
+## 已完成(追加 2026-08-22)
+
+### model 常量参数(model struct/function 的编译期整型常量参数, B 方案)
+
+**语法:** `model struct Mat(T, int R, int C) { ... }`、`model (int N, T) T vecsum(T a[N]) { ... }`。
+
+实现于 `src/tccgen.c`:
+- `ModelDef` 新增 `param_kind` / `const_tok` 字段,区分类型参数(`MODEL_PARAM_TYPE`)与常量参数(`MODEL_PARAM_CONST`,声明为 `int R`)。
+- `model_decl` 支持解析 `int R` 形式的常量参数声明;非整型类型、无名称参数报错。
+- `model_normalize_const_args`:实例化时对每个常量实参做**归一化求值**(`2+2` → `3`),使等价常量写法的实例共享同一缓存。用独立重放流 `begin_macro` + 显式 `;` 终止符调 `expr_const64`(只读),保存/恢复 `macro_ptr`/`tok`/`tokc`,保证外层解析完全不被扰动。
+- `model_synth_name` 对常量参数按数值合名(去符号后缀),`Mat(float,2+2,3)` 与 `Mat(float,4,3)` 为同一内部类型。
+
+测试:`tests/t032b_model_const.c`(常量尺寸数组成员 `data[R*C]`、`Vec(8)`/`Vec(16)` 尺寸差异、`vecsum(N,T)` 函数泛型、归一化缓存共享、纯常量参数 `rangemax(5)()`)。PASS。
+
+### SIMD 截断转换修复(cvttps2dq)
+
+`CVTTPS2DQ`(截断 float→int)正确前缀是 **F3 0F 5B**,不是 F2(F2 0F 5B 保留,CPU 触发 SIGILL)。修复 `simd_emit_f4i4` 截断分支改用 `gen_v128_f3`,删除错误的 `gen_v128_f2`(及 `tcc.h` 声明)。`cvtps2dq`(舍入)保持 `66 0F 5B`。t046_simd 全 PASS。
+
+- [x] **Commit**:`git commit -m "feat: model 常量参数 (B 方案归一化) + 修复 cvttps2dq F3 前缀"`

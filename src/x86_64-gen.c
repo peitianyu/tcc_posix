@@ -351,6 +351,111 @@ static void gen_modrm32(int opcode, int op_reg, int r, Sym *sym, int c)
     gen_modrm_impl(opcode, 0, op_reg, r, sym, c);
 }
 
+/* SIMD 128-bit (SSE) helper (B1 方案: 值存内存槽, 直接发射打包指令).
+   emits "0F op /r" with the modrm.reg field bound to XMM0, operating on a
+   memory operand described by (r,sym,c) on the value stack.
+     op == 0x28 movaps  (xmm0 <- mem, load)
+     op == 0x29 movaps  (mem <- xmm0, store)
+     op == 0x58/0x5c/0x59/0x5e  addps/subps/mulps/divps (xmm0 <- xmm0 op mem)
+   Only low (non-extended) registers and VT_LOCAL/VT_CONST operands are used,
+   so no REX prefix is ever required before the 0F opcode byte. */
+ST_FUNC void gen_v128(int op, int r, Sym *sym, int c)
+{
+    o(0x0f);                    /* 2-byte opcode prefix */
+    gen_modrm_impl(op, 0, 0, r, sym, c);
+}
+
+/* Packed-integer SSE instruction with mandatory 66 operand prefix
+   (e.g. movdqa/paddd/psubd = "66 0F op /r"). No REX: low reg + VT_LOCAL. */
+ST_FUNC void gen_v128_pi(int op, int r, Sym *sym, int c)
+{
+    o(0x0f66);                  /* 66 prefix + 0F */
+    gen_modrm_impl(op, 0, 0, r, sym, c);
+}
+
+/* SSE4.1 三字节前缀打包指令 (e.g. pmulld = 66 0F 38 40 /r).
+   Only low registers / VT_LOCAL operands are used, so like gen_v128 we never
+   need a REX prefix; we just emit "66 0F 38 op" then the [rbp+off] modrm with
+   the reg field bound to XMM0. */
+ST_FUNC void gen_v128_sse41(int op, int r, Sym *sym, int c)
+{
+    o(0x66); o(0x0f); o(0x38); o(op);   /* mandatory prefixes + opcode */
+    if ((r & VT_VALMASK) == VT_LOCAL) {
+        if (c == (signed char)c) {      /* short reference */
+            o(0x45); g(c);
+        } else {
+            oad(0x85, c);               /* disp32 */
+        }
+    } else {
+        tcc_error("gen_v128_sse41: only VT_LOCAL operand supported");
+    }
+}
+
+/* 通用整型标量除法兜底: SSE 无打包整型除法. 对每个元素把被除数扩展(ESIZE
+   为 1/2 时)或原样(4)装载进 EAX, 除数装载进 ECX, 做 32 位 div/idiv, 存回低
+   字节. 用 ECX 存除数是为了避免 32 位 idivl 直接读内存时吃到相邻元素的高位.
+   us=1 无符号(movzx + xor edx + div), us=0 有符号(movsx + cdq + idiv).
+   ao/bo/dst 都是 16 字节对齐槽的 [rbp+off] 偏移. 调用方须已 save RAX/RDX/RCX. */
+ST_FUNC void gen_vec_div(int esize, int n, int us, int ao, int bo, int dst)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        int aoff = ao + esize*i, boff = bo + esize*i, doff = dst + esize*i;
+        /* 除数 -> ecx (零/符号扩展到 32 位) */
+        if (esize == 1)      { o(0x0f); gen_modrm_impl(us ? 0xb6 : 0xbe, 0, TREG_RCX, VT_LOCAL, NULL, boff); }
+        else if (esize == 2) { o(0x0f); gen_modrm_impl(us ? 0xb7 : 0xbf, 0, TREG_RCX, VT_LOCAL, NULL, boff); }
+        else                   gen_modrm32(0x8b, TREG_RCX, VT_LOCAL, NULL, boff);
+        /* 被除数 -> eax, 再 edx:eax */
+        if (esize == 1)      { o(0x0f); gen_modrm_impl(us ? 0xb6 : 0xbe, 0, TREG_RAX, VT_LOCAL, NULL, aoff); }
+        else if (esize == 2) { o(0x0f); gen_modrm_impl(us ? 0xb7 : 0xbf, 0, TREG_RAX, VT_LOCAL, NULL, aoff); }
+        else                   gen_modrm32(0x8b, TREG_RAX, VT_LOCAL, NULL, aoff);
+        if (us) o(0xd231);              /* xor edx,edx */
+        else     o(0x99);               /* cdq: eax -> edx:eax 符号扩展 */
+        gen_modrm32(0xf7, us ? 6 : 7, TREG_RCX, NULL, 0);   /* div/idiv ecx */
+        /* store 结果低字节: al/ax/eax */
+        if (esize == 1)      gen_modrm32(0x88, 0, VT_LOCAL, NULL, doff);
+        else if (esize == 2) { o(0x66); gen_modrm32(0x89, 0, VT_LOCAL, NULL, doff); }
+        else                 gen_modrm32(0x89, 0, VT_LOCAL, NULL, doff);
+    }
+}
+
+/* 8 位打包乘法兜底: SSE 无 8 位打包乘. mul/imul byte 得 AX=AL*[b], 存 AL.
+   仅 esize=1 使用 (16/32 位走打包 pmullw/pmulld). 商低字节对有无符号一致. */
+ST_FUNC void gen_vec_mul8(int n, int ao, int bo, int dst)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        gen_modrm32(0x8a, 0, VT_LOCAL, NULL, ao + i);   /* mov al,[a+i]  */
+        gen_modrm32(0xf6, 4, VT_LOCAL, NULL, bo + i);   /* mul byte [b+i] -> AX */
+        gen_modrm32(0x88, 0, VT_LOCAL, NULL, dst + i);  /* mov [d+i],al  */
+    }
+}
+
+/* 整型打包位移 I4 的 imm 形式: "66 0F 72 /n ib", modrm 固定 rm=xmm0.
+   调用方须已把源装进 XMM0. modrm 由移位类型决定 (reg 字段):
+   pslld=0xf0 (reg=6), psrld=0xd0 (reg=2), psrad=0xe0 (reg=4).
+   不能直接用 0xd2/0xe2/0xf2 (那是变量计数形式, 计数取自 xmm 寄存器 = 垃圾). */
+ST_FUNC void gen_v128_shift(int modrm, int count)
+{
+    o(0x0f66); o(0x72); o(modrm); g(count);
+}
+
+/* float 打包比较 CMPPS/CMPPD: prefix66=1 用 66(CMPPD) 否则 CMPPS. 发射
+   "0F C2 /r ib". 调用方须已把 src 装进 XMM0, 并负责存槽. imm 为谓词. */
+ST_FUNC void gen_v128_cmp(int prefix66, int imm, int r, Sym *sym, int c)
+{
+    if (prefix66) o(0x0f66); else o(0x0f);
+    gen_modrm_impl(0xc2, 0, 0, r, sym, c);
+    g(imm);
+}
+
+/* F3 前缀打包指令 (e.g. cvttps2dq = F3 0F 5B /r, 截断转换). */
+ST_FUNC void gen_v128_f3(int op, int r, Sym *sym, int c)
+{
+    o(0x0ff3);
+    gen_modrm_impl(op, 0, 0, r, sym, c);
+}
+
 /* load 'r' from value 'sv' */
 void load(int r, SValue *sv)
 {

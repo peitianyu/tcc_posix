@@ -20,16 +20,18 @@ build/tcc-win.exe -platform=linux examples/hello.c  # Linux ELF
 ## 测试
 
 ```bash
-./test.sh              # Windows 编译+运行 (46 测试)
+./test.sh              # Windows 编译+运行 (48 测试)
 ./test.sh -run         # 追加 tcc -run 模式
 ./test.sh -linux       # 追加 Linux (WSL) 测试
 ```
 
-当前 **46/46 通过** (test.sh, Windows tcc 自编译运行)。覆盖 stdio/malloc/mmap/文件/目录/时间/
+当前 **48/48 通过** (test.sh, Windows tcc 自编译运行)。覆盖 stdio/malloc/mmap/文件/目录/时间/
 宽字符/信号/tmp 映射、pthread 全套 (create/join/mutex/cond/barrier/sem/递归锁)、
 线程压力、main 提前退出、tcc -run (含 futex 真阻塞)、ctype/setjmp/regex/search/
 fenv/multibyte/crypt/prng 模块 (t022-t028),语言扩展 defer (t029)、
-对象方法 (t030) 与 model 泛型 (t031-t032),以及系统型回归 (t033-t045):
+对象方法 (t030)、model 泛型 (t031-t032) 与 model 常量参数 (t032b),
+SIMD 打包 SSE 内建 (t046,v4f/v2d/v4i/v8h/v16b),
+以及系统型回归 (t033-t045):
 sched_yield、ENOSYS 兜底、socket、process、statfs/fstatfs、pwd/grp 虚拟 /etc、
 unsupported、select/poll、termios console 映射、dlfcn、timer、mq、System V ipc、aio。
 
