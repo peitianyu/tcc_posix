@@ -68,22 +68,25 @@ build/tcc-win.exe -b -bt hello.c -o hello.exe
 为使 `-run -b` 可用, 现**透明回退**: 自动编译成临时 exe 再运行(边界检查走请求的独立 exe
 路径, 完全正常), 用毕删除, 并透传程序参数与退出码; 故 `-run -b` 现可正常使用。
 
-## TLS (thread-local storage) — 进行中
+## TLS (thread-local storage) — 进行中(runtime 已可用)
 
-`__thread`/`thread_local` 尚未可用, 当前 `__thread int x;` **编译通过但一访问即段错误**(tcc
-沿用 Linux x86-64 ABI 的 `%fs` 段前缀访 TLS, 在 Windows/musl-nt64 上无效)。已确认路线:
+`__thread`/`thread_local`: 编译器侧仍在接入中。当前 `__thread int x;` **编译通过但一访问即段错误**
+(tcc 沿用 Linux x86-64 ABI 的 `%fs` 段前缀访 TLS, 在 Windows/musl-nt64 上无效, 需改为 emutls)。
 
-- **选型**: emutls(与 musl-nt64 自管 TLS 兼容), 不走 PE 硬件 `%gs`+`.tls` 目录。
-- **现状**: musl-nt64 链接的是 `crt_tls.c` 的平凡 `__emutls_get_address`(`pthread_tls + offset`,
-  不分配 offset); midipix 的完整机制是 **PE 命名段 emutls**(由 Windows loader 逐线程映射),
-  但 `tccpe.c` 目前**无 TLS 目录/命名段处理**。
-- **待办**(multi-session):
-  1. 编译器: `__thread` 改为生成 `struct __emutls_object __emutls_v_<name>`(size/align/offset/defval)
-     + `__emutls_get_address(&__emutls_v_<name>)` 调用, 移除 `%fs` 路径;
-  2. 链接器: tccpe 输出 TLS 目录/PE 命名段, 或接口层实现单线程 offset 分配/初始值物化;
-  3. 用 `t_tls_base.c`-类探针回归。
+**已完成并验证(提交 6cc6b5c)**: 运行时 emutls 分配器 —— `mmglue/arch/nt64/src/crt_tls.c`
+的 `__emutls_get_address` 由平凡 stub(`pthread_tls+offset`, 不分配)改为**懒分配**: 进程级布局游标给
+每个 `__emutls_object` 分配对齐 offset, 首次访问把 `defval`(初始值) 物化进自管 region(64KiB), 单线程
+语义完整正确、不越界进 musl/psx 内部 TLS 块。已用手工 emutls 对象独立验证(对齐偏移/初始值物化/可写)。
 
-详见 docs/system-modules.md 的 `-run -b` 一节末尾与 TLS 定位。
+**待办(编译器 emutls 生成, 精确接入点)**:
+1. `src/tccgen.c` 约 9979: `__thread` 全局不再放 `.tdata/.tbss`, 改为生成
+   `struct __emutls_object __emutls_v_<name> = { size=T_size, align=T_align, offset=0, defval=&INIT }`;
+2. 为 `__thread` 符号记录其描述符(`Sym` 增一关联字段);
+3. `src/x86_64-gen.c` 的 `%fs` 访点(约 562/573/713/2040): 改为
+   `lea rdi,[rip+__emutls_v_x]; call __emutls_get_address; rax→变量地址`;
+4. 用 `t_tls_base.c`-类探针回归(读/写/取址/数组)。
+
+详见 docs/system-modules.md。
 
 ## 系统模块可用性
 
