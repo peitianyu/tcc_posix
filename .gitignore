@@ -25,5 +25,8 @@ Desktop.ini
 # 测试残留
 *.bin
 
+# PE 链接副产物 (tcc -impdef/-run 在 cwd 写 <exe>.def)
+*.def
+
 # IDE 内部目录
 .pi/

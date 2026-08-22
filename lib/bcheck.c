@@ -1526,6 +1526,189 @@ pid_t fork(void)
 #if MALLOC_REDIR
 void *malloc(size_t size)
 #else
+/* ---------------- memtrack: runtime heap accounting ---------------- *
+ * Optional heap monitor riding on the -b boundary checker.  Every program
+ * allocation that the __bound_ malloc wrappers intercept is
+ * also counted here: global live / peak / cumulative bytes (category
+ * "heap"), plus a per-call-site table attributing memory to the caller.
+ * Each of the __bound_ allocation wrappers reports its own site here.
+ *
+ * Read the report from your program with calls like
+ *     extern void __mem_report(int);   (arg 1 also prints a leak line)
+ *     extern void __mem_snapshot(void);
+ *     __mem_report(1);
+ *
+ * Site PCs are resolved to file:line via the -bt runtime when linked through
+ * the weak __bt_resolve_addr hook; without -bt they print as raw addresses.
+ * bcheck.o is compiled WITHOUT -b, so this file's own malloc/qsort/etc. calls
+ * go straight to musl's real malloc (never recursing through __bound_*), so
+ * the report itself does not pollute the counters.
+ * -------------------------------------------------------------- */
+#define MEMTRACK_SITES  4096
+#define MEMTRACK_PRINT  16
+#define MEMTRACK_LIVE   8192
+
+typedef struct mem_site {
+    unsigned long long caller;        /* allocation PC (return address)  */
+    unsigned long long alloc_bytes;   /* cumulative bytes allocated      */
+    unsigned long long count;         /* cumulative allocation count     */
+} mem_site;
+
+/* per-live-object record: fast leak both-ends localization. For every still
+ * live allocation we keep its exact pointer + size + allocation PC, so a leak
+ * can report *which* objects leaked and exactly where each was allocated.
+ * Fixed capacity, open array, zero allocation (bcheck runs under a spin lock;
+ * we must not recurse into the malloc wrapper). On overflow individual detail
+ * is dropped but the global counters stay exact. */
+typedef struct mem_live_rec {
+    unsigned long long caller;        /* allocation PC                    */
+    unsigned long long size;          /* exact requested size             */
+    void *ptr;                        /* returned pointer                 */
+} mem_live_rec;
+
+static mem_site mem_sites[MEMTRACK_SITES];
+static mem_live_rec mem_lives[MEMTRACK_LIVE];
+static int nb_mem_sites;
+static int nb_mem_lives;              /* currently tracked live objects   */
+static int mem_lives_full;            /* 1 once the live table overflowed */
+static unsigned long long mem_live;          /* currently live bytes      */
+static unsigned long long mem_live_blocks;   /* live allocation count     */
+static unsigned long long mem_peak;          /* high-water mark of live   */
+static unsigned long long mem_total_alloc;   /* cumulative bytes allocated*/
+static unsigned long long mem_calloc_bytes;  /* cumulative calloc bytes   */
+static int memtrack_enabled = 1;
+
+__attribute__((weak))
+int __bt_resolve_addr(unsigned long long pc, char *buf, unsigned long len);
+
+static void memtrack_alloc(void *ptr, unsigned long long size,
+                           unsigned long long caller)
+{
+    int i;
+
+    if (!memtrack_enabled)
+        return;
+    mem_live += size;
+    mem_live_blocks++;
+    if (mem_live > mem_peak)
+        mem_peak = mem_live;
+    mem_total_alloc += size;
+
+    for (i = 0; i < nb_mem_sites; i++)
+        if (mem_sites[i].caller == caller) {
+            mem_sites[i].alloc_bytes += size;
+            mem_sites[i].count++;
+            break;
+        }
+    if (i == nb_mem_sites && nb_mem_sites < MEMTRACK_SITES) {
+        mem_sites[nb_mem_sites].caller = caller;
+        mem_sites[nb_mem_sites].alloc_bytes = size;
+        mem_sites[nb_mem_sites].count = 1;
+        nb_mem_sites++;
+    }
+
+    if (nb_mem_lives < MEMTRACK_LIVE) {
+        mem_lives[nb_mem_lives].caller = caller;
+        mem_lives[nb_mem_lives].size = size;
+        mem_lives[nb_mem_lives].ptr = ptr;
+        nb_mem_lives++;
+    } else {
+        mem_lives_full = 1;
+    }
+}
+
+static void memtrack_free(void *ptr, unsigned long long size)
+{
+    int i;
+
+    if (!memtrack_enabled)
+        return;
+    if (mem_live_blocks) {
+        mem_live_blocks--;
+        mem_live = (mem_live > size) ? mem_live - size : 0;
+    }
+    for (i = nb_mem_lives - 1; i >= 0; i--)
+        if (mem_lives[i].ptr == ptr) {
+            mem_lives[i] = mem_lives[nb_mem_lives - 1];
+            nb_mem_lives--;
+            return;
+        }
+}
+
+/* print live heap totals and the top allocation sites in file:line */
+__attribute__((dllexport)) void __mem_report(int check_leak)
+{
+    mem_site *copy;
+    char where[192];
+    int i, j, n, shown;
+
+    fprintf(stderr,
+            "\n[tccmem] live %llu bytes / %llu blocks  peak %llu  "
+            "total-alloc %llu  calloc %llu\n",
+            mem_live, mem_live_blocks, mem_peak, mem_total_alloc,
+            mem_calloc_bytes);
+
+    n = nb_mem_sites;
+    if (n == 0) {
+        fprintf(stderr, "[tccmem] no heap allocations tracked\n");
+        return;
+    }
+    copy = (mem_site *) malloc((size_t) n * sizeof (mem_site));
+    if (!copy) {
+        fprintf(stderr, "[tccmem] (report: out of memory)\n");
+        return;
+    }
+    memcpy(copy, mem_sites, (size_t) n * sizeof (mem_site));
+
+    /* insertion-sort descending by cumulative bytes (n is small in practice) */
+    for (i = 1; i < n; i++) {
+        mem_site key = copy[i];
+        j = i - 1;
+        while (j >= 0 && copy[j].alloc_bytes < key.alloc_bytes) {
+            copy[j + 1] = copy[j];
+            j--;
+        }
+        copy[j + 1] = key;
+    }
+
+    shown = (n > MEMTRACK_PRINT) ? MEMTRACK_PRINT : n;
+    fprintf(stderr, "[tccmem] top %d allocation sites of %d:\n", shown, n);
+    for (i = 0; i < shown; i++) {
+        where[0] = 0;
+        if (__bt_resolve_addr)
+            __bt_resolve_addr(copy[i].caller, where, sizeof where);
+        else
+            snprintf(where, sizeof where, "0x%llx", copy[i].caller);
+        fprintf(stderr, "[tccmem]   %10llu bytes  %6llu calls  %s\n",
+                copy[i].alloc_bytes, copy[i].count, where);
+    }
+    free(copy);
+
+    if (check_leak && mem_live_blocks) {
+        fprintf(stderr,
+                "[tccmem] LEAK: %llu bytes still live / %llu blocks  "
+                "(object table tracks %d live object%s%s)\n",
+                mem_live, mem_live_blocks, nb_mem_lives,
+                nb_mem_lives == 1 ? "" : "s",
+                mem_lives_full ? "; detail truncated (overflow)" : "");
+        for (i = 0; i < nb_mem_lives; i++) {
+            where[0] = 0;
+            if (__bt_resolve_addr)
+                __bt_resolve_addr(mem_lives[i].caller, where, sizeof where);
+            else
+                snprintf(where, sizeof where, "0x%llx", mem_lives[i].caller);
+            fprintf(stderr,
+                    "[tccmem]   leak %12llu bytes  live ptr=%p  alloc @ %s\n",
+                    mem_lives[i].size, mem_lives[i].ptr, where);
+        }
+    }
+}
+
+__attribute__((dllexport)) void __mem_snapshot(void)
+{
+    __mem_report(0);
+}
+
 void *__bound_malloc(size_t size, const void *caller)
 #endif
 {
@@ -1564,6 +1747,7 @@ void *__bound_malloc(size_t size, const void *caller)
         }
         POST_SEM ();
     }
+    memtrack_alloc(ptr, size, (unsigned long long) caller);
     return ptr;
 }
 
@@ -1603,6 +1787,7 @@ void *__bound_memalign(size_t align, size_t size, const void *caller)
         }
         POST_SEM ();
     }
+    memtrack_alloc(ptr, size, (unsigned long long) caller);
     return ptr;
 }
 
@@ -1623,6 +1808,7 @@ int __bound_posix_memalign(void **memptr, size_t align, size_t size)
         }
         POST_SEM ();
     }
+    memtrack_alloc(*memptr, size, (unsigned long long) __builtin_return_address(0));
     return ret;
 }
 
@@ -1639,6 +1825,7 @@ void *__bound_aligned_alloc(size_t align, size_t size)
         }
         POST_SEM ();
     }
+    memtrack_alloc(ptr, size, (unsigned long long) __builtin_return_address(0));
     return ptr;
 }
 
@@ -1672,6 +1859,7 @@ void __bound_free(void *ptr, const void *caller)
                 return;
             }
             tree->is_invalid = 1;
+            memtrack_free(ptr, tree->size - 1);
             memset (ptr, 0x5a, tree->size);
             p = free_reuse_list[free_reuse_index];
             free_reuse_list[free_reuse_index] = ptr;
@@ -1710,8 +1898,12 @@ void *__bound_realloc(void *ptr, size_t size, const void *caller)
         WAIT_SEM ();
         INCR_COUNT(bound_realloc_count);
 
-        if (ptr)
+        if (ptr) {
+            tree = splay ((size_t) ptr, tree);
+            if (tree->start == (size_t) ptr)
+                memtrack_free(ptr, tree->size - 1);
             tree = splay_delete ((size_t) ptr, tree);
+        }
         if (new_ptr) {
             tree = splay_insert ((size_t) new_ptr, size ? size : size + 1, tree);
             if (tree && tree->start == (size_t) new_ptr)
@@ -1719,6 +1911,7 @@ void *__bound_realloc(void *ptr, size_t size, const void *caller)
         }
         POST_SEM ();
     }
+    memtrack_alloc(new_ptr, size, (unsigned long long) caller);
     return new_ptr;
 }
 
@@ -1762,6 +1955,8 @@ void *__bound_calloc(size_t nmemb, size_t size)
             POST_SEM ();
         }
     }
+    mem_calloc_bytes += size;
+    memtrack_alloc(ptr, size, (unsigned long long) __builtin_return_address(0));
     return ptr;
 }
 

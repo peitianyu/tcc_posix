@@ -6323,6 +6323,12 @@ ST_FUNC void indir(void)
     }
     if (vtop->r & VT_LVAL)
         gv(RC_INT);
+    /* warn on dereferencing a pointer that may be NULL (allocator return)
+       while the value is still the direct result of the call (same expression) */
+    if ((vtop->r & VT_MAYNULL))
+        tcc_warning_c(warn_nonnull_deref)(
+            "possible NULL pointer dereference (allocator/pointer-returning call); "
+            "NULL-check the value before '%s'", "(*/->/[])");
     vtop->type = *pointed_type(&vtop->type);
     /* Arrays and functions are never lvalues */
     if (!(vtop->type.t & (VT_ARRAY | VT_VLA))
@@ -7827,6 +7833,10 @@ special_math_val:
                 }
                 vsetc(&ret.type, ret.r, &ret.c);
                 vtop->r2 = ret.r2;
+                /* mark direct pointer call returns as possibly-NULL so that a
+                   same-expression dereference (-> * []) warns via -Wnonnull-deref */
+                if ((ret.type.t & VT_BTYPE) == VT_PTR)
+                    vtop->r |= VT_MAYNULL;
 
                 /* handle packed struct return */
                 if (((s->type.t & VT_BTYPE) == VT_STRUCT) && ret_nregs) {

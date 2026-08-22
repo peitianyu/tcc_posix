@@ -96,6 +96,52 @@ offset=0 始终是"未分配"哨兵)给每个 `__emutls_object` 分配对齐 off
 
 详见 docs/system-modules.md。
 
+## 纯 musl 编译器 (零 winapi 依赖)
+
+`bin/tcc.exe` 是用自身按 **CONFIG_TCC_MUSL** 线路自举的纯 musl 编译器:
+代码里所有 winapi 调用 —— 进程 (`_spawnvp`/`GetTickCount`/`GetCurrentProcessId`)、
+内存 (`VirtualAlloc`/`VirtualFree`/`VirtualProtect`)、动态库 (`LoadLibraryA`/
+`GetProcAddress`/`FreeLibrary`)、路径 (`GetModuleFileNameA`/`GetSystemDirectoryA`)、
+异常 (`AddVectoredExceptionHandler`) —— 全部换成 POSIX 对等项, 编译出的 PE **导入表
+为空**, 系统调用经 psxscl→ntdll 直通, 不依赖 msvcrt/kernel32/user32。
+
+| 原生 winapi | musl 等价 |
+|---|---|
+| `_spawnvp` | `posix_spawn` + `waitpid` |
+| `GetTickCount` | `gettimeofday` |
+| `GetCurrentProcessId` / `getpid` | `getpid` |
+| `DeleteFileA` | `unlink` |
+| `VirtualAlloc`/`VirtualFree`/`VirtualProtect` | `mmap`/`munmap`/`mprotect` |
+| `LoadLibraryA`/`GetProcAddress`/`FreeLibrary` | `dlopen`/`dlsym`/`dlclose` (psxscl dlfcn→ntdll LDR) |
+| `GetModuleFileNameA` 定位 tcc 目录 | 编译期 `CONFIG_TCCDIR` 固定 |
+| `GetSystemDirectoryA` | 无 (musl 线路不搜索 windows 系统目录) |
+| `AddVectoredExceptionHandler` (VEH) | `sigaction` (POSIX 信号 + ucontext) |
+| `RtlAddFunctionTable`/`RUNTIME_FUNCTION` | 弃用 (崩溃回溯走 sigaction) |
+| `VirtualQuery` 取模块基址 (bt-exe) | `dlopen(NULL)` |
+
+自举链路 (install.sh `[3/3]`): 用已构建的发行 TCC 以 `-DCONFIG_TCC_MUSL`
+及 `CONFIG_TCCDIR` 重编自身并链 `libc-win.a` (musl libc), 产出即 `bin/tcc.exe`。
+
+## 内存治理 (tcc-own / mmap / arena / esc / memtrack)
+
+运行时内存错误 -- 错配 free、双释、mmap 越界、arena reset/destroy 后悬垂、
+跨函数指针逃逸、泄漏 —— 由 `-b`(bcheck) 在运行时逐类抓取, 细致设计见
+`docs/memory-governance.md`。落到编译器便利层的实现 (全头文件, 无编译器改动):
+
+- **统一销毁入口 `tcc_release` + 归属表 (`lib/tcc-own.h`)**: 每个受管指针登记
+  归属 (裸堆/arena/mmap/ctmem/pool), 统一入口按归属正确销毁或**拒绝并指引**,
+  报错行留 `[memgov]` 前缀。错配 free、双释、对非受管指针 free 在此拦截。
+- **mmap 区域登记 (`lib/tcc-mmap.h`)**: mmap 映射区经弱引用 `__bound_new_region`
+  登记进 bcheck, `-b` 下越界被拦 (普通构建弱符号为 0 不生效)。
+- **arena epoch 核验 (`lib/tcc-arena.h`)**: arena 带 epoch/存活计数, `reset`/`destroy`
+  仍有存活指针即警告; `tcc_arena_check(a, e0)` 声明式核验陈旧指针。
+- **显式逃逸 (`lib/tcc-esc.h`)**: `register(ptr,&slot,"name",epoch)/revoke/check`,
+  reset 后 `check` 打出 "ESCAPED pointer ... still referenced by 'g_slot'"。
+- **memtrack 泄漏明细**: bcheck 内的 `mem_lives` 表逐活体对象记录 (ptr+size+caller),
+  `__mem_report(1)` 逐条列出泄漏对象 (调用点经 `__bt_resolve_addr` 归因为 func@file:line)。
+
+测试: `build/tests/t_own.c`/`t_epoch.c`/`t_esc.c`/`t_refcnt.c` (前两个 `-b` 也跑通)。
+
 ## 系统模块可用性
 
 已实现并通过回归 (详见 docs/system-modules.md):
@@ -199,9 +245,10 @@ v4i r;  _mm_store_ps((float*)&r, _mm_cvttps_epi32(c));  /* 截断 f→i */
 
 ## 已知限制
 
-- **`__thread` / `thread_local` 不可用** — TCC x86-64 只生成 `%fs:TPOFF32`
-  (initial-exec, fs 基址 = TLS 块末尾),而 Windows fs 固定指向 TEB,无法指向
-  musl TLS 块;修需重写 TCC TLS 代码生成 (TEB 槽/dtv),不支持 TLSGD 动态模型。
+- **纯 musl 编译器 (CONFIG_TCC_MUSL)** 走 POSIX 接口, **不含任何 winapi 依赖**:
+  PE 导入表为空, 系统调用经 psxscl→ntdll 直通。代价是 musl 线路无
+  `GetModuleFileNameA` 定位私有目录, `CONFIG_TCCDIR` 需在编译期 `-D` 固定
+  (install.sh 已写好); 无需支持原生 win32 编译。
 - **pty 链路不可用** — psxscl-2015 的 /dev 分派器对 ptmx/pts 显式返回
   NOT_FOUND(存根)。termios console 映射 (TCGETS/TCSETS/TIOCGWINSZ,
   GetConsoleMode/SetConsoleMode) 已实现并通过 t040, 但本自动化环境无 console,
