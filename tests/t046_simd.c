@@ -259,6 +259,29 @@ int main(void)
         check(io2[0]==2 && io2[1]==-3 && io2[2]==3 && io2[3]==4, "cvtps2dq");
     }
 
+    /* ---- 原生运算符 (v4f+v4f 等, 经 gen_op 钩子路由到 simd_gen_op) ---- */
+    {
+        v4f p = av * bv;  _mm_store_ps(o, p);
+        check(o[0]==5.f && o[1]==12.f && o[2]==21.f && o[3]==32.f, "op mul");
+        v4f s = av + bv;  _mm_store_ps(o, s);
+        check(o[0]==6.f && o[1]==8.f && o[2]==10.f && o[3]==12.f, "op add");
+        v4f u = bv - av;  _mm_store_ps(o, u);
+        check(o[0]==4.f && o[1]==4.f && o[2]==4.f && o[3]==4.f, "op sub");
+        v4f dv = bv / av; _mm_store_ps(o, dv);
+        check(fabsf(o[0]-5.f)<1e-5f && fabsf(o[1]-3.f)<1e-5f &&
+              fabsf(o[2]-7.0f/3.f)<1e-5f && fabsf(o[3]-2.f)<1e-5f, "op div");
+
+        v2d d1 = dav + dbv; _mm_store_pd(do2, d1);
+        check(do2[0]==3.5 && do2[1]==7.5, "op dpd add");
+        v2d d2 = dav * dbv; _mm_store_pd(do2, d2);
+        check(do2[0]==3.0 && do2[1]==14.0, "op dpd mul");
+
+        v4i i1 = iav + ibv; _mm_store_epi32(io2, i1);
+        check(io2[0]==12 && io2[1]==0 && io2[2]==37 && io2[3]==44, "op epi add");
+        v4i i2 = iav / ibv; _mm_store_epi32(io2, i2);
+        check(io2[0]==5 && io2[1]==-1 && io2[2]==4 && io2[3]==10, "op epi div");
+    }
+
     if (fails) {
         printf("t046 FAILED (%d)\n", fails);
         return 1;

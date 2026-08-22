@@ -47,6 +47,7 @@
 #include "tcccoff.c"
 #elif defined(TCC_TARGET_X86_64)
 #include "x86_64-gen.c"
+#include "x86_64-simd.c"
 #include "x86_64-link.c"
 #include "i386-asm.c"
 #elif defined(TCC_TARGET_RISCV64)
