@@ -23,6 +23,12 @@
 #endif
 
 #include "tcc.h"
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#include <sys/wait.h>
+#endif
 #if ONE_SOURCE
 # include "libtcc.c"
 #endif
@@ -289,10 +295,85 @@ static unsigned getclock_ms(void)
 #endif
 }
 
+/* ------------------------------------------------------------- */
+/* `-run` + `-b` fallback: the in-memory bound runtime is unreliable in
+   this port (docs/system-modules.md), so transparently compile to a temp
+   executable (bounds checking is healthy on the exe path) and run it. */
+
+static char tcc_run_temp_exe_name[64];
+
+static char *tcc_run_temp_name(void)
+{
+#ifdef _WIN32
+    snprintf(tcc_run_temp_exe_name, sizeof tcc_run_temp_exe_name,
+             "tcc-run-%lu.exe", (unsigned long)GetCurrentProcessId());
+#else
+    snprintf(tcc_run_temp_exe_name, sizeof tcc_run_temp_exe_name,
+             "tcc-run-%d", (int)getpid());
+#endif
+    /* return an owned copy, like default_outputfile(), so nothing later
+       frees a static buffer */
+    return tcc_strdup(tcc_run_temp_exe_name);
+}
+
+/* run the just-produced temp executable with the program's argv; propagate
+   its exit code; then remove the temp file. */
+static int tcc_run_temp_exe(const char *path, int argc, char **argv)
+{
+#ifdef _WIN32
+    {
+        char **nargv;
+        int i, ret;
+        /* child.main sees argv[0]=temp exe path and the program args from
+           argv[1..] (mirrors what `-run`'s in-memory tcc_run passed to main,
+           where argv[0] is the source): the child gets argc elements with
+           nargv[0]=path, nargv[i]=orig argv[i] for i>=1. */
+        nargv = tcc_malloc(((size_t)argc + 1) * sizeof(char*));
+        nargv[0] = (char*)path;
+        for (i = 1; i < argc; i++)
+            nargv[i] = argv[i];
+        nargv[argc] = NULL;
+        ret = _spawnvp(_P_WAIT, path, nargv);
+        tcc_free(nargv);
+        DeleteFileA(path);
+        { /* PE also writes `<name>.def` next to the exe; remove it too */
+            size_t l = strlen(path);
+            if (l > 4) {
+                char *dp = tcc_malloc(l + 1);
+                memcpy(dp, path, l - 4); dp[l - 4] = 0;
+                strcat(dp, ".def");
+                DeleteFileA(dp);
+                tcc_free(dp);
+            }
+        }
+        if (ret < 0) {
+            fprintf(stderr, "tcc: could not run '%s'\n", path);
+            ret = 127;
+        }
+        return ret;
+    }
+#else
+    pid_t pid = fork();
+    if (pid == 0) {
+        extern char **environ;
+        execve(path, argv, environ);
+        _exit(127);
+    } else if (pid > 0) {
+        int st;
+        waitpid(pid, &st, 0);
+        unlink(path);
+        return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+    }
+    unlink(path);
+    return 127;
+#endif
+}
+
 int main(int argc, char **argv)
 {
     TCCState *s, *s1;
     int ret, opt, n = 0, t = 0, done;
+    int boundrun = 0; /* -run -b: run via a temp exe (see below) */
     unsigned start_time = 0, end_time = 0;
     const char *first_file;
     int argc0 = argc;
@@ -358,6 +439,20 @@ redo:
     set_environment(s);
     if (s->output_type == 0)
         s->output_type = TCC_OUTPUT_EXE;
+
+#ifdef CONFIG_TCC_BCHECK
+    /* tcc_posix: the in-memory `-run` bound runtime is unreliable here (see
+       docs/system-modules.md).  Make `-run -b` work by transparently writing a
+       temp exe (bounds checking is healthy on the exe path) and running it.
+       The switch must happen BEFORE tcc_set_output_type so the whole link is
+       done as an exe (mixing MEMORY-setup with exe output corrupts the heap). */
+    if (s->output_type == TCC_OUTPUT_MEMORY && s->do_bounds_check) {
+        s->output_type = TCC_OUTPUT_EXE;
+        if (!s->outfile)
+            s->outfile = tcc_run_temp_name();
+        boundrun = 1;
+    }
+#endif
     ret = tcc_set_output_type(s, s->output_type);
     if (ppfp)
         s->ppfp = ppfp;
@@ -411,6 +506,9 @@ redo:
                 ret = tcc_output_file(s, s->outfile);
             if (!ret && s->gen_deps)
                 gen_makedeps(s, s->outfile, s->deps_outfile);
+            if (boundrun && 0 == ret) { /* -run -b via temp exe */
+                ret = tcc_run_temp_exe(s->outfile, argc, argv);
+            }
         }
     }
 

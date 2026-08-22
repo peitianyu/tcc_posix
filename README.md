@@ -63,8 +63,10 @@ build/tcc-win.exe -b -bt hello.c -o hello.exe
 #   (this is the variable 'g': address 0x46f9a0..0x46f9a8; access overran its end by 4 bytes)
 ```
 
-已知限制:`-run` 模式下的 `-b` 组合存在预遗留的跨镜像调用崩溃(见
-docs/system-modules.md),`-run` 仅打通了 `-bt`;`-b`/`-bt` 请使用独立 exe 路径。
+已知限制:`-run` 与 `-b` 组合在内存执行路径上存在 tcc 深水区缺陷(经 `tcc_add_support`
+链接的 bcheck.o 自举在 `-run` 下会非确定性崩溃, 排查细节见 docs/system-modules.md)。
+为使 `-run -b` 可用, 现**透明回退**: 自动编译成临时 exe 再运行(边界检查走请求的独立 exe
+路径, 完全正常), 用毕删除, 并透传程序参数与退出码; 故 `-run -b` 现可正常使用。
 
 ## 系统模块可用性
 

@@ -57,19 +57,14 @@ musl-only 适配 (`CONFIG_TCC_MUSL` 分支):
 遍历 g_rc 的 esym, 精确匹配 region 起始地址, `STT_OBJECT` 优先)。生效需重编
 `bcheck.o` + `bt-exe.o` 并重建 `build/tcc-win.exe`。
 
-**已知限制 (`-run 模式`)**: `-run -b` 组合存在预遗留崩溃 —— 宿主进程跨镜像调用
-`tcc_add_support()` 进入的 bcheck.o (`__bound_init` 指向合法可执行代码页但入函数即崩),
-自 `-b` 落地前即存在(test.sh 的 `-run` 用例从不带 `-b` 故未暴露); `-run -bt` 正常。
-故 `-b`/`-bt` 建议走独立 exe 路径。深入定位 (对照实验, 已系统排除多项假因):
-- **排除 `.bounds` 数据问题**: 宿主实测 `rc->bounds_start` 的全局登记内容正确 (`[0x…,8]`=g[2], 落于 -run 区)。
-- **排除「预加载 .o 静态/内部调用普遍失败」**: 一个普通预加载 .o (static 变量 + static 内联互调) 在 `-run`
-  下完全正常 (`v=42`)。
-- **排除符号解析/宿主→镜像调用**: `tcc_get_symbol("__bound_init")` 返回合法入口 (`55 48 89 e5`), 宿主调用
-  bcheck.o 的 `__bound_ptr_indir4` 正常, 且 `__bound_init` 能进入。
-- **确证**: 崩溃发生在 bcheck.o 的 `__bound_init` 自初始化路径 (getenv/malloc/tree/add_bounds 一带), 且
-  **崩溃点在多次构建间游移**(同一探针时而在 splay_insert 时而在别处, 读 `tree` 为 0x60/0xA0 等不确定值) ——
-  属 `-run` 对「经 `tcc_add_support` 于链接期加入、且带 malloc/静态自举」的运行时的**非确定性内存破坏**,
-  非某一处重定位可安全修补。`-run -bt` 正常; `-run -b` 需专项攻 `-run` 对该运行时的自举/relocation。
+**`-run -b` 已打通 (临时 exe 回退)**: 内存执行路径对「经 `tcc_add_support` 于链接期加入、且带
+malloc/静态自举」的 bcheck.o 有深水区缺陷(`__bound_init` 自举在 `-run` 下非确定性崩溃, 崩溃点在
+多次构建间游移, 属内存破坏, 非某处重定位可安全修补); 对照实验已排除 `.bounds` 数据、预加载 .o
+静态/内部调用、符号解析/宿主→镜像调用等多类假因。为使 `-run -b` 可用, `tcc.c` 在遇 `-run -b`
+时**透明回退**: 于 `tcc_set_output_type` 之前把输出类型切为 EXE + 临时文件名, 编译链接成临时 exe
+(边界检查在 exe 路径完好), 用 CRT `_spawnvp` 运行之并透传程序参数(argv[1..], argv[0]=临时 exe)与
+退出码, 用毕 `DeleteFile` 清理。注意 `s->outfile` 必须 `tcc_strdup`(否则释放静态缓冲区致堆损坏)。
+`-run -b` 现可用(in-bounds→0, 越界→255 + 变量名/回溯); `-run -bt` 依旧走内存执行正常。
 
 **对齐分配缺口已补齐**: 根因是三个函数不在编译器 `-b` 改名集 → 返回块不登记区域、
 越界无检。修复:
