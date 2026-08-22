@@ -123,6 +123,37 @@ if (max2(double)(2.5, 1.5) != 2.5) ...
 嵌方法/递归。已知限制:model 模板名与成员/参数名不得重复 (实例化替换会冲突);
 函数模板实参必须是类型 (非类型模板参数不支持);模板内方法引用字段需声明在前。
 
+**model 常量参数** (t032b):model 模板的常量(非类型)参数 —— `model struct Mat(T,int R,int C)`、
+`model (int N,T) T f(T a[N])`。编译期把每个常量实参归一化求值(`2+2`→`3`),
+不同拼写共享同一缓存,生成的内部名按**数值**而非文本签名确定:
+
+```c
+model struct Mat(T, int R, int C) { T d[R*C]; };   /* 数值尺寸参数 */
+model (int N, T) T dot(T a[N], T b[N]) { T s = 0; for (int i=0;i<N;i++) s+=a[i]*b[i]; return s; }
+
+Mat(float, 3, 3) m;              /* 实例化: 合成 Mat_float_INT3_INT3 */
+if (dot(3)(double)(a, b) != s)   /* 函数模板: 常量3 + 类型double */
+```
+
+**SIMD 打包内建** (t046):128-bit 向量类型 + 对应 SSE 内建(`_mm_*`),值直接落
+内存槽,内建发射原生打包 SSE 指令:
+
+```c
+typedef void v4f __attribute__((vector_size(16)));   /* 4x float */
+v4f a = { 1,2,3,4 }, b = { 5,6,7,8 };
+v4f c = a + b;                    /* addps (float 无需 66 前缀) */
+v4i r;  _mm_store_ps((float*)&r, _mm_cvttps_epi32(c));  /* 截断 f→i */
+```
+
+类型族 `v4f/v2d/v4i/v8h/v16b`(还有 `v4f2i` 等转 dtype):
+- 向量常量参数/运算/字段都正常,支持与标量混算、转置/抽取 (`_mm_*`)。
+- 打包整型与 double 指令必须带 **66 前缀**(movdqa/paddd 66 0F,movapd/addpd 66 0F),
+  float 的 movaps/addps 无需前缀。
+- 打包整型除法是**符号无关**的技术例外:仅除法区分有无符号
+  (`_mm_div_epu8/16/32` 用 movzx+div,`_mm_div_epi8/16/32` 用 movsx+idiv),
+  add/sub/mul 无论符号位完全一致。8/16-bit 的除法必须在寄存器加载除数
+  (不能 `idivl [mem32]`,否则会读到相邻元素高字节)。
+
 ## 已知限制
 
 - **`__thread` / `thread_local` 不可用** — TCC x86-64 只生成 `%fs:TPOFF32`
