@@ -68,6 +68,23 @@ build/tcc-win.exe -b -bt hello.c -o hello.exe
 为使 `-run -b` 可用, 现**透明回退**: 自动编译成临时 exe 再运行(边界检查走请求的独立 exe
 路径, 完全正常), 用毕删除, 并透传程序参数与退出码; 故 `-run -b` 现可正常使用。
 
+## TLS (thread-local storage) — 进行中
+
+`__thread`/`thread_local` 尚未可用, 当前 `__thread int x;` **编译通过但一访问即段错误**(tcc
+沿用 Linux x86-64 ABI 的 `%fs` 段前缀访 TLS, 在 Windows/musl-nt64 上无效)。已确认路线:
+
+- **选型**: emutls(与 musl-nt64 自管 TLS 兼容), 不走 PE 硬件 `%gs`+`.tls` 目录。
+- **现状**: musl-nt64 链接的是 `crt_tls.c` 的平凡 `__emutls_get_address`(`pthread_tls + offset`,
+  不分配 offset); midipix 的完整机制是 **PE 命名段 emutls**(由 Windows loader 逐线程映射),
+  但 `tccpe.c` 目前**无 TLS 目录/命名段处理**。
+- **待办**(multi-session):
+  1. 编译器: `__thread` 改为生成 `struct __emutls_object __emutls_v_<name>`(size/align/offset/defval)
+     + `__emutls_get_address(&__emutls_v_<name>)` 调用, 移除 `%fs` 路径;
+  2. 链接器: tccpe 输出 TLS 目录/PE 命名段, 或接口层实现单线程 offset 分配/初始值物化;
+  3. 用 `t_tls_base.c`-类探针回归。
+
+详见 docs/system-modules.md 的 `-run -b` 一节末尾与 TLS 定位。
+
 ## 系统模块可用性
 
 已实现并通过回归 (详见 docs/system-modules.md):
