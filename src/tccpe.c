@@ -2209,6 +2209,23 @@ ST_FUNC int pe_output_file(TCCState *s1, const char *filename)
             goto done;
         s1->pe_imagebase = pe.imagebase;
         relocate_sections(s1);
+        /* Fill the `.btsym` section (reserved and referenced by the bt-stub
+           rt_context) with the finalized ELF symtab + string table, so the -b
+           runtime can reverse-lookup the name of an out-of-bounds variable. */
+        if (tcc_bt_sym_sec) {
+            Section *bs = tcc_bt_sym_sec;
+            Section *st = s1->symtab;
+            size_t sf = st->data_offset;
+            size_t tf = st->link->data_offset;
+            size_t cap = bs->data_offset;
+            size_t so = tcc_bt_symc;
+            size_t shin = sf < so ? sf : so;             /* symtab bytes    */
+            size_t tlin = (tf < cap - so) ? tf : (cap - so); /* strtab bytes */
+            memcpy(bs->data, st->data, shin);
+            memset(bs->data + shin, 0, so - shin);       /* zero the rest   */
+            memcpy(bs->data + so, st->link->data, tlin);
+            tcc_bt_sym_sec = NULL;
+        }
         pe.start_addr = (DWORD)
             (get_sym_addr(s1, pe.start_symbol, 1, 1) - pe.imagebase);
         if (s1->nb_errors)

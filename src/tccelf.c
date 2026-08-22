@@ -20,6 +20,12 @@
 
 #include "tcc.h"
 
+/* cross-module hand-off (tccelf -> tccpe) for the `-b` variable-name lookup:
+   `.btsym` holds the finalized ELF symtab + string table of a standalone exe;
+   tccpe.c fills it after relocate_syms() using these two values. */
+Section *tcc_bt_sym_sec;
+addr_t tcc_bt_symc;
+
 /* Define this to get some debug output during relocation processing.  */
 #undef DEBUG_RELOC
 
@@ -1643,9 +1649,10 @@ static void put_ptr(TCCState *s1, Section *s, int offs)
 
 ST_FUNC void tcc_add_btstub(TCCState *s1)
 {
-    Section *s;
+    Section *s, *bt;
     int n, o, *p;
     CString cstr;
+    addr_t symc, cap;
     const char *__rt_info = &"___rt_info"[!s1->leading_underscore];
 
     s = data_section;
@@ -1668,8 +1675,27 @@ ST_FUNC void tcc_add_btstub(TCCState *s1)
         put_ptr(s1, stab_section->link, 0);
     }
 
-    /* skip esym_start/esym_end/elf_str (not loaded) */
-    section_ptr_add(s, 3 * PTR_SIZE);
+    /* esym_start/esym_end/elf_str: a standalone exe embeds a copy of the
+       final ELF symtab and string table in a `.btsym` data section so the
+       -b runtime can reverse-lookup the name of an out-of-bounds variable
+       (the values are filled in by tccpe.c after relocate_syms()).  `-run`
+       fills them from the in-memory symtab (tccrun.c bt_link()); DLLs skip. */
+    bt = NULL;
+    if (s1->output_type == TCC_OUTPUT_EXE) {
+        symc = symtab_section->data_offset;
+        cap = symc + symtab_section->link->data_offset + 4096;
+        bt = new_section(s1, ".btsym", SHT_PROGBITS, SHF_ALLOC | SHF_WRITE);
+        /* reserve the capacity up-front so pe_assign_addresses maps it */
+        section_ptr_add(bt, cap);
+        put_ptr(s1, bt, 0);            /* esym_start = .btsym base */
+        put_ptr(s1, bt, symc);         /* esym_end   = base+symc  */
+        put_ptr(s1, bt, symc);         /* elf_str    = base+symc  */
+        tcc_bt_symc = symc;            /* tell tccpe.c where strtab goes */
+        tcc_bt_sym_sec = bt;           /* and which section to fill */
+    } else {
+        /* skip esym_start/esym_end/elf_str */
+        section_ptr_add(s, 3 * PTR_SIZE);
+    }
 
     if (s1->output_type == TCC_OUTPUT_MEMORY && 0 == s1->dwarf) {
         put_ptr(s1, text_section, 0);

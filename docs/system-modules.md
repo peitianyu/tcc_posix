@@ -48,6 +48,23 @@ musl-only 适配 (`CONFIG_TCC_MUSL` 分支):
 | **posix_memalign** | b4 align | ✓ **已修复** → `__bound_posix_memalign`, rc=255 捕获 |
 | **aligned_alloc** | 同路径 | ✓ `__bound_aligned_alloc`(改名+登记同构, 已编入 bcheck.o) |
 | **memalign** | 同路径 | ✓ `__bound_memalign`(原已在改名集) |
+| **越界反查变量名** | probe_b2 (`g`) / b4 (heap) | ✓ 全局/static 变量名 + 越界字节数; 堆块无符号名不报 |
+
+**越界反查变量名 (全局/static)** 实现: 独立 exe 在 `tcc_add_btstub` 预留一个 `.btsym`
+(SHF_ALLOC data 段, 存放最终 ELF 符号表+字符串表), 地址在 `relocate_syms` 定址后再
+由 `tccpe.c` 填入; rt_context 的 `esym_start/esym_end/elf_str` 指向它。`bcheck.c`
+越界时经弱符号 `tcc_bound_varname(region_start)` 反查命中符号名 (`tccrun.c` 实现,
+遍历 g_rc 的 esym, 精确匹配 region 起始地址, `STT_OBJECT` 优先)。生效需重编
+`bcheck.o` + `bt-exe.o` 并重建 `build/tcc-win.exe`。
+
+**已知限制 (`-run 模式`)**: `-run -b` 组合存在预遗留崩溃 —— 宿主进程跨镜像调用
+`tcc_add_support()` 进入的 bcheck.o (`__bound_init` 指向合法可执行代码页但入函数即崩),
+自 `-b` 落地前即存在(test.sh 的 `-run` 用例从不带 `-b` 故未暴露); `-run -bt` 正常。
+故 `-b`/`-bt` 建议走独立 exe 路径。进一步定位: 该崩溃是**通用**的 —— 连**完全在界内**
+的程序 `-run -b` 也在边界访问路径上以 `mov rcx,[rcx]` (`48 8b 09`)坏指针解引用崩溃
+(fault 落在 `-run` 镜像内、`rsp` 恒定), 与是否越界无关。根因指向 `-run` 内存链接对
+bcheck 运行时对象 (.bind/.bounds 段、跨镜像寄存器/栈交互) 的 relocation/栈帧处理不完整,
+属 tcc `-run` 内部链接器的深水区, 需专项攻坚才可能根治。
 
 **对齐分配缺口已补齐**: 根因是三个函数不在编译器 `-b` 改名集 → 返回块不登记区域、
 越界无检。修复:

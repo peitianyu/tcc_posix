@@ -53,6 +53,19 @@ build/tcc-win.exe -b -bt hello.c -o hello.exe
 `lib/bt-exe.c`/`tccrun.c` 提供基于 NT x64 固定偏移 (Rip=0xf8/Rbp=0xa0/Rsp=0x98)
 的堆栈回溯与向量异常处理。由 `script/build_bt.sh` 生成 `bcheck.o`/`bt-exe.o`/`bt-log.o`。
 
+**越界对象反查变量名**:独立编译的 exe 会把最终 ELF 符号表+字符串表(一个 `.btsym`
+数据段)一并链接进去,`-b` 越界时报错时会把命中的**全局/static 数组变量名**及其
+实际越界字节数一并报出(堆块/栈局部无符号名则不报):
+
+```bash
+./probe_b2.exe
+# BCHECK: 0x46f9a8 (size 4) is outside of the region (0x46f9a0..0x46f9a7)
+#   (this is the variable 'g': address 0x46f9a0..0x46f9a8; access overran its end by 4 bytes)
+```
+
+已知限制:`-run` 模式下的 `-b` 组合存在预遗留的跨镜像调用崩溃(见
+docs/system-modules.md),`-run` 仅打通了 `-bt`;`-b`/`-bt` 请使用独立 exe 路径。
+
 ## 系统模块可用性
 
 已实现并通过回归 (详见 docs/system-modules.md):

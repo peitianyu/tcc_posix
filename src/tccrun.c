@@ -82,6 +82,7 @@ typedef struct rt_frame {
 } rt_frame;
 
 static TCCState *g_s1;
+const char *tcc_bound_varname(void *p, unsigned long long *psz);
 /* semaphore to protect it */
 TCC_SEM(static rt_sem);
 static void rt_wait_sem(void) { WAIT_SEM(&rt_sem); }
@@ -176,8 +177,10 @@ LIBTCCAPI int tcc_relocate(TCCState *s1)
     if (s1->run_ptr)
         exit(tcc_error_noabort("'tcc_relocate()' twice is no longer supported"));
 #ifdef CONFIG_TCC_BACKTRACE
-    if (s1->do_backtrace)
+    if (s1->do_backtrace) {
         tcc_add_symbol(s1, "_tcc_backtrace", _tcc_backtrace); /* for bt-log.c */
+        tcc_add_symbol(s1, "tcc_bound_varname", tcc_bound_varname); /* -b var lookup */
+    }
 #endif
     size = tcc_relocate_ex(s1, NULL, 0);
     if (size < 0)
@@ -704,6 +707,54 @@ static char *rt_elfsym(rt_context *rc, addr_t wanted_pc, addr_t *func_addr)
         }
     }
     return NULL;
+}
+
+/* Reverse-lookup a bounds region start address to a global/static data symbol
+   name, so `-b` out-of-bounds reports can say which variable was hit.  Works
+   whenever the ELF symtab is in memory at run time (tcc -run; the symtab is
+   not embedded in standalone exes, so there it degrades to returning NULL).
+   Returns the symbol name (lives in rc->elf_str) or NULL; writes the symbol
+   size (0 if unknown) to *psz. */
+const char *tcc_bound_varname(void *p, unsigned long long *psz)
+{
+    rt_context *rc;
+    ElfW(Sym) *esym;
+    const char *best = NULL;
+    unsigned long long bsz = 0;
+    addr_t reg = (addr_t)p;
+
+    if (psz)
+        *psz = 0;
+    rt_wait_sem();
+    for (rc = g_rc; rc; rc = rc->next) {
+        if (!rc->elf_str || !rc->esym_start)
+            continue;
+        for (esym = rc->esym_start + 1; esym < rc->esym_end; ++esym) {
+            int type;
+            if (esym->st_shndx == 0)
+                continue; /* undefined: no address */
+            type = ELFW(ST_TYPE)(esym->st_info);
+            if (type == STT_FUNC || type == STT_GNU_IFUNC)
+                continue;
+            if ((addr_t)esym->st_value != reg)
+                continue; /* region must start exactly at the symbol */
+            if (type == STT_OBJECT) {
+                best = rc->elf_str + esym->st_name;
+                bsz = esym->st_size;
+                break;
+            }
+            if (!best) { /* keep first exact match of any other data type */
+                best = rc->elf_str + esym->st_name;
+                bsz = esym->st_size;
+            }
+        }
+        if (best)
+            break;
+    }
+    rt_post_sem();
+    if (psz)
+        *psz = bsz;
+    return best;
 }
 
 typedef struct bt_info

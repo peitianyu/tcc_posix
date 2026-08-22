@@ -470,6 +470,42 @@ static unsigned long long bound_splay_delete;
 #endif
 
 int tcc_backtrace(const char *fmt, ...);
+/* runtime-provided reverse lookup (tccrun.c); absent if the runtime is not
+   linked with the symbol table, in which case the weak default returns NULL */
+__attribute__((weak))
+const char *tcc_bound_varname(void *p, unsigned long long *psz);
+
+static char bound_var_buf[128];
+/* Build a suffix naming the static/global variable that owns the out-of-bounds
+   region, or "" when it can't be identified (heap block, stack local, or a
+   runtime without the in-memory symbol table). */
+static const char *__bound_varinfo(const char *target, const char *region,
+                                   long region_size, long access_size)
+{
+    unsigned long long vsz = 0;
+    const char *vn;
+    unsigned long past;
+
+    if (!tcc_bound_varname)
+        return "";
+    vn = tcc_bound_varname((void *)region, &vsz);
+    if (!vn)
+        return "";
+    /* how many bytes the access overran past the variable's end */
+    past = target + access_size > region + region_size
+         ? (unsigned long)((target + access_size) - (region + region_size)) : 0;
+    if (vsz)
+        snprintf(bound_var_buf, sizeof bound_var_buf,
+                 "\n  (this is the variable '%s': address %p..%p; "
+                 "access overran its end by %lu bytes)",
+                 vn, region, (char *)region + vsz, past);
+    else
+        snprintf(bound_var_buf, sizeof bound_var_buf,
+                 "\n  (this is the variable '%s': address %p; "
+                 "access overran its end by %lu bytes)",
+                 vn, region, past);
+    return bound_var_buf;
+}
 
 /* print a bound error message */
 #define bound_warning(...) \
@@ -615,9 +651,12 @@ void * __bound_ptr_indir ## dsize (void *p, size_t offset)                     \
                        hardware fault and print the *same* backtrace a second  \
                        time via the exception handler. */                      \
                     bound_error("%p (size %d) is outside of the region "       \
-                                "(0x%lx..0x%lx)",                              \
+                                "(0x%lx..0x%lx)%s",                             \
                                 p + offset, dsize, (long)tree->start,          \
-                                (long)(tree->start + tree->size - 1));         \
+                                (long)(tree->start + tree->size - 1),          \
+                                __bound_varinfo((char*)p + offset,             \
+                                                (char*)tree->start,            \
+                                                (long)tree->size, dsize));      \
                 }                                                              \
                 return p + offset;                                             \
             }                                                                  \
