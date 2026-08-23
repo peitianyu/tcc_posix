@@ -322,6 +322,26 @@ musl 是 libc 非语法: Linux+musl 用 clang `--sysroot` 原生; Windows+psxscl
 `.a`+头、另写 clang 驱动(盯 `-femulated-tls` 与 ABI)。完整决策链见
 docs/matrix-library.md 附录 C。
 
+## `@listfile.txt` 编译描述（P0–P2 完整）
+
+`tcc @build.txt` 一条命令做「包管理 + glob 选源 + 编译选择 + 嵌套」:
+
+```c
+%dep user/mathlib            // 包管理: git clone/curl 到 .tcc_cache/, 注入 -I include/-L lib
+src/*.c                      // 终端式通配符展开
+@platform.list               // 嵌套子文件(独立于父 %if 上下文)
+%if @os == win               // 编译选择: @os/@arch/@tcc + 命令行 -D(x == y / x != y)
+  -D_WIN  win.c
+%else
+  -D_POSIX posix.c
+%end
+# 注释
+```
+
+- 复用 TCC 内置 `@file` 响应文件 (src/libtcc.c 增强)。`*.c` 无匹配时原样保留。
+- env 校验等细节见 docs/listfile.md。glob 与 `%dep` 仅在最终 musl 版启用
+  (`#ifdef CONFIG_TCC_MUSL`, 以便外部 BOOT 自举)。
+
 ## 已知限制
 
 - **纯 musl 编译器 (CONFIG_TCC_MUSL)** 走 POSIX 接口, **不含任何 winapi 依赖**:
