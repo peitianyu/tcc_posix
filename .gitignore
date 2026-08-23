@@ -1,6 +1,7 @@
 # 构建产物 (可重建: ./build.sh + ./install.sh)
 bin/
 build/
+build_check/
 
 # 固化 musl 头 (可从 src/posix/musl-1.1.11/include 重建)
 include/
@@ -24,6 +25,8 @@ Desktop.ini
 
 # 测试残留
 *.bin
+# 脱糖产物 (tcc --emit-c 生成, 可重建)
+tests/*.desug.c
 
 # PE 链接副产物 (tcc -impdef/-run 在 cwd 写 <exe>.def)
 *.def
