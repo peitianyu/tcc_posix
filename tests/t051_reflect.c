@@ -12,17 +12,27 @@
 struct Vec3 { float x, y, z; };
 struct Mixed { char c; int i; double d; short s; };
 struct Node { struct Vec3 v; int tag; };
+struct Arr { int vals[4]; struct Vec3 tri[2]; };
+enum Kind { K_A = 1, K_B = 2 };
+struct Ptr { int *p; int n; };
+struct En { enum Kind k; int x; };
 
-/* P2: 通用按反射递归深拷贝 (ssub 让嵌套值字段递归) */
+/* P2: 通用按反射递归深拷贝 (嵌套经 sub; 数组元素为 struct 时逐元素递归) */
 static void refl_copy(char *dst, const char *src, const struct __refl *r)
 {
     int i;
     for (i = 0; i < (int)r->nfield; i++) {
         const struct __refl_field *f = r->fields + i;
-        if (f->sub)
+        if (f->sub && f->count > 1) {           /* 数组元素是 struct: 逐元素递归 */
+            unsigned esz = f->size / f->count;
+            int k;
+            for (k = 0; k < (int)f->count; k++)
+                refl_copy(dst + f->offset + k * esz, src + f->offset + k * esz, f->sub);
+        } else if (f->sub) {                    /* 单值 struct */
             refl_copy(dst + f->offset, src + f->offset, f->sub);
-        else
+        } else {
             memcpy(dst + f->offset, src + f->offset, f->size);
+        }
     }
 }
 
@@ -99,6 +109,35 @@ int main(void)
         memset(&b, 0, sizeof b);
         refl_copy((char *)&b, (const char *)&a, nd);
         if (b.v.x != 4.f || b.v.z != 6.f || b.tag != 42) { puts("FAIL: refl deep copy"); fail = 1; }
+    }
+
+    /* 数组字段: count + 数组元素 struct 的 sub + 深拷贝 */
+    {
+        const struct __refl *ar = (const struct __refl *)__builtin_reflect(struct Arr);
+        const struct __refl_field *fv = &ar->fields[0];
+        const struct __refl_field *ft = &ar->fields[1];
+        if (ar->nfield != 2) { puts("FAIL: Arr nfield"); fail = 1; }
+        if (fv->kind != RE_ARRAY || fv->count != 4 || fv->size != 16 || fv->sub != NULL) { puts("FAIL: Arr vals"); fail = 1; }
+        if (ft->kind != RE_ARRAY || ft->count != 2 || ft->size != 24 || !ft->sub || ft->sub != v3) { puts("FAIL: Arr tri"); fail = 1; }
+        /* 数组深拷贝 (ints 整体 + Vec3[2] 逐元素) */
+        {
+            struct Arr a = { { 1, 2, 3, 4 }, { { 9.f, 8.f, 7.f }, { 6.f, 5.f, 4.f } } };
+            struct Arr b;
+            memset(&b, 0, sizeof b);
+            refl_copy((char *)&b, (const char *)&a, ar);
+            if (b.vals[3] != 4 || b.tri[1].z != 4.f || b.tri[0].y != 8.f) { puts("FAIL: refl array copy"); fail = 1; }
+        }
+    }
+
+    /* 指针 + enum 字段 kind/尺寸 */
+    {
+        const struct __refl *np = (const struct __refl *)__builtin_reflect(struct Ptr);
+        const struct __refl_field *fp = &np->fields[0];
+        const struct __refl *ne = (const struct __refl *)__builtin_reflect(struct En);
+        const struct __refl_field *fe = &ne->fields[0];
+        if (fp->kind != RE_PTR || fp->size != 8 || fp->align != 8 || fp->sub != NULL) { puts("FAIL: Ptr.p kind"); fail = 1; }
+        if (fe->kind != RE_ENUM || fe->size != 4 || fe->sub != NULL) { puts("FAIL: En.k enum"); fail = 1; }
+        if (((const struct __refl *)__builtin_reflect(enum Kind))->kind != RE_ENUM) { puts("FAIL: Kind enum kind"); fail = 1; }
     }
 
     if (fail) { puts("FAIL: t051_reflect"); return 1; }

@@ -31,7 +31,8 @@ typedef struct __refl_field {
     unsigned offset;
     unsigned size;
     unsigned align;
-    const struct __refl *sub;   /* 嵌套 struct/union 值字段的子表; 无则 NULL */
+    const struct __refl *sub;   /* 值字段是 struct 或数组元素是 struct 时的子表; 无则 NULL */
+    unsigned count;             /* 数组字段的元素个数; 非数组为 0 */
 } __refl_field;
 
 typedef struct __refl {

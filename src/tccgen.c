@@ -6455,6 +6455,10 @@ enum { RE_STRUCT=1, RE_UNION, RE_PTR, RE_INT, RE_FLOAT, RE_LLONG, RE_BYTE,
 
 static int refl_kind(CType *t)
 {
+    if (IS_ENUM(t->t))            /* 枚举以高位 VT_ENUM 标记, 基础类型位是整型 */
+        return RE_ENUM;
+    if (t->t & VT_ARRAY)          /* 数组以 VT_ARRAY flag 标记, 基础类型位是元素类型 */
+        return RE_ARRAY;
     switch (t->t & VT_BTYPE) {
     case VT_BYTE:    return RE_BYTE;
     case VT_SHORT:   return RE_SHORT;
@@ -6479,8 +6483,9 @@ static void refl_put32(unsigned char *p, int v)
     p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
 }
 
-/* __refl_field 记录 = 32B: name(8) kind/offset/size/align(4*4) sub(8); 超字段截断上限 */
-#define REFL_FLDSZ 32
+/* __refl_field 记录 = 40B: name(8) kind/offset/size/align(4*4) sub(8) count(4) pad(4);
+   超字段/t超元素数截断上限 */
+#define REFL_FLDSZ 40
 #define REFL_MAXF  128
 
 /* 把 vtop 覆盖为指向 (rodata_section 中 off 处) 的 const void* */
@@ -6571,6 +6576,11 @@ static unsigned long refl_emit(CType *t)
             sub[i] = (unsigned long)-1;  /* -1 = 无子表; 0 可能是合法表起点, 不能用 0 */
             if ((f->type.t & VT_BTYPE) == VT_STRUCT && !(f->type.t & VT_ARRAY))
                 sub[i] = refl_emit(&f->type);
+            else if (f->type.t & VT_ARRAY) {
+                CType *pt = pointed_type(&f->type);   /* 数组元素类型 */
+                if (pt && (pt->t & VT_BTYPE) == VT_STRUCT)
+                    sub[i] = refl_emit(pt);
+            }
             i++;
         }
 
@@ -6620,7 +6630,18 @@ static unsigned long refl_emit(CType *t)
             refl_put32(base + rec + 12, (int)f->c);   /* 字段偏移 (struct_layout 写入) */
             refl_put32(base + rec + 16, fsz);
             refl_put32(base + rec + 20, fa);
-            /* sub: 嵌套 struct/union 值字段指向其子表 */
+            /* count: 数组字段 = 元素个数; 非数组 0 */
+            if (f->type.t & VT_ARRAY) {
+                CType *pt = pointed_type(&f->type);
+                if (pt) {
+                    int ea;
+                    unsigned long esz = type_size(pt, &ea);
+                    refl_put32(base + rec + 32, esz ? (int)(fsz / esz) : 0);
+                }
+            } else {
+                refl_put32(base + rec + 32, 0);
+            }
+            /* sub: 嵌套 struct 值字段 / 数组元素结构 -> 其子表 */
             if (sub[i] != (unsigned long)-1) {
                 sym = get_sym_ref(&char_pointer_type, sec, sub[i], 32);
                 greloca(sec, sym, (unsigned long)(rec + 24 + tab_off), R_X86_64_64, 0);
