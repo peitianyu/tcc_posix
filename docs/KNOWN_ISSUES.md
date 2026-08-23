@@ -42,10 +42,6 @@
   **代价**: musl 线路无 `GetModuleFileNameA` 定位私有目录, `CONFIG_TCCDIR` 需在
   编译期 `-D` 固定 (install.sh 已写好)。无需支持原生 win32 编译。
 
-- **归档工具必须用 mingw `ar`**, 不能用 `tcc -ar`: `tcc -ar` 对长文件名 15 字符
-  截断, 会造成静态库成员名冲突 (libtcc1.a 内 chkstk.o 等)。
-  **归属**: docs/system-modules.md。
-
 - **winapi 不可 shim 到 musl(msvcrt 风格 stdio)**: 因 `__iob_func` 指针算术陷阱,
   msvcrt 风格 stdio 无法 shim 到 musl。
 

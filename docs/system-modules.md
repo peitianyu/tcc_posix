@@ -230,9 +230,10 @@ bash (MSYS2) 环境连续 10/10 通过, 全量回归 46/46 无回归。
   静态共享栈清理) + `__psx_init` 填充 ctx.psx_vtbl; 保留 musl aio 用户态线程池
   原版不动。t045 通过, bash 10/10。
 
-- **归档工具: 保留 mingw `ar`**, 不用 `tcc -ar`。原因: `tcc -ar` 对长文件名
-  15 字符截断, 会造成静态库成员名冲突 (libtcc1.a 内 chkstk.o 等), 无法自足。
-  构建脚本 script/build_musl.sh 继续用 mingw ar 打包 libc.a。
+- **归档工具: `tcc -ar` 已自足** — 原生支持 GNU/BSD 长名表 (成员名 >14 字符走
+  `//` 伪成员, `/offset` 引用), 不再 15 字符截断冲突 (libtcc1.a chkstk.o 等);
+  另新增 `@listfile` 输入列表与 `r` 追加/替换、`d` 删除。
+  script/build_musl.sh 当前仍用 mingw ar 打包 libc.a, 可选平滑迁移至 `tcc -ar`。
 - **R1/R2/R3/R6/R7/R8 全部按接口层/编译器层合入**, 未改动 musl 语义 (仅 syscall
   层兜底 + psxscl handler + socket 协议推导 + console termios 分支)。
 - **aio 不在 ENOSYS 测试中断言**: 它是用户态实现, 且当前在 nt64 崩, 与 ENOSYS
