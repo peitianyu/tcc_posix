@@ -9,21 +9,25 @@
 - [x] `-b` 边界检查 + `-bt` 回溯 + 越界反查变量名 (t045/t046, probe_b4)
 - [x] TLS via emutls (t047)
 - [x] 内存治理 5 层 (t-own/epoch/esc/refcnt, memtrack)
-- [x] 语言扩展: defer (t029)、model (t031-t032b)、operator (t050)、reflect (t051)、
+- [x] 语言扩展: defer (t029)、model (t031-t032b)、operator (t050/t058/t059)、reflect (t051)、
       SIMD 原生运算符 (t046 + x86_64-simd, simd_demo)
+- [x] operator 补全: 比较 (== != < <= > >=)、一元 (! ~)、自增自减 (++ --)、
+      复合赋值 (+= -= *= /= %=) — t059; 已同步 `--emit-c` 脱糖
 - [x] 脱糖闭环: `--emit-c` + operator/defer/model + clang 驱动 + 性能对照 (≈37×)
       — docs/desugar.md / docs/desugar-perf.md
 - [x] `@listfile` 编译描述 P0-P2 (`%dep`/glob/`%if`/嵌套) — docs/listfile.md
 
 ## P1 / Q 待办
 
+- [ ] **operator 脱糖产物 clang 验证** — 环境无 clang, 现以 gcc 侧 5/5 PASS; 需在有
+      clang 的环境跑 script/desugar.ps1 确认新运算符 (比较/一元/自增减/复合赋值) 的
+      `-O3 -mavx2 -mfma` 正式产物等价。
 - [ ] **termios console E2E 确认** — R6 已实现 (t040 通过)，需在真交互终端跑一次
       t040 确认 tcgetattr/TIOCGWINSZ/TCSETS 实际数值。
 - [ ] **cpu-prof 报告接入 `-bt` 符号渲染 vs 独立构建双路径覆盖确认**。
 - [ ] **function/model 泛型脱糖稳定性收敛** — 多类型参数 + 嵌套实例化 + 常量参数
       组合用例扩充，确保实例化点展开与标准 C 编译在所有边界下一致。
 - [ ] **反射 v2** — bitfield / VLA / 嵌套递归链字段 kind。
-- [ ] **operator 泛化** — 一元与比较运算符、多候选/重载决议 (README 标注暂不做)。
 - [ ] **`emit-c` 产物 LTO/符号可见性清理** — 正式产物面向独立库导出时的符号控制。
 
 ## P2 / 探索

@@ -3057,65 +3057,71 @@ static int combine_types(CType *dest, SValue *op1, SValue *op2, int op)
     return ret;
 }
 
-/* C 运算符重载: 把单字符二元算术运算符 token 合成为函数名 "operator<op>" 的
- * token 值. 仅支持 + - * / %; 其余运算符(包括 TOK_ 宏如比较/移位)返回 0. */
+/* operator 重载最多操作数 (二元=2, 一元/自增减=1). */
+#define MAX_OP_NARGS 4
+
+/* C 运算符重载: 把运算符 token 合成为函数名 token 值. 命名约定:
+ *  - 二元算术 / 一元 (单字符): operator+ - * / % ! ~     (operator%c)
+ *  - 比较 (TOK 宏):            operator_eq/ne/lt/le/gt/ge
+ *  - 自增自减 (TOK 宏):        operator++  operator--
+ * 其余运算符返回 0 (不支持重载). */
 static int operator_name_token(int op)
 {
     char nm[24];
-    if (op != '+' && op != '-' && op != '*' && op != '/' && op != '%')
-        return 0;
-    sprintf(nm, "operator%c", (char)op);
+    const char *w = NULL;
+
+    switch (op) {
+    case '+': case '-': case '*': case '/': case '%':
+    case '!': case '~':
+        sprintf(nm, "operator%c", (char)op);
+        return tok_alloc(nm, (int)strlen(nm))->tok;
+    case TOK_INC:
+        strcpy(nm, "operator++");
+        return tok_alloc(nm, (int)strlen(nm))->tok;
+    case TOK_DEC:
+        strcpy(nm, "operator--");
+        return tok_alloc(nm, (int)strlen(nm))->tok;
+    case TOK_EQ:  w = "eq";  break;
+    case TOK_NE:  w = "ne";  break;
+    case TOK_LT:  w = "lt";  break;
+    case TOK_LE:  w = "le";  break;
+    case TOK_GT:  w = "gt";  break;
+    case TOK_GE:  w = "ge";  break;
+    default: return 0;
+    }
+    sprintf(nm, "operator_%s", w);
     return tok_alloc(nm, (int)strlen(nm))->tok;
 }
 
-/* C 运算符重载 (独立语言扩展, 见 docs/matrix-library.md 附录 B):
- * struct 两操作数的二元算术运算, 若全局存在精确同名的 operator<op> 函数,
- * 改写为一次普通函数调用. 属编译期静态分派, 零运行时开销.
- * vstack 已含 [a, b] (vtop[-1]=左, vtop[0]=右); 命中则替换为调用, 返回 1;
- * 否则返回 0 让标准 combine_types 处理/报错.
- * 返回值处理仿 unary 的函数调用返回: struct 依 ABI 走 sret 隐藏指针或寄存器
- * 落槽; 标量/float 直接 PUT_R_RET 设返回寄存器. */
-static int gen_op_operator(int op)
+/* operator 函数调用 (编译期静态分派, 零运行时开销). 
+ * 调用前: 顶部 1 或 2 个 vstack 元素为实参 (顺序 = 左/前缀在前, 右在后);
+ * 该函数弹出实参, 依返回类型把结果落到 vtop:
+ *   - struct 返回值: 依 ABI 走寄存器返回或 sret 隐藏指针
+ *   - 标量/float: 直接 PUT_R_RET 设返回寄存器. */
+static void operator_call(Sym *s, CType *ft, CType *rt, int nargs)
 {
-    CType ft, rt, rvt;
-    int t1, t2, bt1, bt2, opn;
-    Sym *s;
-    int ret_nregs, ret_align, regsize, size, align, addr, off;
-    SValue va, vb;
+    CType rvt;
+    SValue arg[MAX_OP_NARGS];
+    int i, ret_nregs, ret_align, regsize, size, align, addr, off;
 
-    t1 = vtop[-1].type.t;
-    t2 = vtop[0].type.t;
-    bt1 = t1 & VT_BTYPE;
-    bt2 = t2 & VT_BTYPE;
-    if (!(bt1 == VT_STRUCT || bt2 == VT_STRUCT))
-        return 0;
-    opn = operator_name_token(op);
-    if (!opn)
-        return 0;
-    s = sym_find(opn);
-    if (!s)
-        return 0;
-    ft = s->type;
-    if ((ft.t & VT_BTYPE) != VT_FUNC)
-        return 0;
-    rt = ft.ref->type;   /* operator 函数返回类型 */
+    /* 实参位于栈顶 vtop[0]~vtop[1-nargs]: 保存副本後整体重排.
+     * arg[0]=最左/前缀操作数 (vtop[1-nargs]), ... arg[nargs-1]=最右 (vtop[0]) */
+    for (i = 0; i < nargs; i++)
+        arg[i] = vtop[i + 1 - nargs];
+    vtop -= nargs;
 
-    va = vtop[-1];
-    vb = vtop[0];
-    vtop -= 2;           /* 弹出以重建调用布局 [f, ...] */
-
-    if ((rt.t & VT_BTYPE) == VT_STRUCT) {
-        ret_nregs = gfunc_sret(&rt, 0, &rvt, &ret_align, &regsize);
+    if ((rt->t & VT_BTYPE) == VT_STRUCT) {
+        ret_nregs = gfunc_sret(rt, 0, &rvt, &ret_align, &regsize);
         if (ret_nregs > 0) {
-            /* 1/2/4/8B 小 struct 寄存器返回: [f,a,b] -> 返回寄存器落槽 */
-            vpushsym(&ft, s);
-            vpushv(&va);
-            vpushv(&vb);
-            gfunc_call(2);
+            /* 1/2/4/8B 小 struct 寄存器返回: [f, args...] */
+            vpushsym(ft, s);
+            for (i = 0; i < nargs; i++)
+                vpushv(&arg[i]);
+            gfunc_call(nargs);
             vtop->type = rvt;
             vtop->c.i = 0;
             PUT_R_RET(vtop, rvt.t);
-            size = type_size(&rt, &align);
+            size = type_size(rt, &align);
             size = (size + regsize - 1) & -regsize;
             if (ret_align > align)
                 align = ret_align;
@@ -3131,28 +3137,131 @@ static int gen_op_operator(int op)
                     break;
                 off += regsize;
             }
-            vset(&rt, VT_LOCAL | VT_LVAL, addr);
+            vset(rt, VT_LOCAL | VT_LVAL, addr);
         } else {
-            /* sret: 返回槽 + 隐藏指针 (大 struct), 布局 [f,ptr,a,b] */
-            size = type_size(&rt, &align);
+            /* sret: 返回槽 + 隐藏指针 (大 struct), 布局 [f,ptr,args...] */
+            size = type_size(rt, &align);
             loc = (loc - size) & -align;
             addr = loc;
-            vpushsym(&ft, s);          /* [f]    */
+            vpushsym(ft, s);           /* [f]    */
             vseti(VT_LOCAL, addr);     /* [f,ptr] */
-            vpushv(&va);               /* [f,ptr,a] */
-            vpushv(&vb);               /* [f,ptr,a,b] */
-            gfunc_call(3);
-            vset(&rt, VT_LOCAL | VT_LVAL, addr);
+            for (i = 0; i < nargs; i++)
+                vpushv(&arg[i]);
+            gfunc_call(nargs + 1);
+            vset(rt, VT_LOCAL | VT_LVAL, addr);
         }
     } else {
-        /* 标量/float 返回: [f,a,b] -> PUT_R_RET */
-        vpushsym(&ft, s);
-        vpushv(&va);
-        vpushv(&vb);
-        gfunc_call(2);
-        vtop->type = rt;
+        /* 标量/float 返回: [f, args...] -> 先 vpush 占位再 PUT_R_RET.
+         * 仿 unary 帮助函数返回(6527): gfunc_call 已把实参+函数弹出,
+         * 需显式 vpush 出返回条目, 再 PUT_R_RET 使返回寄存器成为其值. */
+        vpushsym(ft, s);
+        for (i = 0; i < nargs; i++)
+            vpushv(&arg[i]);
+        gfunc_call(nargs);
+        vpush(rt);
         vtop->c.i = 0;
-        PUT_R_RET(vtop, rt.t);
+        PUT_R_RET(vtop, rt->t);
+    }
+}
+
+/* 查到 operator<op> 且确为函数, 返回其函数符号; 否则 NULL.
+ * 供二元 (gen_op) / 一元 (unary) / 自增减 (inc) 共用. */
+static Sym *find_operator(int op, CType *ft, CType *rt)
+{
+    int opn;
+    Sym *s;
+    opn = operator_name_token(op);
+    if (!opn)
+        return NULL;
+    s = sym_find(opn);
+    if (!s)
+        return NULL;
+    *ft = s->type;
+    if ((ft->t & VT_BTYPE) != VT_FUNC)
+        return NULL;
+    *rt = ft->ref->type;   /* operator 函数返回类型 */
+    return s;
+}
+
+/* C 运算符重载 (独立语言扩展, 见 docs/matrix-library.md 附录 B):
+ * struct 两操作数的二元算术运算, 若全局存在精确同名的 operator<op> 函数,
+ * 改写为一次普通函数调用. 属编译期静态分派, 零运行时开销.
+ * vstack 已含 [a, b] (vtop[-1]=左, vtop[0]=右); 命中则替换为调用, 返回 1;
+ * 否则返回 0 让标准 combine_types 处理/报错. */
+static int gen_op_operator(int op)
+{
+    CType ft, rt;
+    Sym *s;
+    int t1, t2, bt1, bt2;
+
+    t1 = vtop[-1].type.t;
+    t2 = vtop[0].type.t;
+    bt1 = t1 & VT_BTYPE;
+    bt2 = t2 & VT_BTYPE;
+    if (!(bt1 == VT_STRUCT || bt2 == VT_STRUCT))
+        return 0;
+    s = find_operator(op, &ft, &rt);
+    if (!s)
+        return 0;
+    operator_call(s, &ft, &rt, 2);
+    return 1;
+}
+
+/* struct 一元运算符: -a / !a / ~a → operator-(a) / operator!(a) / operator~(a).
+ * vtop 已含单个操作数; 命中则改写为 operator<op>(操作数) 函数调用, 返回 1;
+ * 否则返回 0 让标准一元路径处理. */
+static int gen_unary_operator(int op)
+{
+    CType ft, rt;
+    Sym *s;
+
+    if ((vtop->type.t & VT_BTYPE) != VT_STRUCT)
+        return 0;
+    s = find_operator(op, &ft, &rt);
+    if (!s)
+        return 0;
+    operator_call(s, &ft, &rt, 1);
+    return 1;
+}
+
+/* struct 自增/自减: ++a / --a / a++ / a-- → operator++(a) / operator--(a)
+ * (值语义: operator 传入 a 的副本, 返回增量后的新 struct).
+ * 前缀 inc(post=0): [a] -> 改写成 operator(a) 存回 a, 结果=新值
+ * 后缀 inc(post=1): [a] -> 先抽存旧值, 改写成 operator(a) 存回 a, 结果=旧值
+ * vtop 已含 lvalue (inc 内先 test_lvalue). 命中返回 1; 否则 0. */
+static int gen_incdec_operator(int post, int c)
+{
+    CType ft, rt;
+    Sym *s;
+
+    if ((vtop->type.t & VT_BTYPE) != VT_STRUCT)
+        return 0;
+    s = find_operator(c, &ft, &rt);
+    if (!s)
+        return 0;
+
+    if (post) {
+        /* 后缀: 先把旧 struct 值复制到临时本地, 再 operator(a) 存回 a,
+         * 结果 = 旧值. struct 不能装入寄存器, 故用 vstore 走 memcpy.
+         * 栈编排: [a_tgt, a_src, a_src2, old] -> vstore -> [a_tgt, old]
+         *   operator_call -> [a_tgt, new]; vstore 存 new->a_tgt, 留 old. */
+        int size, align, addr;
+        size = type_size(&vtop->type, &align);
+        loc = (loc - size) & -align;
+        addr = loc;
+        vdup();                /* [a_tgt, a_src]        */
+        vdup();                /* [a_tgt, a_src, a_src2] */
+        vswap();               /* [a_tgt, a_src2, a_src] */
+        vset(&vtop->type, VT_LOCAL, addr); /* [a_tgt, a_src2, old] */
+        vswap();               /* [a_tgt, old, a_src2]   */
+        vstore();              /* old = a 的旧值; vtop=old [a_tgt, old] */
+        operator_call(s, &ft, &rt, 1);   /* [a_tgt, new] */
+        vstore();                        /* 存 new->a_tgt; vtop=a_tgt */
+        vpop();                          /* 丢掉 a_tgt, 留 old (旧值) */
+    } else {
+        vdup();                 /* [a_tgt, a_src] */
+        operator_call(s, &ft, &rt, 1);   /* [a_tgt, new] */
+        vstore();                        /* 存 new->a_tgt, struct 保留目标为结果 */
     }
     return 1;
 }
@@ -3989,6 +4098,8 @@ ST_FUNC void vstore(void)
 ST_FUNC void inc(int post, int c)
 {
     test_lvalue();
+    if (gen_incdec_operator(post, c))
+        return;   /* struct operator++ / operator-- 重载 */
     vdup(); /* save lvalue */
     if (post) {
         gv_dup(); /* duplicate value */
@@ -6826,11 +6937,15 @@ ST_FUNC void unary(void)
     case '!':
         next();
         unary();
+        if (gen_unary_operator('!'))
+            break;   /* struct operator! 重载 */
         gen_test_zero(TOK_EQ);
         break;
     case '~':
         next();
         unary();
+        if (gen_unary_operator('~'))
+            break;   /* struct operator~ 重载 */
         vpushi(-1);
         gen_op('^');
         break;
@@ -7077,6 +7192,8 @@ ST_FUNC void unary(void)
     case '-':
         next();
         unary();
+        if (gen_unary_operator('-'))
+            break;   /* struct 一元 operator- 重载 */
 	if (is_float(vtop->type.t)) {
             gen_opif(TOK_NEG);
 	} else {

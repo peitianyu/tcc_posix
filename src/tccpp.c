@@ -3942,13 +3942,68 @@ static int pp_check_he0xE(int t, const char *p)
  * 每个 token 的文本做快照 (dg_txt), 重放/flush 全部基于快照, 避免脏读.
  */
 
-#define DG_OPN 5
-static const char dg_op_chr[DG_OPN] = { '+', '-', '*', '/', '%' };
-static const char *dg_op_wrd[DG_OPN] = { "add", "sub", "mul", "div", "mod" };
-static int dg_op_reg[128];        /* [opchar] = op id (1..DG_OPN), 0 未注册 */
-static int dg_op_tag[DG_OPN + 1]; /* [op id] = struct tag token, 0 无 */
-static char dg_op_name[DG_OPN + 1][24]; /* [op id] = "operator_add" ... */
-static int dg_active;             /* 出现过 operator 定义 -> 启用改写 */
+/* ---- 可重载运算符表 (token -> 脱糖标准C名后缀, 返回类别) ----
+ * kind: 'B' 二元算术(返回 struct tag), 'C' 比较(返回 int), 'U' 一元(返回 tag),
+ *       'I' 自增自减(返回 tag; TCC -run 前后缀统一存回操作数且结果=新值, 脱糖同效). */
+#define DG_OPN 5     /* 二元算术: + - * / % */
+#define DG_OPU 2     /* 一元: ! ~ */
+#define DG_OPI 2     /* 自增自减: ++ -- */
+#define DG_OPC 6     /* 比较: == != < <= > >= */
+#define DG_MAXOP (DG_OPN + DG_OPU + DG_OPI + DG_OPC)
+typedef struct { int tok; const char *wrd; char kind; } DGOP_t;
+static const DGOP_t dg_op_tbl[DG_MAXOP] = {
+    { '+', "add", 'B' }, { '-', "sub", 'B' }, { '*', "mul", 'B' },
+    { '/', "div", 'B' }, { '%', "mod", 'B' },
+    { '!', "bang", 'U' }, { '~', "til", 'U' },
+    { TOK_INC, "inc", 'I' }, { TOK_DEC, "dec", 'I' },
+    { TOK_EQ, "eq", 'C' }, { TOK_NE, "ne", 'C' }, { TOK_LT, "lt", 'C' },
+    { TOK_LE, "le", 'C' }, { TOK_GT, "gt", 'C' }, { TOK_GE, "ge", 'C' },
+};
+static char dg_op_name[DG_MAXOP + 1][24];  /* [op id] = "operator_add" ... */
+static char dg_op_kind[DG_MAXOP + 1];      /* [op id] = 'B'/'C'/'U'/'I' */
+static unsigned char dg_oreg[DG_MAXOP + 1];/* [op id] = 该运算符已被 operator 定义注册 (1/0) */
+static int dg_op_tag[DG_MAXOP + 1];        /* [op id] = struct tag token, 0 无 */
+static int dg_active;                      /* 出现过 operator 定义 -> 启用改写 */
+
+/* 运算符 token 的文本形式 (算术单字符, 比较/自增减多字符) */
+static const char *dg_optxt(int t)
+{
+    static char b[3];
+    switch (t) {
+    case '+': return "+";  case '-': return "-";  case '*': return "*";
+    case '/': return "/";  case '%': return "%";  case '!': return "!";
+    case '~': return "~";
+    case TOK_EQ: return "==";  case TOK_NE: return "!=";
+    case TOK_LT: return "<";   case TOK_LE: return "<=";
+    case TOK_GT: return ">";   case TOK_GE: return ">=";
+    case TOK_INC: return "++"; case TOK_DEC: return "--";
+    default: b[0] = (char)t; b[1] = 0; return b;
+    }
+}
+/* 比较类 token? */
+static int dg_iscmp(int t)
+{
+    return t == TOK_EQ || t == TOK_NE || t == TOK_LT
+        || t == TOK_LE || t == TOK_GT || t == TOK_GE;
+}
+
+/* token -> op id (1..DG_MAXOP), 无关是否已注册. 覆盖单字符算术(+ - * / % ! ~)
+ * 与多字符 token (== != < <= > >= ++ --). */
+static int dg_opid(int tok)
+{
+    int i;
+    for (i = 0; i < DG_MAXOP; i++)
+        if (dg_op_tbl[i].tok == tok)
+            return i + 1;
+    return 0;
+}
+
+/* 该 token 对应的运算符是否已注册 (op id 有效且已被 operator 定义注册) */
+static int dg_oreg_tok(int tok)
+{
+    int id = dg_opid(tok);
+    return id && dg_oreg[id];
+}
 
 static int dg_var_nm[8192];       /* var token */
 static int dg_var_tag[8192];      /* var 对应的 struct tag token */
@@ -3991,6 +4046,9 @@ static int dg_dep;                 /* 当前括号深度 (函数体内 >= 1) */
 static int dg_brak[DG_DEFER_MAXDEP]; /* 每个开放层: 1=语句块, 0=初始化器/表达式聚合 */
 
 static int dg_expr(int *pi, int min_prec);
+static int dg_mkbin(int optok, int l, int r);
+static int dg_mkun(int optok, int l);
+static int dg_mktern(int c, int t, int e);
 
 /* model 泛型状态: 前向声明 (完整定义在 model 小节), 供 dg_reset 清理 */
 typedef struct DgModelDef DgModelDef;
@@ -4026,13 +4084,14 @@ static void dg_model_reset_impl(void); /* 结构体完整后再定义 */
 static void dg_reset(void)
 {
     int i, d;
-    for (i = 0; i < 128; i++)
-        dg_op_reg[i] = 0;
-    for (i = 1; i <= DG_OPN; i++) {
+    for (i = 1; i <= DG_MAXOP; i++) {
+        dg_oreg[i] = 0;
         dg_op_tag[i] = 0;
+        dg_op_kind[i] = dg_op_tbl[i - 1].kind;
         strcpy(dg_op_name[i], "operator_");
-        strcat(dg_op_name[i], dg_op_wrd[i - 1]);
+        strcat(dg_op_name[i], dg_op_tbl[i - 1].wrd);
     }
+    dg_oreg[0] = 0;
     dg_active = 0;
     dg_varcnt = 0;
     dg_n = 0;
@@ -4050,19 +4109,11 @@ static void dg_reset(void)
     dg_dep = 0;
 }
 
-/* op char -> op id (1..DG_OPN), 无关是否已注册 */
-static int dg_opidx(int ch)
+/* op token -> registered op id (1..DG_MAXOP), 0 = 未注册/无此运算符 */
+static int dg_opatid(int tok)
 {
-    int i;
-    for (i = 0; i < DG_OPN; i++)
-        if (dg_op_chr[i] == ch)
-            return i + 1;
-    return 0;
-}
-
-static int dg_opid_for_char(int ch)
-{
-    return dg_op_reg[(unsigned char)ch];
+    int id = dg_opid(tok);
+    return id && dg_oreg[id] ? id : 0;
 }
 
 /* 从 i+1 起的下一个非空格 token 下标; 无则 -1 */
@@ -4075,7 +4126,8 @@ static int dg_next_ns(int i)
     return -1;
 }
 
-/* dg_buf[i] 若为 TOK_OPERATOR 且其后紧跟已识别运算符字符, 返回该 opid; 否则 0 */
+/* dg_buf[i] 若为 TOK_OPERATOR 且其后紧跟已识别运算符 (单字符算术 / 多字符
+ * 比较 / 自增减 token), 返回该 opid; 否则 0. 顺带把该运算符注册 (标记已定义). */
 static int dg_opat(int i)
 {
     int j, opid;
@@ -4084,10 +4136,31 @@ static int dg_opat(int i)
     j = dg_next_ns(i);
     if (j < 0)
         return 0;
-    opid = dg_opidx((unsigned char)dg_txt[j][0]);
-    if (opid && !dg_op_reg[(unsigned char)dg_txt[j][0]])
-        dg_op_reg[(unsigned char)dg_txt[j][0]] = opid;
+    opid = dg_opid(dg_buf[j]);
+    if (opid)
+        dg_oreg[opid] = 1;
     return opid;
+}
+
+/* dg_buf[i] 为 `operator_<wrd>` 标识符 (比较运算符常用写法: operator_eq / operator_ne
+ * / operator_lt ...; tcc 按最长匹配将其把整个标识符一次性 tokenize, 而非 TOK_OPERATOR
+ * 关键字). 命中词表返回相应 op id 并注册; 否则 0. */
+static int dg_opat_word(int i)
+{
+    const char *nm;
+    int k;
+    if (dg_buf[i] < TOK_IDENT)
+        return 0;
+    nm = dg_txt[i] ? dg_txt[i] : "";
+    if (strncmp(nm, "operator_", 9) != 0)
+        return 0;
+    for (k = 0; k < DG_MAXOP; k++)
+        if (strcmp(nm + 9, dg_op_tbl[k].wrd) == 0) {
+            int id = k + 1;
+            dg_oreg[id] = 1;
+            return id;
+        }
+    return 0;
 }
 
 /* 变量 token -> struct tag; 返回 0 表示非 operator 类型变量 */
@@ -4120,12 +4193,15 @@ static int dg_tokchar(int i)
     return dg_txt[i] ? (unsigned char)dg_txt[i][0] : 0;
 }
 
-static int dg_prec(int ch)
+/* 运算符 token 的二元优先级. 单字符算术 / 多字符比较; 非二元返回 0.
+ * 关系/比较也纳入 (宽松绑定), 命中 operator_* 时改写, 否则原样透传. */
+static int dg_prec(int tok)
 {
-    switch (ch) {
+    switch (tok) {
     case '*': case '/': case '%': return 3;
     case '+': case '-': return 2;
-    case '<': case '>': return 1;   /* 关系比较: 宽松绑定, 非 operator, 原样透传 */
+    case TOK_LT: case TOK_LE: case TOK_GT: case TOK_GE:
+    case TOK_EQ: case TOK_NE: return 1;   /* 比较: 宽松绑定 */
     default: return 0;
     }
 }
@@ -4137,14 +4213,17 @@ static int dg_tok_simple(int i)
         return 1;
     if (dg_buf[i] == TOK_OPERATOR)
         return 0;
+    if (dg_buf[i] == TOK_INC || dg_buf[i] == TOK_DEC)
+        return 1;                                   /* ++/-- cursor */
     ch = dg_tokchar(i);
     if (isid(ch) || isnum(ch) || ch == '_' || ch == '.')
         return 1;
     if (ch == '+' || ch == '-' || ch == '*' || ch == '/' || ch == '%'
         || ch == '(' || ch == ')' || ch == ',' || ch == '?' || ch == ':'
-        || ch == '<' || ch == '>')
+        || ch == '<' || ch == '>' || ch == '=' || ch == '!' || ch == '~')
         return 1;
-    return 0;
+    /* 复合赋值 += 等 (多字符 token 首字符为运算符) */
+    return TOK_ASSIGN(dg_buf[i]);
 }
 
 /* 右值片段 [from,to) 是否可进入改写 (放宽: 真正安全由 parse-boundary +
@@ -4183,10 +4262,12 @@ static int dg_simplevar_node(int n)
     return dg_optagged(n);
 }
 
-/* 树中是否含"命中 operator 的二元展开": 需 op 已注册且两侧都 operator 类型 */
+/* 树中是否含"命中 operator 的展开": 需 op 已注册且操作数为 operator 类型
+ *  ('B'/'C' 二元: 两侧均需; 'U' 一元/自增减: 单侧即可). */
 static int dg_has_rewrite(int n)
 {
     DGNode *nd;
+    int id;
     if (n < 0)
         return 0;
     nd = &dg_ndo[n];
@@ -4198,9 +4279,13 @@ static int dg_has_rewrite(int n)
         return dg_has_rewrite(nd->l) || dg_has_rewrite(nd->r);
     if (nd->op == DG_OP_TERN)
         return dg_has_rewrite(nd->l) || dg_has_rewrite(nd->r) || dg_has_rewrite(nd->x);
-    if (dg_opid_for_char(nd->op)
-        && dg_optagged(nd->l) && dg_optagged(nd->r))
-        return 1;
+    id = dg_opid(nd->op);
+    if (id && dg_oreg[id]) {
+        if (dg_op_kind[id] == 'U' || dg_op_kind[id] == 'I')
+            return dg_optagged(nd->l) || dg_has_rewrite(nd->l);
+        if (dg_optagged(nd->l) && dg_optagged(nd->r))
+            return 1;               /* 二元('.')与比较('C'): 两侧命中即改写 */
+    }
     return dg_has_rewrite(nd->l) || dg_has_rewrite(nd->r);
 }
 
@@ -4313,24 +4398,60 @@ static int dg_primary(int *pi)
         while (i < dg_n && is_space(dg_buf[i]))
             i++;
     }
+    /* 后缀自增/自减: `s++` / `s--` (operator 类型). 值语义与 tcc -run 一致:
+     * 前后缀统一存回新值并取结果为该新值, 脱糖改写成 operator_inc(s) 同效. */
+    if (n >= 0 && i < dg_n) {
+        int po = dg_buf[i], poid = dg_opid(po);
+        if (poid && dg_op_kind[poid] == 'I') {
+            n = dg_mkun(po, n);
+            if (n < 0)
+                return -1;
+            i++;
+            while (i < dg_n && is_space(dg_buf[i]))
+                i++;
+        }
+    }
     *pi = i;
     return n;
 }
 
-static int dg_mkbin(int opch, int l, int r)
+static int dg_mkbin(int optok, int l, int r)
 {
     DGNode *nd;
-    int tag;
+    int tag, id;
     if (l < 0 || r < 0)
         return -1;
     if (dg_nndo >= DG_NODEN)
         return -1;
-    /* 类型向上传播: 仅当 op 已注册且两侧都为 operator 类型时, 该二元结果才视为 op 类型 */
+    /* 类型向上传播: 仅对"二元算术"('B') 且 op 已注册、两侧都为 op 类型时,
+     * 二元结果才视为 op 类型; 比较('C') 返回 int (tag=0), 不做传播. */
+    id = dg_opid(optok);
     tag = 0;
-    if (dg_op_reg[(unsigned char)opch] && dg_optagged(l) && dg_optagged(r))
+    if (id && dg_oreg[id] && dg_op_kind[id] == 'B'
+        && dg_optagged(l) && dg_optagged(r))
         tag = dg_ndo[l].tag;
     nd = &dg_ndo[dg_nndo];
-    nd->op = opch; nd->l = l; nd->r = r; nd->x = -1; nd->tag = tag; nd->txt[0] = 0;
+    nd->op = optok; nd->l = l; nd->r = r; nd->x = -1; nd->tag = tag; nd->txt[0] = 0;
+    return dg_nndo++;
+}
+
+/* 一元节点 ('!'/'~'): op=unary token, 仅 l 使用. 操作数为 op 类型且该一元已注册
+ * 时结果视为同类型 struct (tag 向上传播); 否则 tag=0 (int 取反, verbatim). */
+static int dg_mkun(int optok, int l)
+{
+    DGNode *nd;
+    int id;
+    if (l < 0)
+        return -1;
+    if (dg_nndo >= DG_NODEN)
+        return -1;
+    id = dg_opid(optok);
+    nd = &dg_ndo[dg_nndo];
+    nd->op = optok;
+    nd->l = l;
+    nd->r = nd->x = -1;
+    nd->tag = (id && dg_oreg[id] && dg_optagged(l)) ? dg_ndo[l].tag : 0;
+    nd->txt[0] = 0;
     return dg_nndo++;
 }
 
@@ -4351,17 +4472,41 @@ static int dg_mktern(int c, int t, int e)
 static int dg_expr(int *pi, int min_prec)
 {
     int i = *pi, lhs;
-    lhs = dg_primary(&i);
-    if (lhs < 0)
-        return -1;
+    /* 前缀一元 ! / ~ / ++ / --: 绑定比二元算术更紧. 无论是否 rewrite 都建一元
+     * 节点 (命中 operator!/operator~ / operator++/operator-- 改写为函数调用;
+     * 普通 int 取反则 verbatim), 由 dg_has_rewrite / dg_pnode 依 tag 与注册态
+     * 决定展开. 前缀 `++s`/`--s` 值语义与 tcc -run 一致 (结果=新值). */
+    while (i < dg_n && is_space(dg_buf[i]))
+        i++;
+    if (i < dg_n) {
+        int uo = dg_buf[i], uoid = dg_opid(uo);
+        if (uoid && (dg_op_kind[uoid] == 'U' || dg_op_kind[uoid] == 'I')) {
+            int uop = uo, rp = i + 1;
+            int operand = dg_expr(&rp, 4);   /* 高门槛: 一元操作数不吞二元算符 */
+            if (operand < 0)
+                return -1;
+            lhs = dg_mkun(uop, operand);
+            if (lhs < 0)
+                return -1;
+            i = rp;
+        } else {
+            lhs = dg_primary(&i);
+            if (lhs < 0)
+                return -1;
+        }
+    } else {
+        lhs = dg_primary(&i);
+        if (lhs < 0)
+            return -1;
+    }
     for (;;) {
-        int ch, prec, rhs, rp;
+        int optok, prec, rhs, rp;
         while (i < dg_n && is_space(dg_buf[i]))  /* 跳过空格 token */
             i++;
         if (i >= dg_n)
             break;
-        ch = dg_tokchar(i);
-        prec = dg_prec(ch);
+        optok = dg_buf[i];
+        prec = dg_prec(optok);
         if (prec <= 0 || prec < min_prec)      /* 非二元/低于门槛 -> 交由上层 */
             break;
         i++;                      /* consume op */
@@ -4370,7 +4515,7 @@ static int dg_expr(int *pi, int min_prec)
         if (rhs < 0)
             return -1;
         i = rp;
-        lhs = dg_mkbin(ch, lhs, rhs);
+        lhs = dg_mkbin(optok, lhs, rhs);
     }
     /* 三元 (最低优先级, right-assoc): cond ? then : else.
      * 注意: 循环结束后 i 已停在首个未消费的非空 token 上 (空格已跳过),
@@ -4432,23 +4577,47 @@ static void dg_pnode(CString *out, int n)
         return;
     }
     {
-        int opid = dg_opid_for_char(nd->op);
-        if (opid && dg_optagged(nd->l) && dg_optagged(nd->r)) {
-            cstr_cat(out, dg_op_name[opid], strlen(dg_op_name[opid]));
-            cstr_ccat(out, '(');
-            dg_pnode(out, nd->l);
-            cstr_ccat(out, ',');
-            dg_pnode(out, nd->r);
-            cstr_ccat(out, ')');
-        } else {
-            cstr_ccat(out, '(');
-            dg_pnode(out, nd->l);
-            cstr_ccat(out, ' ');
-            cstr_ccat(out, nd->op);
-            cstr_ccat(out, ' ');
-            dg_pnode(out, nd->r);
-            cstr_ccat(out, ')');
+        int opid = dg_opid(nd->op);
+        if (opid && dg_oreg[opid]) {
+            if (dg_op_kind[opid] == 'U' || dg_op_kind[opid] == 'I') {
+                /* 一元/自增减: 操作数为 op 类型 -> operator_!(l) / operator_inc(l);
+                 * 否则 verbatim !(l) / (l)++. */
+                if (dg_optagged(nd->l)) {
+                    cstr_cat(out, dg_op_name[opid], strlen(dg_op_name[opid]));
+                    cstr_ccat(out, '(');
+                    dg_pnode(out, nd->l);
+                    cstr_ccat(out, ')');
+                } else {
+                    const char *ot = dg_optxt(nd->op);
+                    cstr_cat(out, ot, strlen(ot));
+                    cstr_ccat(out, '(');
+                    dg_pnode(out, nd->l);
+                    cstr_ccat(out, ')');
+                }
+                return;
+            }
+            /* 'B' 二元 / 'C' 比较: 两侧均 op 类型 -> operator_X(l,r) */
+            if (dg_optagged(nd->l) && dg_optagged(nd->r)) {
+                cstr_cat(out, dg_op_name[opid], strlen(dg_op_name[opid]));
+                cstr_ccat(out, '(');
+                dg_pnode(out, nd->l);
+                cstr_ccat(out, ',');
+                dg_pnode(out, nd->r);
+                cstr_ccat(out, ')');
+                return;
+            }
         }
+        /* verbatim: (l op r). 多字符比较/自增减用 dg_optxt 完整还原 */
+        cstr_ccat(out, '(');
+        dg_pnode(out, nd->l);
+        cstr_ccat(out, ' ');
+        {
+            const char *ot = dg_optxt(nd->op);
+            cstr_cat(out, ot, strlen(ot));
+        }
+        cstr_ccat(out, ' ');
+        dg_pnode(out, nd->r);
+        cstr_ccat(out, ')');
     }
 }
 
@@ -5534,8 +5703,20 @@ static void dg_flush(TCCState *s1)
             } else if (ch == '{' || ch == '(') {
                 pending = 0;            /* 初始化器 / 调用 / 形参列表终止声明 */
             } else if (t >= TOK_IDENT) {        /* 用户标识符 */
-                if (pending)
-                    dg_add_var(t, pending);
+                int wid = dg_opat_word(i);      /* operator_eq 等标识符形式运算符 */
+                if (wid) {
+                    dg_active = 1;
+                    if (prev >= TOK_IDENT)      /* prev 为返回类型 tag */
+                        dg_op_tag[wid] = prev;
+                } else {
+                    const char *w = dg_txt[i] ? dg_txt[i] : "";
+                    if (dg_w_intkey(w) || !strcmp(w, "float") ||
+                        !strcmp(w, "double") || !strcmp(w, "void") ||
+                        !strcmp(w, "_Bool"))
+                        pending = 0;   /* 标量类型关键字终止 struct 声明列表 */
+                    else if (pending)
+                        dg_add_var(t, pending);
+                }
             } else if (ch == ';') {
                 pending = 0;            /* 声明结束 */
             } else if (ch != ',' && ch != '*' && ch != '[' && ch != ']') {
@@ -5543,6 +5724,106 @@ static void dg_flush(TCCState *s1)
             }
             pp = prev; prev = t;
         }
+    }
+
+    /* ===== if/while 条件改写: `if (cond)` / `while (cond)` 的括号条件区,
+     * 命中 operator 比较/一元的展开 (operator_eq(a,b) 等). ===== */
+    {
+        int first = -1;
+        for (i = 0; i < dg_n; i++)
+            if (!is_space(dg_buf[i])) { first = i; break; }
+        if (first >= 0 && (dg_buf[first] == TOK_IF || dg_buf[first] == TOK_WHILE)) {
+            int opn = dg_next_ns(first), clo = -1, d = 0, j;
+            if (opn >= 0 && dg_tokchar(opn) == '(') {
+                for (j = opn; j < dg_n; j++) {
+                    int c = dg_tokchar(j);
+                    if (is_space(dg_buf[j]))
+                        continue;
+                    if (c == '(')
+                        d++;
+                    else if (c == ')' && --d == 0) { clo = j; break; }
+                }
+            }
+            if (clo >= 0) {
+                dg_emit_verbatim(s1, 0, opn + 1);      /* `if (` */
+                if (!dg_region_rewrite(s1, opn + 1, clo))
+                    dg_emit_verbatim(s1, opn + 1, clo);
+                dg_emit_verbatim(s1, clo, dg_n);       /* `) { ...` 续写 */
+            } else {
+                dg_emit_verbatim(s1, 0, dg_n);
+            }
+            return;
+        }
+    }
+
+    /* ===== 复合赋值改写: `a op= b` (op ∈ + - * / %) → `a = operator_<wrd>(a, b);`
+     * 仅当 base 二元算子已注册且 LHS 为 operator 类型变量; 否则 verbatim. ===== */
+    for (i = 0; i < dg_n; i++) {
+        int t = dg_buf[i], base = 0, id, lh = -1, sem = -1, j;
+        switch (t) {
+        case TOK_A_ADD: base = '+'; break;
+        case TOK_A_SUB: base = '-'; break;
+        case TOK_A_MUL: base = '*'; break;
+        case TOK_A_DIV: base = '/'; break;
+        case TOK_A_MOD: base = '%'; break;
+        default: continue;
+        }
+        id = dg_opid(base);
+        if (!dg_oreg[id])
+            break;                              /* 未注册: 该行 verbatim */
+        for (j = i - 1; j >= 0; j--)
+            if (!is_space(dg_buf[j])) { lh = j; break; }
+        for (j = i + 1; j < dg_n; j++)
+            if (dg_tokchar(j) == ';') { sem = j; break; }
+        if (lh < 0 || sem < 0 || !dg_var_of(dg_buf[lh]))
+            break;                              /* 非简单 LHS */
+        dg_emit_verbatim(s1, 0, i);             /* LHS `a ` */
+        fputs("= ", s1->ppfp);
+        fputs(dg_op_name[id], s1->ppfp);
+        fputs("(", s1->ppfp);
+        fputs(dg_txt[lh], s1->ppfp);
+        fputs(", ", s1->ppfp);
+        if (!dg_region_rewrite(s1, i + 1, sem))
+            dg_emit_verbatim(s1, i + 1, sem);
+        fputs(");", s1->ppfp);
+        dg_emit_verbatim(s1, sem + 1, dg_n);    /* 尾部(通常空) */
+        return;
+    }
+
+    /* ===== 自增自减改写: `++a` / `a++` / `--a` / `a--` (operator 类型) →
+     * `a = operator_inc(a);` / `a = operator_dec(a);`. 仅处理整行仅为
+     * 自增减表达式[;] 的语句 (前后缀统一存回新值, 与 TCC -run 值语义一致). ===== */
+    for (i = 0; i < dg_n; i++) {
+        int tk = dg_buf[i], id, pn = -1, nn, sem = -1, spec, j;
+        if (tk != TOK_INC && tk != TOK_DEC)
+            continue;
+        id = dg_opid(tk);
+        if (!dg_oreg[id])
+            break;
+        for (j = i - 1; j >= 0; j--)
+            if (!is_space(dg_buf[j])) { pn = j; break; }
+        nn = dg_next_ns(i);
+        for (j = dg_n - 1; j >= 0; j--)
+            if (!is_space(dg_buf[j])) { sem = j; break; }
+        if (sem < 0 || dg_tokchar(sem) != ';' || nn < 0)
+            break;
+        /* 规范形: 前缀 `++ a`(pn==-1,nn=操作数) / 后缀 `a ++`(pn=操作数,nn==sem) */
+        if (pn >= 0 && nn == sem)
+            spec = pn;                          /* 后缀 a++ */
+        else if (pn == -1)
+            spec = nn;                          /* 前缀 ++a */
+        else
+            break;                              /* 嵌入表达式 -> verbatim */
+        if (!dg_var_of(dg_buf[spec]))
+            break;
+        fputs(dg_txt[spec], s1->ppfp);
+        fputs(" = ", s1->ppfp);
+        fputs(dg_op_name[id], s1->ppfp);
+        fputs("(", s1->ppfp);
+        fputs(dg_txt[spec], s1->ppfp);
+        fputs(");", s1->ppfp);
+        dg_emit_verbatim(s1, sem + 1, dg_n);
+        return;
     }
 
     /* 定位顶层赋值 '=' 与 `return` 关键字 (token 恰为单 '=' 字符, 排除 '=='/"*=等) */

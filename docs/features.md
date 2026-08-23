@@ -138,21 +138,35 @@ v4i r;  _mm_store_ps((float*)&r, _mm_cvttps_epi32(c));  /* 截断 f→i */
 类型族 `v4f/v2d/v4i/v8h/v16b`。整型/double 前缀细节与除法符号差异见 README 历史
 或 docs/matrix-library.md 附录。
 
-### 4.4 运算符重载 `operator` 语法 (t050)
+### 4.4 运算符重载 `operator` 语法 (t050 / t058 / t059)
 
-自定义 struct 可声明 `operator+ - * / %` 函数, 编译器在 `a+b` 处按操作数静态类型
-改写为一次普通函数调用 —— **编译期静态分派, 零运行时开销**:
+自定义 struct 可声明 operator 函数, 编译器在续写处按操作数静态类型改写为一次普通
+函数调用 —— **编译期静态分派, 零运行时开销**。语法(二元算术/一元用 C++ 风格运算符,
+比较/自增自减用派生名):
 
 ```c
-struct Vec3 operator+ (struct Vec3 a, struct Vec3 b) { ... }
-struct Vec3 c = a + b;      /* → operator+(a, b)  */
-struct Vec3 e = a + b*b;    /* 优先级由语法树天然保持 */
+struct Vec3 operator+ (struct Vec3 a, struct Vec3 b) { ... }  /* a+b */
+struct Vec3 operator! (struct Vec3 a)                         /* !a */
+struct Vec3 operator++ (struct Vec3 a)                        /* ++a / a++ */
+int operator_eq (struct Vec3 a, struct Vec3 b)                /* a==b */
+struct Vec3 c = a + b;      /* → operator+(a, b) */
 ```
 
-- **实现**: `operator` 保留字; 声明符把 `operator '+'` 拼成单一函数名 token;`gen_op`
-  遇 struct 二元算术, 查全局同名 `operator<op>` 函数 (精确匹配, 无隐式转换/ADL),
-  命中则改写调用;返回 struct 依 x86-64 ABI 走 sret 或寄存器落槽。
-- **边界**: 仅 `+ - * / %`, 精确单一匹配, 无隐式转换/成员/重载决议; 一元/比较暂不做。
+**支持类别** (命名约定 `operator_name_token`, tccgen.c):
+
+| 类别 | 运算符 | 函数名 | 返回 |
+|---|---|---|---|
+| 二元算术 | `+ - * / %` | `operator+ ... operator%` | struct |
+| 一元 | `! ~` | `operator!` / `operator~` | struct |
+| 比较 | `== != < <= > >=` | `operator_eq/ne/lt/le/gt/ge` | `int` |
+| 自增自减 | `++ --` | `operator++` / `operator--` | struct |
+
+- **实现**: `operator` 保留字拼单 token;`struct` 二元/一元算术与自增自减命中全局同名
+  函数 (精确匹配, 无隐式转换/ADL); 比较运算符返回 `int`。`++x/x++/--x/x--` 统一按
+  operator 传入副本、结果存回操作数 (前后缀值语义与 `-run` 一致)。返回 struct 依
+  x86-64 ABI 走 sret/寄存器落槽。
+- **复合赋值**: `a += b` 等编译期改写为 `a = a + b` (经 `operator<op>`)。
+- **边界**: 精确单一匹配, 无隐式转换/成员/重载决议。
 - **性能红线**: 重载是语法糖, 应转发到手写内核(如矩阵平铺 GEMM), 不得退化成标量
   `for` 循环。
 

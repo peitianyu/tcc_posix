@@ -3,6 +3,19 @@
 > 里程碑级变更摘要。README 只做概览。按时间序, 最新在上。
 > 完整逐提交历史用 `git log --oneline`。
 
+## 2026-08-23 — 运算符重载补全 + 脱糖同步 (operator → gcc/clang 产物闭环)
+
+- **新增运算符类别** (tccgen `operator_name_token`, t059 全面回归):
+  - 比较 `== != < <= > >=` → `operator_eq/ne/lt/le/gt/ge` (返回 `int`)
+  - 一元 `! ~` → `operator!` / `operator~`
+  - 自增自减 `++ --` → `operator++` / `operator--` (前后缀值语义一致, 存回操作数)
+  - 复合赋值 `+= -= *= /= %=` → 改写为 `a = a op b`
+- **脱糖同步**: tccpp `dg_*` 表驱动重构 (dg_op_tbl cover 全部可重载运算符), 表达式
+  `--emit-c` 完整改写 (比较/一元/自增减/复合赋值/if-while 条件)。修 scalar 污染:
+  形参 `int x` 等标量不再被误当作 operator 变量 → `x += 2` 保持原样。
+- **验证**: 5 个 operator 用例 (t050/t053/t054/t058/t059) 脱糖产物全部能以 gcc 编译
+  并运行通过 (环境无 clang)。docs/features.md §4.4。
+
 ## 2026-08-23 — `tcc -ar` 工具自足 (长文件名 + @listfile + r/d)
 
 - **GNU/BSD 长名表**: 成员名 >14 字符写入 `//` 伪成员字符串表, 成员名记
