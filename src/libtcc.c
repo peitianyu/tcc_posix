@@ -1834,9 +1834,9 @@ static uint32_t parse_version(TCCState *s1, const char *version)
 /* insert args from 'p' (separated by sep or ' ') into argv at position 'optind' */
 /* ============ @listfile 编译描述 (docs/listfile.md) ============
  * 增强 TCC 内置的 @file 响应文件: 支持 # 注释、引号 token、@嵌套、%(if/else/end)
- * 编译选择。变量来源: @os/@arch/@tcc 内建 + 现有 -D。
- * 注: 通配符(glob)展开暂缓 —— 自举外部 BOOT 为 msvcrt, 无 POSIX glob/opendir,
- *   加 musl 头又冲突; 需用内建目录枚举(P0.5)才可再加。 */
+ * 编译选择、通配符(glob)展开。变量来源: @os/@arch/@tcc 内建 + 现有 -D。
+ * 自举已可用 POSIX, 启用系统 glob 展开 `* ? [` 通配符(GLOB_NOCHECK 保留无匹配原样)。 */
+#include <glob.h>
 
 /* 内置变量求值 */
 static const char *list_var_get(const char *key, char **argv, int argc)
@@ -2006,9 +2006,23 @@ static void parse_list_args(const char *p, char **argv, int argc,
     }
 }
 
-/* 通配符展开入口(暂缓): 当前原样保留 token, 待内建目录枚举后启用 */
+/* 通配符展开: 含 * ? [ 的 token 用 glob 展开(相对 cwd); 无匹配则保留原样 */
 static void list_emit_token(char ***out, int *outn, const char *tok)
 {
+    if (strpbrk(tok, "*?[")) {
+        glob_t g;
+        size_t np, i;
+        memset(&g, 0, sizeof g);
+        if (glob(tok, GLOB_NOCHECK, NULL, &g) == 0 || g.gl_pathc) {
+            np = g.gl_pathc;
+            for (i = 0; i < np; i++)
+                if (g.gl_pathv[i])
+                    dynarray_add(out, outn, tcc_strdup(g.gl_pathv[i]));
+            globfree(&g);
+            if (np)
+                return;
+        }
+    }
     dynarray_add(out, outn, tcc_strdup(tok));
 }
 

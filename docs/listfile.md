@@ -98,7 +98,7 @@
 
 | 阶段 | 产出 | 验收 |
 |---|---|---|
-| P0 | `@listfile` 增强: 注释/引号/嵌套 + **glob 通配符**(`src/*.c`) | 简单 list + glob 编出 exe |
+| P0 | `@listfile` 增强: 注释/引号/嵌套 + **glob 通配符**(`src/*.c`) | ✅ 实现: 简单 list + glob(`*.c`) + %if 编出 exe |
 | P1 | `%if/%else/%end` 编译选择(@os/@arch/@tcc + `-D`) | 平台分支选对 |
 | P2 | `%dep` 包管理(缓存/克隆/注入 -I) | 拉依赖并 include 通过 |
 
