@@ -1832,6 +1832,204 @@ static uint32_t parse_version(TCCState *s1, const char *version)
 #endif
 
 /* insert args from 'p' (separated by sep or ' ') into argv at position 'optind' */
+/* ============ @listfile 编译描述 (docs/listfile.md) ============
+ * 增强 TCC 内置的 @file 响应文件: 支持 # 注释、引号 token、@嵌套、%(if/else/end)
+ * 编译选择。变量来源: @os/@arch/@tcc 内建 + 现有 -D。
+ * 注: 通配符(glob)展开暂缓 —— 自举外部 BOOT 为 msvcrt, 无 POSIX glob/opendir,
+ *   加 musl 头又冲突; 需用内建目录枚举(P0.5)才可再加。 */
+
+/* 内置变量求值 */
+static const char *list_var_get(const char *key, char **argv, int argc)
+{
+    int i, klen;
+    if (key[0] == '@') {
+#if defined(TCC_TARGET_PE)
+        if (!strcmp(key, "@os"))
+            return "win";
+#else
+        if (!strcmp(key, "@os"))
+            return "linux";
+#endif
+        if (!strcmp(key, "@arch"))
+#if defined(TCC_TARGET_X86_64)
+            return "x86_64";
+#elif defined(TCC_TARGET_ARM64)
+            return "aarch64";
+#elif defined(TCC_TARGET_ARM)
+            return "arm";
+#elif defined(TCC_TARGET_RISCV64)
+            return "riscv64";
+#else
+            return "unknown";
+#endif
+        if (!strcmp(key, "@tcc"))
+            return TCC_VERSION;
+        return NULL;
+    }
+    /* 普通 key: 查命令行 -D<key> 或 -D<key>=<val> */
+    klen = strlen(key);
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (a[0] == '-' && a[1] == 'D' && a[2]) {
+            const char *v = a + 2;
+            if (!strncmp(v, key, klen)) {
+                if (v[klen] == '\0')            /* -Dkey -> "1" */
+                    return "1";
+                if (v[klen] == '=')             /* -Dkey=val */
+                    return v + klen + 1;
+            }
+        }
+    }
+    return NULL;
+}
+
+static const char *list_val(const char *tok, char **argv, int argc)
+{
+    return list_var_get(tok, argv, argc);   /* @x / -D 名 -> 值; 字面量原样走下方 */
+}
+
+/* 求值 %if 条件: "A == B" / "A != B" / 单个非空(真)。变量/字面量皆可。 */
+static int eval_list_cond(const char *cond, char **argv, int argc)
+{
+    char a[160], b[160], op[8];
+    const char *va, *vb;
+
+    cond = cond + strspn(cond, " \t");
+    if (sscanf(cond, "%159s %7s %159s", a, op, b) == 3) {
+        va = list_var_get(a, argv, argc);
+        if (!va)
+            va = a;                             /* 非变量: 当作字面量 */
+        vb = list_var_get(b, argv, argc);
+        if (!vb)
+            vb = b;
+        if (!strcmp(op, "=="))
+            return !strcmp(va, vb);
+        if (!strcmp(op, "!="))
+            return strcmp(va, vb) != 0;
+        return 0;
+    }
+    if (sscanf(cond, "%159s", a) == 1) {        /* 单个 token: 变量=false / 字面量=true */
+        va = list_var_get(a, argv, argc);
+        return va ? strcmp(va, "0") != 0 : 1;
+    }
+    return 0;                                   /* 空条件: 假 */
+}
+
+/* 把一行按空白+双引号拆成 token, 追加到 *out */
+static void list_split_line(const char *s, char ***out, int *outn)
+{
+    while (*s) {
+        const char *tk;
+        int len;
+        while (*s == ' ' || *s == '\t')
+            s++;
+        if (!*s)
+            break;
+        if (*s == '"') {                        /* 引号组: 去引号, 取到闭合 */
+            s++;
+            tk = s;
+            while (*s && *s != '"')
+                s++;
+            len = s - tk;
+            if (*s == '"')
+                s++;
+        } else {
+            tk = s;
+            while (*s && *s != ' ' && *s != '\t')
+                s++;
+            len = s - tk;
+        }
+        if (len > 0) {
+            char *cp = tcc_malloc((size_t)len + 1);
+            memcpy(cp, tk, (size_t)len);
+            cp[len] = 0;
+            dynarray_add(out, outn, cp);
+        }
+    }
+}
+
+static void list_emit_token(char ***out, int *outn, const char *tok); /* 定义在其后 */
+
+/* 解析一个 @listfile 文本产出参数数组 (含 %if过滤/引号/注释; @嵌套与 %dep 原样/注入) */
+static void parse_list_args(const char *p, char **argv, int argc,
+                            char ***out, int *outn, const char *origin)
+{
+    struct { int on; int hit; } S[64];
+    int sp = 0;
+    const char *q = p;
+    char line[1024];
+
+    (void)origin;
+    S[0].on = 1; S[0].hit = 0;
+    while (*q) {
+        int ln = 0;
+        char *s;
+        while (*q && *q != '\n' && ln < (int)sizeof(line) - 1)
+            line[ln++] = *q++;
+        line[ln] = 0;
+        if (*q == '\n')
+            q++;
+        s = line + strspn(line, " \t");
+        ln = (int)strlen(s);
+        while (ln > 0 && (s[ln-1] == ' ' || s[ln-1] == '\t' || s[ln-1] == '\r'))
+            s[--ln] = 0;
+        if (!*s || *s == '#' || (s[0] == '/' && s[1] == '/'))
+            continue;
+        if (*s == '%') {
+            if (!strncmp(s, "%if ", 4)) {
+                if (sp < 63) {                              /* 提权并推栈 */
+                    int v = eval_list_cond(s + 4, argv, argc);
+                    sp++;
+                    S[sp].on  = (S[sp-1].on && v);
+                    S[sp].hit = v;
+                }
+            } else if (!strcmp(s, "%else")) {
+                S[sp].on  = (S[sp-1].on && !S[sp].hit);
+                S[sp].hit = 1;
+            } else if (!strcmp(s, "%end")) {
+                if (sp > 0)
+                    sp--;
+            }
+            /* %dep 等其余 % 指令: P2 阶段处理, 当前忽略 */
+            continue;
+        }
+        if (S[sp].on) {
+            char **tmp = NULL;
+            int tmpn = 0, ti;
+            list_split_line(s, &tmp, &tmpn);
+            for (ti = 0; ti < tmpn; ti++)
+                list_emit_token(out, outn, tmp[ti]);
+            for (ti = 0; ti < tmpn; ti++)
+                tcc_free(tmp[ti]);
+            tcc_free(tmp);
+        }
+    }
+}
+
+/* 通配符展开入口(暂缓): 当前原样保留 token, 待内建目录枚举后启用 */
+static void list_emit_token(char ***out, int *outn, const char *tok)
+{
+    dynarray_add(out, outn, tcc_strdup(tok));
+}
+
+/* 把已解析的 token 数组插入 argv 的 optind 位 (token 所有权转移给 argv) */
+static void insert_list_tokens(TCCState *s1, char ***pargv, int *pargc, int optind, char **na, int n)
+{
+    int argc = 0, i, k;
+    char **argv = NULL;
+    for (i = 0; i < *pargc; i++) {
+        if (i == optind) {
+            for (k = 0; k < n; k++)
+                dynarray_add(&argv, &argc, na[k]);
+        } else {
+            dynarray_add(&argv, &argc, tcc_strdup((*pargv)[i]));
+        }
+    }
+    dynarray_reset(&s1->argv, &s1->argc);
+    *pargc = s1->argc = argc;
+    *pargv = s1->argv = argv;
+}
+
 static void insert_args(TCCState *s1, char ***pargv, int *pargc, int optind, const char *p, int sep)
 {
     int argc = 0;
@@ -1878,7 +2076,13 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *pargc, char ***pargv)
             if (fd < 0)
                 return tcc_error_noabort("listfile '%s' not found", r);
             p = tcc_load_text(fd);
-            insert_args(s1, &argv, &argc, optind, p, 0);
+            { /* @listfile 增强解析(注释/引号/%if/glob) */
+                char **na = NULL;
+                int n = 0;
+                parse_list_args(p, argv, argc, &na, &n, "");
+                insert_list_tokens(s1, &argv, &argc, optind, na, n);
+                tcc_free(na);   /* 元素已转移给 argv, 只释放数组 */
+            }
             close(fd), tcc_free(p);
             continue;
         }
