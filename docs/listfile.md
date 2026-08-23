@@ -100,7 +100,7 @@
 |---|---|---|
 | P0 | `@listfile` 增强: 注释/引号/嵌套 + **glob 通配符**(`src/*.c`) | ✅ 实现: 简单 list + glob(`*.c`) + %if 编出 exe |
 | P1 | `%if/%else/%end` 编译选择(@os/@arch/@tcc + `-D`) | 平台分支选对 |
-| P2 | `%dep` 包管理(缓存/克隆/注入 -I) | 拉依赖并 include 通过 |
+| P2 | `%dep` 包管理(缓存/克隆/注入 -I) | ✅ 实现: git clone(`#ref` 分支) 或无 git 回退 curl tarball 到 `.tcc_cache/<owner__repo>[@ref]`(`TCC_CACHE` 覆盖), 命中缓存复用, 注入 `-I include`/`-L lib`; 标识符白名单防注入; 仅 musl 版启用([1/3] BOOT 无 POSIX system/access), list_dep 若拉取失败 fprintf 提示不注入 |
 
 ---
 

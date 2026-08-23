@@ -1834,9 +1834,12 @@ static uint32_t parse_version(TCCState *s1, const char *version)
 /* insert args from 'p' (separated by sep or ' ') into argv at position 'optind' */
 /* ============ @listfile 编译描述 (docs/listfile.md) ============
  * 增强 TCC 内置的 @file 响应文件: 支持 # 注释、引号 token、@嵌套、%(if/else/end)
- * 编译选择、通配符(glob)展开。变量来源: @os/@arch/@tcc 内建 + 现有 -D。
- * 自举已可用 POSIX, 启用系统 glob 展开 `* ? [` 通配符(GLOB_NOCHECK 保留无匹配原样)。 */
+ * 编译选择、通配符(glob)与 %dep 依赖(仅最终 musl 版启用; [1/3] 外部 BOOT 是
+ * msvcrt, 无 POSIX glob/unistd, 故用 #ifdef CONFIG_TCC_MUSL 排除以利自举)。
+ * 变量来源: @os/@arch/@tcc 内建 + 现有 -D。 */
+#ifdef CONFIG_TCC_MUSL
 #include <glob.h>
+#endif
 
 /* 内置变量求值 */
 static const char *list_var_get(const char *key, char **argv, int argc)
@@ -1949,6 +1952,7 @@ static void list_split_line(const char *s, char ***out, int *outn)
 }
 
 static void list_emit_token(char ***out, int *outn, const char *tok); /* 定义在其后 */
+static void list_dep(const char *arg, char ***out, int *outn);         /* 定义在其后 */
 
 /* 解析一个 @listfile 文本产出参数数组 (含 %if过滤/引号/注释; @嵌套与 %dep 原样/注入) */
 static void parse_list_args(const char *p, char **argv, int argc,
@@ -1989,8 +1993,12 @@ static void parse_list_args(const char *p, char **argv, int argc,
             } else if (!strcmp(s, "%end")) {
                 if (sp > 0)
                     sp--;
+            } else if (!strncmp(s, "%dep ", 5)) {
+                const char *d = s + 5;
+                while (*d == ' ' || *d == '\t')
+                    d++;
+                list_dep(d, out, outn);       /* 拉取/复用依赖并注入 -I/-L */
             }
-            /* %dep 等其余 % 指令: P2 阶段处理, 当前忽略 */
             continue;
         }
         if (S[sp].on) {
@@ -2006,6 +2014,7 @@ static void parse_list_args(const char *p, char **argv, int argc,
     }
 }
 
+#ifdef CONFIG_TCC_MUSL
 /* 通配符展开: 含 * ? [ 的 token 用 glob 展开(相对 cwd); 无匹配则保留原样 */
 static void list_emit_token(char ***out, int *outn, const char *tok)
 {
@@ -2025,8 +2034,100 @@ static void list_emit_token(char ***out, int *outn, const char *tok)
     }
     dynarray_add(out, outn, tcc_strdup(tok));
 }
+#else
+static void list_emit_token(char ***out, int *outn, const char *tok)
+{
+    dynarray_add(out, outn, tcc_strdup(tok));
+}
+#endif
 
-/* 把已解析的 token 数组插入 argv 的 optind 位 (token 所有权转移给 argv) */
+/* 依赖标识符白名单 (防路径穿越/注入) */
+static int list_idchar(int c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+        || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+}
+
+/* %dep owner/repo[#ref]: 拉取依赖到缓存并复用, 注入 -I <cache>/include -L <cache>/lib.
+ * 仅最终 musl 版启用([1/3] BOOT 无 POSIX system/access 也无目录遍历语义)。 */
+#ifdef CONFIG_TCC_MUSL
+static void list_dep(const char *arg, char ***out, int *outn)
+{
+    char owner[128], repo[128], ref[64], dir[640], inc[704], lib[704], cmd[1200];
+    const char *base, *p;
+    int i;
+
+    /* 解析 owner/repo[#ref] */
+    owner[0] = repo[0] = ref[0] = 0;
+    p = arg;
+    for (i = 0; p[i] && p[i] != '/' && i < 127; i++)
+        owner[i] = p[i];
+    owner[i] = 0;
+    if (p[i] == '/' && owner[0]) {
+        p += i + 1;
+        for (i = 0; p[i] && p[i] != '#' && i < 127; i++)
+            repo[i] = p[i];
+        repo[i] = 0;
+        if (p[i] == '#') {
+            p += i + 1;
+            for (i = 0; p[i] && i < 63; i++)
+                ref[i] = p[i];
+            ref[i] = 0;
+        }
+    }
+    if (!owner[0] || !repo[0])
+        return;
+    for (i = 0; owner[i]; i++) if (!list_idchar(owner[i])) return;
+    for (i = 0; repo[i]; i++)  if (!list_idchar(repo[i]))  return;
+    for (i = 0; ref[i]; i++)   if (!list_idchar(ref[i]))   return;
+
+    base = getenv("TCC_CACHE");
+    if (!base || !*base)
+        base = ".tcc_cache";
+    if (ref[0])
+        snprintf(dir, sizeof dir, "%s/%s__%s@%s", base, owner, repo, ref);
+    else
+        snprintf(dir, sizeof dir, "%s/%s__%s", base, owner, repo);
+
+    if (access(dir, F_OK) != 0) {               /* 缓存未就绪: 拉取 */
+        snprintf(cmd, sizeof cmd, "mkdir -p %s && git clone --depth 1%s%s "
+                 "https://github.com/%s/%s %s",
+                 base, ref[0] ? " --branch " : "", ref[0] ? ref : "",
+                 owner, repo, dir);
+        if (system(cmd) != 0) {                 /* 无 git 回退 curl tarball */
+            if (ref[0])
+                snprintf(cmd, sizeof cmd, "mkdir -p %s && curl -Ls "
+                         "https://codeload.github.com/%s/%s/tar.gz/%s | "
+                         "tar -xz --strip-components=1 -C %s",
+                         base, owner, repo, ref, dir);
+            else
+                snprintf(cmd, sizeof cmd, "mkdir -p %s && curl -Ls "
+                         "https://codeload.github.com/%s/%s/tar.gz/HEAD | "
+                         "tar -xz --strip-components=1 -C %s",
+                         base, owner, repo, dir);
+            if (system(cmd) != 0) {
+                fprintf(stderr, "tcc: dep %s/%s%s: fetch failed (need git/curl "
+                        "or pre-seeded cache)\n", owner, repo,
+                        ref[0] ? ref : "");
+                return;
+            }
+        }
+    }
+
+    /* 注入 include/lib */
+    snprintf(inc, sizeof inc, "%s/include", dir);
+    snprintf(lib, sizeof lib, "%s/lib", dir);
+    dynarray_add(out, outn, tcc_strdup("-I"));
+    dynarray_add(out, outn, tcc_strdup(inc));
+    dynarray_add(out, outn, tcc_strdup("-L"));
+    dynarray_add(out, outn, tcc_strdup(lib));
+}   /* list_dep */
+#else /* !CONFIG_TCC_MUSL */
+static void list_dep(const char *arg, char ***out, int *outn)
+{
+    (void)arg; (void)out; (void)outn;   /* [1/3] PE 自举版: %dep 不拉取, 忽略 */
+}
+#endif
 static void insert_list_tokens(TCCState *s1, char ***pargv, int *pargc, int optind, char **na, int n)
 {
     int argc = 0, i, k;
