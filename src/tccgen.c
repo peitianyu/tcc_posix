@@ -3057,6 +3057,106 @@ static int combine_types(CType *dest, SValue *op1, SValue *op2, int op)
     return ret;
 }
 
+/* C 运算符重载: 把单字符二元算术运算符 token 合成为函数名 "operator<op>" 的
+ * token 值. 仅支持 + - * / %; 其余运算符(包括 TOK_ 宏如比较/移位)返回 0. */
+static int operator_name_token(int op)
+{
+    char nm[24];
+    if (op != '+' && op != '-' && op != '*' && op != '/' && op != '%')
+        return 0;
+    sprintf(nm, "operator%c", (char)op);
+    return tok_alloc(nm, (int)strlen(nm))->tok;
+}
+
+/* C 运算符重载 (独立语言扩展, 见 docs/matrix-library.md 附录 B):
+ * struct 两操作数的二元算术运算, 若全局存在精确同名的 operator<op> 函数,
+ * 改写为一次普通函数调用. 属编译期静态分派, 零运行时开销.
+ * vstack 已含 [a, b] (vtop[-1]=左, vtop[0]=右); 命中则替换为调用, 返回 1;
+ * 否则返回 0 让标准 combine_types 处理/报错.
+ * 返回值处理仿 unary 的函数调用返回: struct 依 ABI 走 sret 隐藏指针或寄存器
+ * 落槽; 标量/float 直接 PUT_R_RET 设返回寄存器. */
+static int gen_op_operator(int op)
+{
+    CType ft, rt, rvt;
+    int t1, t2, bt1, bt2, opn;
+    Sym *s;
+    int ret_nregs, ret_align, regsize, size, align, addr, off;
+    SValue va, vb;
+
+    t1 = vtop[-1].type.t;
+    t2 = vtop[0].type.t;
+    bt1 = t1 & VT_BTYPE;
+    bt2 = t2 & VT_BTYPE;
+    if (!(bt1 == VT_STRUCT || bt2 == VT_STRUCT))
+        return 0;
+    opn = operator_name_token(op);
+    if (!opn)
+        return 0;
+    s = sym_find(opn);
+    if (!s)
+        return 0;
+    ft = s->type;
+    if ((ft.t & VT_BTYPE) != VT_FUNC)
+        return 0;
+    rt = ft.ref->type;   /* operator 函数返回类型 */
+
+    va = vtop[-1];
+    vb = vtop[0];
+    vtop -= 2;           /* 弹出以重建调用布局 [f, ...] */
+
+    if ((rt.t & VT_BTYPE) == VT_STRUCT) {
+        ret_nregs = gfunc_sret(&rt, 0, &rvt, &ret_align, &regsize);
+        if (ret_nregs > 0) {
+            /* 1/2/4/8B 小 struct 寄存器返回: [f,a,b] -> 返回寄存器落槽 */
+            vpushsym(&ft, s);
+            vpushv(&va);
+            vpushv(&vb);
+            gfunc_call(2);
+            vtop->type = rvt;
+            vtop->c.i = 0;
+            PUT_R_RET(vtop, rvt.t);
+            size = type_size(&rt, &align);
+            size = (size + regsize - 1) & -regsize;
+            if (ret_align > align)
+                align = ret_align;
+            loc = (loc - size) & -align;
+            addr = loc;
+            off = 0;
+            for (;;) {
+                vset(&rvt, VT_LOCAL | VT_LVAL, addr + off);
+                vswap();
+                vstore();
+                vtop--;
+                if (--ret_nregs == 0)
+                    break;
+                off += regsize;
+            }
+            vset(&rt, VT_LOCAL | VT_LVAL, addr);
+        } else {
+            /* sret: 返回槽 + 隐藏指针 (大 struct), 布局 [f,ptr,a,b] */
+            size = type_size(&rt, &align);
+            loc = (loc - size) & -align;
+            addr = loc;
+            vpushsym(&ft, s);          /* [f]    */
+            vseti(VT_LOCAL, addr);     /* [f,ptr] */
+            vpushv(&va);               /* [f,ptr,a] */
+            vpushv(&vb);               /* [f,ptr,a,b] */
+            gfunc_call(3);
+            vset(&rt, VT_LOCAL | VT_LVAL, addr);
+        }
+    } else {
+        /* 标量/float 返回: [f,a,b] -> PUT_R_RET */
+        vpushsym(&ft, s);
+        vpushv(&va);
+        vpushv(&vb);
+        gfunc_call(2);
+        vtop->type = rt;
+        vtop->c.i = 0;
+        PUT_R_RET(vtop, rt.t);
+    }
+    return 1;
+}
+
 /* generic gen_op: handles types problems */
 ST_FUNC void gen_op(int op)
 {
@@ -3092,7 +3192,9 @@ redo:
         return;   /* SIMD 原生运算符 (v4f+v4f 等) 已由后端模块发射 */
     } else
 #endif
-    if (!combine_types(&combtype, vtop - 1, vtop, op_class)) {
+    if (gen_op_operator(op)) {
+        return;   /* C 运算符重载: operator<op> 改写为函数调用 */
+    } else if (!combine_types(&combtype, vtop - 1, vtop, op_class)) {
 op_err:
         tcc_error("invalid operand types for binary operation");
     } else if (bt1 == VT_PTR || bt2 == VT_PTR) {
@@ -6036,8 +6138,18 @@ static CType *type_decl(CType *type, AttributeDef *ad, int *v, int td)
 	} else
 	  goto abstract;
     } else if (tok >= TOK_IDENT && (td & TYPE_DIRECT)) {
-	/* type identifier */
-	*v = tok;
+	/* type identifier, or a renamed operator<binop> function name */
+	if (tok == TOK_OPERATOR) {
+	    int opn;
+	    next();           /* consume 'operator'; next is the operator char */
+	    opn = operator_name_token(tok);
+	    if (!opn)
+	        tcc_error("operator: expected a binary arithmetic operator "
+	                  "(+ - * / %%)");
+	    *v = opn;
+	} else {
+	    *v = tok;
+	}
 	next();
     } else {
   abstract:

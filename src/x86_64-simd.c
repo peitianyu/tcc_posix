@@ -59,20 +59,23 @@ static CType simd_vtype(int kind)
     return t;
 }
 
-/* 判定 vstack 顶的类型是否为 SIMD 向量; 是则返回 kind, 否则 -1. */
+/* 判定 vstack 顶的类型是否为 SIMD 向量; 是则返回 kind, 否则 -1.
+ * 向量类型是 <simd.h> 里 typedef struct 的匿名 tag 符号: 其 token(s->v) 由 TCC
+ * 自动合成, 与 typedef 名不同, 故用指针比较识别 kind. 逐个按名解析出结构体符号,
+ * 与该类型 ref 指针对比; 未 include <simd.h> 时该名字符号为 NULL, 跳过该 kind,
+ * 因此对任意普通 struct 返回 -1 (不误伤, 也不用 tcc_error 强求 simd.h). */
 ST_FUNC int simd_vector_kind(CType *t)
 {
     int k;
     Sym *s = t->ref;
     if ((t->t & VT_BTYPE) != VT_STRUCT || !s)
         return -1;
-    /* 向量类型是 <simd.h> 里 typedef struct 的匿名 tag 符号: 其 token(s->v)
-       由 TCC 自动合成, 与 typedef 名不同, 故用指针比较与 simd_vtype(k) 解析
-       出的同一结构体符号对比来识别 kind. */
     for (k = 0; k < NB_SIMD_KIND; k++) {
-        CType vt = simd_vtype(k);
-        if (vt.ref == s)
-            return k;
+        Sym *st = sym_find(tok_alloc(simd_kind[k].name,
+                                     (int)strlen(simd_kind[k].name))->tok);
+        if (!st || st->type.ref != s)
+            continue;
+        return k;
     }
     return -1;
 }

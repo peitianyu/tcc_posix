@@ -25,11 +25,12 @@ build/tcc-win.exe -platform=linux examples/hello.c  # Linux ELF
 ./test.sh -linux       # 追加 Linux (WSL) 测试
 ```
 
-当前 **49/49 通过** (test.sh, Windows tcc 自编译运行)。覆盖 stdio/malloc/mmap/文件/目录/时间/
+当前 **50/50 通过** (test.sh, Windows tcc 自编译运行)。覆盖 stdio/malloc/mmap/文件/目录/时间/
 宽字符/信号/tmp 映射、pthread 全套 (create/join/mutex/cond/barrier/sem/递归锁)、
 线程压力、main 提前退出、tcc -run (含 futex 真阻塞)、ctype/setjmp/regex/search/
-fenv/multibyte/crypt/prng 模块 (t022-t028),语言扩展 defer (t029) 与
-model 泛型 (t031-t032) 及 model 常量参数 (t032b),
+fenv/multibyte/crypt/prng 模块 (t022-t028),语言扩展 defer (t029)、
+model 泛型 (t031-t032) 及 model 常量参数 (t032b)、
+运算符重载 (t050, operator 语法),
 SIMD 打包 SSE 内建 (t046,v4f/v2d/v4i/v8h/v16b),
 CPU 周期插桩 (t049, cpu-prof rdtsc),
 以及系统型回归 (t033-t045):
@@ -261,6 +262,32 @@ v4i r;  _mm_store_ps((float*)&r, _mm_cvttps_epi32(c));  /* 截断 f→i */
   (`_mm_div_epu8/16/32` 用 movzx+div,`_mm_div_epi8/16/32` 用 movsx+idiv),
   add/sub/mul 无论符号位完全一致。8/16-bit 的除法必须在寄存器加载除数
   (不能 `idivl [mem32]`,否则会读到相邻元素高字节)。
+
+**运算符重载 `operator` 语法** (t050, 独立语言扩展):自定义 struct 可声明
+`operator+ - * /` 等函数,编译器在 `a+b` 处按操作数静态类型改写为一次普通函数
+调用 —— **编译期静态分派, 零运行时开销**(与 SIMD 硬编码特化相对, 是同一系统
+里泛化的一极)。设计见 docs/matrix-library.md 附录 B:
+
+```c
+struct Vec3 { float x, y, z; };
+struct Vec3 operator+ (struct Vec3 a, struct Vec3 b) {
+    struct Vec3 r = { a.x+b.x, a.y+b.y, a.z+b.z }; return r;
+}
+struct Vec3 operator* (struct Vec3 a, struct Vec3 b) { ... }
+
+struct Vec3 c = a + b;   /* → operator+(a, b)  */
+struct Vec3 d = a * b;   /* → operator*(a, b)  */
+struct Vec3 e = a + b*b; /* 优先级由语法树天然保持: a + (b*b) */
+```
+
+- **实现**: `operator` 保留字 (tcctok.h);声明符把 `operator '+'` 拼成单一函数名
+  token (`operator+`);`gen_op` 遇 struct 二元算术, 查全局同名 `operator<op>`
+  函数 (精确匹配, 无隐式转换/ADL), 命中则 `vpushsym+vpushv+gfunc_call(2)` 改写;
+  返回 struct 依 x86-64 ABI 走 sret 隐藏指针或寄存器落槽 (仿 unary 返回)。
+- **边界**: 仅 `+ - * / %`,精确单一匹配,无隐式转换/成员/重载决议;多候选与
+  一元/比较暂不做;不显式调用 `operator+`(a,b)(它在表达式层是关键字)。
+- **性能红线**:重载是语法糖,应转发到手写内核(如矩阵平铺 GEMM),不得退化成
+  标量 `for` 循环。
 
 ## 已知限制
 
