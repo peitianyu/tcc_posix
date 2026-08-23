@@ -57,6 +57,7 @@ static const char help[] =
     "  -Dsym[=val]  define 'sym' with value 'val'\n"
     "  -Usym        undefine 'sym'\n"
     "  -E           preprocess only\n"
+    "  --emit-c     emit desugared standard C (extensions -> C text); -o out\n"
     "  -nostdinc    do not use standard system include paths\n"
     "Linker options:\n"
     "  -Ldir        add library path 'dir'\n"
@@ -455,7 +456,8 @@ redo:
         }
         if (s->nb_files == 0) {
             tcc_error_noabort("no input files");
-        } else if (s->output_type == TCC_OUTPUT_PREPROCESS) {
+        } else if (s->output_type == TCC_OUTPUT_PREPROCESS
+                || s->output_type == TCC_OUTPUT_DESUGAR) {
             if (s->outfile && 0!=strcmp("-",s->outfile)) {
                 ppfp = tcc_fopen(s->outfile, "wb");
                 if (!ppfp)
@@ -495,7 +497,8 @@ redo:
         s->ppfp = ppfp;
 
     if ((s->output_type == TCC_OUTPUT_MEMORY
-      || s->output_type == TCC_OUTPUT_PREPROCESS)
+      || s->output_type == TCC_OUTPUT_PREPROCESS
+      || s->output_type == TCC_OUTPUT_DESUGAR)
         && (s->dflag & 16)) { /* -dt option */
         if (t)
             s->dflag |= 32;
@@ -529,7 +532,8 @@ redo:
 
     if (s->run_test) {
         t = 0;
-    } else if (s->output_type == TCC_OUTPUT_PREPROCESS) {
+    } else if (s->output_type == TCC_OUTPUT_PREPROCESS
+            || s->output_type == TCC_OUTPUT_DESUGAR) {
         ;
     } else if (0 == ret) {
         if (s->output_type == TCC_OUTPUT_MEMORY) {

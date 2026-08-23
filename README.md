@@ -309,14 +309,30 @@ for (int i = 0; i < (int)r->nfield; i++)
 本项目把编译器用作 `TCC 魔改前端`(operator/model/SIMD/defer 等扩展)做**前期验证**,
 正式产物交给 **clang/LLVM** 生成 —— 因 clang 不认 TCC 扩展语法, 正式产物由 TCC 前端
 **脱糖输出标准 C (`gnu11` + `<immintrin.h>` intrinsic)**, 再 `clang -O3 -mavx2 -mfma`
-编译, 吃满 LLVM 自动向量化/FMA/内联(补 TCC 无 AVX/FMA 的短板)。映射:
+编译, 吃满 LLVM 自动向量化/FMA/内联(补 TCC 无 AVX/FMA 的短板)。**全链路已闭环**,
+设计见 docs/desugar.md, 性能实测见 docs/desugar-perf.md, 一键验收见 script/desugar.ps1:
 
-| 扩展 | 脱糖落点 |
-|---|---|
-| `operator a+b` | `operator+(a,b)` 函数调用 |
-| `model` 泛型 | 实例化后的具体类型/函数 |
-| SIMD `v4f` | `_mm_*` SSE intrinsic |
-| `defer` | `__attribute__((cleanup))` 或 goto 展开 |
+```sh
+powershell -File script\desugar.ps1 tests/t053_operator_expr.c   # host tcc --emit-c + WSL clang -O3 + 数字比对
+```
+
+**实现**(`tcc --emit-c`, 与 `-E` 共用 preprocess_loop 引擎但在 include 处走不同分支):
+- 保留系统 `#include` 指令不展开(避免 tcc 私有类型/绝对路径泄漏进正式产物, 交 clang
+  用自身 sysroot 重新解析); 预定义头不落地(需 `-DCONFIG_TCC_PREDEFS=1`)。
+- 扩展点改写落在 `tccpp` 的语句级缓冲(`dg_*` 模块)做 **token/precedence 级改写**,
+  `dg_expr` 用 precedence-climbing 建树, 右值类型向上传播, 括号/优先级忠实保留。
+
+| 扩展 | 脱糖落点 | 验收 |
+|---|---|---|
+| `operator a+b` | `operator+(a,b)` 函数调用 (嵌套/混合优先级完整改写) | t050/t053/t058 ✅ |
+| `defer` | 作用域逆序重放 + `return` 早退深度栈 LIFO | t055/t056 ✅ |
+| `model` 泛型 | 实例化点排出具体 struct/函数 (含常量参数) | t031/t032/t032b/t054 ✅ |
+| SIMD `v4f` | `a+b` **原样透传**(双模式 simd.h: gcc 侧 `v4f=__m128`, 原生编成 addps) | t046 + simd_demo ✅ |
+
+**性能对照 (**build/simd_bench.c**, docs/desugar-perf.md)**: 大规模向量点积累加,
+tcc 原生 **2.264 s** vs clang -O3 **≈0.06 s**, 提速约 **37×**, 且校验和双链完全一致
+(脱糖零语义开销)。这印证了正式产物取舍 —— tcc 用于秒级迭代验证, clang 用于最终
+高性能产物。
 
 musl 是 libc 非语法: Linux+musl 用 clang `--sysroot` 原生; Windows+psxscl 复用
 `.a`+头、另写 clang 驱动(盯 `-femulated-tls` 与 ABI)。完整决策链见

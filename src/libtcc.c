@@ -683,8 +683,10 @@ static void error1(int mode, const char *fmt, va_list ap)
         cstr_vprintf(&cs, fmt, ap);
     if (!s1->error_func) {
         /* default case: stderr */
-        if (s1 && s1->output_type == TCC_OUTPUT_PREPROCESS && s1->ppfp == stdout)
-            printf("\n"); /* print a newline during tcc -E */
+        if (s1 && (s1->output_type == TCC_OUTPUT_PREPROCESS
+            || s1->output_type == TCC_OUTPUT_DESUGAR)
+          && s1->ppfp == stdout)
+            printf("\n"); /* print a newline during tcc -E / --emit-c */
         fflush(stdout); /* flush -v output */
         fprintf(stderr, "%s\n", (char*)cs.data);
         fflush(stderr); /* print error/warning now (win32) */
@@ -829,6 +831,8 @@ static int tcc_compile(TCCState *s1, int filetype, const char *str, int fd)
 
         if (s1->output_type == TCC_OUTPUT_PREPROCESS) {
             tcc_preprocess(s1);
+        } else if (s1->output_type == TCC_OUTPUT_DESUGAR) {
+            tcc_desugar(s1);        /* 脱糖输出标准C(扩展语法→文本改写) */
         } else {
             tccelf_begin_file(s1);
             if (filetype & (AFF_TYPE_ASM | AFF_TYPE_ASMPP)) {
@@ -979,7 +983,8 @@ LIBTCCAPI int tcc_set_output_type(TCCState *s, int output_type)
         tcc_add_sysinclude_path(s, CONFIG_TCC_SYSINCLUDEPATHS);
     }
 
-    if (output_type == TCC_OUTPUT_PREPROCESS) {
+    if (output_type == TCC_OUTPUT_PREPROCESS
+        || output_type == TCC_OUTPUT_DESUGAR) {
         s->do_debug = 0;
         return 0;
     }
@@ -1233,8 +1238,9 @@ ST_FUNC int tcc_add_file_internal(TCCState *s1, const char *filename, int flags)
     if (0 == (flags & AFF_TYPE_MASK))
         flags |= guess_filetype(filename);
 
-    /* ignore binary files with -E */
-    if (s1->output_type == TCC_OUTPUT_PREPROCESS
+    /* ignore binary files with -E / --emit-c */
+    if ((s1->output_type == TCC_OUTPUT_PREPROCESS
+        || s1->output_type == TCC_OUTPUT_DESUGAR)
         && (flags & AFF_TYPE_BIN))
         return 0;
 
@@ -1594,6 +1600,7 @@ enum {
     TCC_OPTION_rstdin,
     TCC_OPTION_w,
     TCC_OPTION_E,
+    TCC_OPTION_emit_c,
     TCC_OPTION_M,
     TCC_OPTION_MD,
     TCC_OPTION_MF,
@@ -1678,6 +1685,7 @@ static const TCCOption tcc_options[] = {
     { "print-search-dirs", TCC_OPTION_print_search_dirs, 0 },
     { "w", TCC_OPTION_w, 0 },
     { "E", TCC_OPTION_E, 0},
+    { "-emit-c", TCC_OPTION_emit_c, 0 },
     { "M", TCC_OPTION_M, 0},
     { "MM", TCC_OPTION_MM, 0},
     { "MD", TCC_OPTION_MD, TCC_OPTION_HAS_ARG | TCC_OPTION_NOSEP },
@@ -2519,6 +2527,11 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *pargc, char ***pargv)
             break;
         case TCC_OPTION_E:
             x = TCC_OUTPUT_PREPROCESS;
+            goto set_output_type;
+        case TCC_OPTION_emit_c:
+            x = TCC_OUTPUT_DESUGAR;
+            if (optarg && *optarg)
+                tcc_set_str(&s->outfile, optarg);
             goto set_output_type;
         case TCC_OPTION_P:
             s->Pflag = atoi(optarg) + 1;

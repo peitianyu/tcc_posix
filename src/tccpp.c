@@ -1,4 +1,4 @@
-/*
+﻿/*
  *  TCC - Tiny C Compiler
  * 
  *  Copyright (c) 2001-2004 Fabrice Bellard
@@ -1372,6 +1372,16 @@ static int parse_include(TCCState *s1, int do_next, int test)
         memmove(p, p + 1, i - 1), p[i - 1] = 0;
     }
 
+    if (!test && s1->output_type == TCC_OUTPUT_DESUGAR) {
+        /* 脱糖: 保留 #include 指令本身, 不随 .c 一起展开.
+         * 这样产物交给 clang 时由它用自己的头文件树(如 musl sysroot) 重新解析,
+         * 避免 tcc 解析后的私有类型/绝对路径泄漏进正式产物. */
+        char d = (c == '<') ? '>' : '"';
+        if (!do_next) /* #include_next 顺序敏感, 脱糖不保留 */
+            fprintf(s1->ppfp, "#include %c%s%c\n", c, name, d);
+        return 0;
+    }
+
     if (!test)
         skip_to_eol(1);
 
@@ -1700,8 +1710,9 @@ static int pragma_parse(TCCState *s1)
     } else if (tok == TOK_once) {
         search_cached_include(s1, file->true_filename, 1)->once = 1;
 
-    } else if (s1->output_type == TCC_OUTPUT_PREPROCESS) {
-        /* tcc -E: keep pragmas below unchanged */
+    } else if (s1->output_type == TCC_OUTPUT_PREPROCESS
+            || s1->output_type == TCC_OUTPUT_DESUGAR) {
+        /* tcc -E / --emit-c: keep pragmas below unchanged */
         unget_tok(' ');
         unget_tok(TOK_PRAGMA);
         unget_tok('#');
@@ -3611,6 +3622,10 @@ static void tcc_predefs(TCCState *s1, CString *cs, int is_asm)
       putdef(cs, "__ASSEMBLER__");
     if (s1->output_type == TCC_OUTPUT_PREPROCESS)
       putdef(cs, "__TCC_PP__");
+    if (s1->output_type == TCC_OUTPUT_DESUGAR) {
+      putdef(cs, "__TCC_PP__");   /* 脱糖产物是预处理后的标准C */
+      putdef(cs, "__TCC_DESUGAR__");
+    }
     if (s1->output_type == TCC_OUTPUT_MEMORY)
       putdef(cs, "__TCC_RUN__");
 #ifdef CONFIG_TCC_BACKTRACE
@@ -3902,8 +3917,1731 @@ static int pp_check_he0xE(int t, const char *p)
     return t;
 }
 
-/* Preprocess the current file */
-ST_FUNC int tcc_preprocess(TCCState *s1)
+/* --------------------------------------------------------------------- */
+/* operator 脱糖 (token 层): 把 struct 二元算术 (operator<op> 重载) 降级为
+ * 标准 C 函数调用。
+ *
+ * 词法事实: 预处理层把 `operator` 切为独立关键字 token (TOK_OPERATOR),
+ * 其后的运算符字符 `+` 是独立 token。故本模块以"逻辑算符"看待
+ * `operator` + 紧随运算符两 token, 而非单一 `operator+` 字符串。
+ *
+ * 1. 定义处: `struct Vec3 operator+ (...)` 中的 `operator`+`+` 改名为
+ *    合法标准 C 名 `operator_add`, 并收集:
+ *       dg_op_reg[opchar] -> op id   (注册了哪些二元运算符)
+ *       dg_op_tag[opid]   -> struct tag token (operator 的返回/操作数类型)
+ *    只有注册过 operator 的编译才会启用改写 (dg_active).
+ * 2. 调用处: 对赋值右值做完全括号的忠实改写 (优先级/结合性无损):
+ *       a + b*b  ->  operator_add(a, operator_mul(b, b))
+ *    仅当 RHS 是"简单算术" (标识符/字面量/括号及其四则算符), 且左右任一侧是
+ *    operator 类型变量 (dg_var 命中) 才展开; 含函数调用/下标/字符串等
+ *    一律原样透传, 普通 `int x+y` 也不受影响 -> 无误伤.
+ * 3. 零回归: 未出现 operator 定义的编译 (t052/simd_demo/t046) 全程不启用
+ *    (dg_active==0), token 经文本快照原样透传, 与 --emit-c 现有行为一致.
+ *
+ * 重要: token 的 CValue (数字/字符串) 在 next() 后失效, 故缓冲时即对
+ * 每个 token 的文本做快照 (dg_txt), 重放/flush 全部基于快照, 避免脏读.
+ */
+
+#define DG_OPN 5
+static const char dg_op_chr[DG_OPN] = { '+', '-', '*', '/', '%' };
+static const char *dg_op_wrd[DG_OPN] = { "add", "sub", "mul", "div", "mod" };
+static int dg_op_reg[128];        /* [opchar] = op id (1..DG_OPN), 0 未注册 */
+static int dg_op_tag[DG_OPN + 1]; /* [op id] = struct tag token, 0 无 */
+static char dg_op_name[DG_OPN + 1][24]; /* [op id] = "operator_add" ... */
+static int dg_active;             /* 出现过 operator 定义 -> 启用改写 */
+
+static int dg_var_nm[8192];       /* var token */
+static int dg_var_tag[8192];      /* var 对应的 struct tag token */
+static int dg_varcnt;
+
+/* 语句级 token 缓冲 (收集到 LINEFEED 再整体处理) */
+#define DG_BUFN 4096
+static int dg_buf[DG_BUFN];       /* token 值 (判 is_space / TOK_OPERATOR / '=') */
+static char *dg_txt[DG_BUFN];     /* 文本快照 (缓冲时拷贝, 重放稳定) */
+static int dg_n;
+
+/* operator 表达式节点 (用于完全括号忠实改写).
+ * op: 0=叶; 正整数=二元运算符字符; 负值为扩展节点:
+ *   DG_OP_TERN  三元 cond?then:else  (l=cond, r=then, x=else)
+ *   DG_OP_CALL  函数调用           (l=被调函数叶, r=实参逗号链)
+ *   DG_OP_CM    逗号链 (实参)      (l=实参节点, r=下一个 CM 节点 或 -1) */
+#define DG_NODEN 8192
+#define DG_OP_TERN (-1)
+#define DG_OP_CALL (-2)
+#define DG_OP_CM   (-3)
+typedef struct {
+    int op;                  /* 0=叶, 正整数=二元运算符字符 token, 负值为扩展节点 */
+    int l, r;                /* 子节点索引 (叶为 -1) */
+    int x;                   /* 第三个节点 (三元 else) */
+    int tag;                 /* 叶若为 operator 类型变量则为 tag token */
+    char txt[64];            /* 叶文本 */
+} DGNode;
+static DGNode dg_ndo[DG_NODEN];
+static int dg_nndo;
+
+/* defer 脱糖: 按作用域收集 `func(args);` 调用文本, 闭块处逆序重放.
+ * TCC 的 defer 是"注册点求值参数、离开作用域逆序调用"; 脱糖在闭块点逆序发射
+ * 调用文本。仅覆盖块正常结束的落地路径 (return/goto/break 提前退出未展开,
+ * 仍以 TCC -run 为准)。 */
+#define DG_DEFER_MAXDEP 32
+#define DG_DEFER_MAXN  128
+static char *dg_defer[DG_DEFER_MAXDEP][DG_DEFER_MAXN];
+static int dg_defer_n[DG_DEFER_MAXDEP];
+static int dg_dep;                 /* 当前括号深度 (函数体内 >= 1) */
+static int dg_brak[DG_DEFER_MAXDEP]; /* 每个开放层: 1=语句块, 0=初始化器/表达式聚合 */
+
+static int dg_expr(int *pi, int min_prec);
+
+/* model 泛型状态: 前向声明 (完整定义在 model 小节), 供 dg_reset 清理 */
+typedef struct DgModelDef DgModelDef;
+static DgModelDef *dg_model_def;
+static int dg_mc;
+static CString dg_mb;
+static int dg_mbr;
+static int dg_msemi;
+static int dg_mbody;    /* 已进入定义体(首 token 后置1), 支撑函数泛型以 } 收尾 */
+static char *dg_model_out[512];
+static int dg_model_nout;
+static char *dg_fout_type[512];   /* 函数定义内累积的文件作用域 struct typedef 名去重 */
+static int dg_fout_typed;
+
+/* 函数泛型实例: 合成定义体延迟到文件末尾(函数作用域)发射.
+ * 原型在实例化点(语句级, `static ret name(args);` 合法)发射; 定义在 EOF 处
+ * 以文件作用域落地, 使 `Name(targs)(...)` 调用改写为可链接的合成函数名. */
+typedef struct DgModelFDef {
+    char *synth;                 /* 合成函数名 Name_Arg...(同 dg_model_synth) */
+    char *proto;                 /* 语句级原型文本 */
+    char *def;                   /* 文件作用域定义文本 (含所需嵌套 struct typedef) */
+    int  proto_printed;
+    struct DgModelFDef *next;
+} DgModelFDef;
+static DgModelFDef *dg_fdefs;
+static CString dg_fout_td;        /* 函数泛型定义所需的文件作用域 struct typedef 累积 */
+static int  dg_fout_td_init;
+static FILE *dg_tmpfile;          /* --emit-c 函数泛型: 主体缓冲临时文件 */
+static FILE *dg_saved_ppfp;       /* --emit-c 函数泛型: 真实的输出流 (EOF 回放) */
+static int  dg_buffering;
+static void dg_model_reset_impl(void); /* 结构体完整后再定义 */
+
+static void dg_reset(void)
+{
+    int i, d;
+    for (i = 0; i < 128; i++)
+        dg_op_reg[i] = 0;
+    for (i = 1; i <= DG_OPN; i++) {
+        dg_op_tag[i] = 0;
+        strcpy(dg_op_name[i], "operator_");
+        strcat(dg_op_name[i], dg_op_wrd[i - 1]);
+    }
+    dg_active = 0;
+    dg_varcnt = 0;
+    dg_n = 0;
+    /* model 泛型: 清空模板表 / 已发射 typedef 名 / 收集态 */
+    dg_model_reset_impl();
+    /* defer 栈: 清空各深度计数, 释放残留文本 (fresh start 通常为空) */
+    for (d = 0; d < DG_DEFER_MAXDEP; d++) {
+        for (i = 0; i < dg_defer_n[d]; i++)
+            if (dg_defer[d][i]) {
+                tcc_free(dg_defer[d][i]);
+                dg_defer[d][i] = NULL;
+            }
+        dg_defer_n[d] = 0;
+    }
+    dg_dep = 0;
+}
+
+/* op char -> op id (1..DG_OPN), 无关是否已注册 */
+static int dg_opidx(int ch)
+{
+    int i;
+    for (i = 0; i < DG_OPN; i++)
+        if (dg_op_chr[i] == ch)
+            return i + 1;
+    return 0;
+}
+
+static int dg_opid_for_char(int ch)
+{
+    return dg_op_reg[(unsigned char)ch];
+}
+
+/* 从 i+1 起的下一个非空格 token 下标; 无则 -1 */
+static int dg_next_ns(int i)
+{
+    int j;
+    for (j = i + 1; j < dg_n; j++)
+        if (!is_space(dg_buf[j]))
+            return j;
+    return -1;
+}
+
+/* dg_buf[i] 若为 TOK_OPERATOR 且其后紧跟已识别运算符字符, 返回该 opid; 否则 0 */
+static int dg_opat(int i)
+{
+    int j, opid;
+    if (dg_buf[i] != TOK_OPERATOR)
+        return 0;
+    j = dg_next_ns(i);
+    if (j < 0)
+        return 0;
+    opid = dg_opidx((unsigned char)dg_txt[j][0]);
+    if (opid && !dg_op_reg[(unsigned char)dg_txt[j][0]])
+        dg_op_reg[(unsigned char)dg_txt[j][0]] = opid;
+    return opid;
+}
+
+/* 变量 token -> struct tag; 返回 0 表示非 operator 类型变量 */
+static int dg_var_of(int tok)
+{
+    int i;
+    for (i = 0; i < dg_varcnt; i++)
+        if (dg_var_nm[i] == tok)
+            return dg_var_tag[i];
+    return 0;
+}
+
+static int dg_add_var(int tok, int tag)
+{
+    if (tok <= 0 || tag <= 0)
+        return 0;
+    if (dg_var_of(tok))
+        return 0;
+    if (dg_varcnt < 8192) {
+        dg_var_nm[dg_varcnt] = tok;
+        dg_var_tag[dg_varcnt] = tag;
+        dg_varcnt++;
+    }
+    return 1;
+}
+
+/* ---- 完全括号/忠实改写: 右值 -> DGNode 树 ---- */
+static int dg_tokchar(int i)
+{
+    return dg_txt[i] ? (unsigned char)dg_txt[i][0] : 0;
+}
+
+static int dg_prec(int ch)
+{
+    switch (ch) {
+    case '*': case '/': case '%': return 3;
+    case '+': case '-': return 2;
+    case '<': case '>': return 1;   /* 关系比较: 宽松绑定, 非 operator, 原样透传 */
+    default: return 0;
+    }
+}
+
+static int dg_tok_simple(int i)
+{
+    int ch;
+    if (is_space(dg_buf[i]))
+        return 1;
+    if (dg_buf[i] == TOK_OPERATOR)
+        return 0;
+    ch = dg_tokchar(i);
+    if (isid(ch) || isnum(ch) || ch == '_' || ch == '.')
+        return 1;
+    if (ch == '+' || ch == '-' || ch == '*' || ch == '/' || ch == '%'
+        || ch == '(' || ch == ')' || ch == ',' || ch == '?' || ch == ':'
+        || ch == '<' || ch == '>')
+        return 1;
+    return 0;
+}
+
+/* 右值片段 [from,to) 是否可进入改写 (放宽: 真正安全由 parse-boundary +
+ * has_rewrite 双重把关, 此处仅拦截毫不相关/悬空的片段) */
+static int dg_check_simple(int from, int to)
+{
+    int i;
+    for (i = from; i < to; i++)
+        if (!dg_tok_simple(i))
+            return 0;
+    return 1;
+}
+
+static int dg_newleaf(int i)
+{
+    DGNode *nd;
+    if (dg_nndo >= DG_NODEN)
+        return -1;
+    nd = &dg_ndo[dg_nndo];
+    nd->op = 0; nd->l = nd->r = -1;
+    nd->tag = dg_var_of(dg_buf[i]);
+    snprintf(nd->txt, sizeof nd->txt, "%s", dg_txt[i] ? dg_txt[i] : "");
+    return dg_nndo++;
+}
+
+/* 节点是否为 operator 类型 (叶: 已登记 struct 变量; 二元: 两侧 op 且 op 已注册, 类型向上传播) */
+static int dg_optagged(int n)
+{
+    if (n < 0)
+        return 0;
+    return dg_ndo[n].tag != 0;
+}
+/* 兼容旧名: 判断节点是否 operator 类型运算数 */
+static int dg_simplevar_node(int n)
+{
+    return dg_optagged(n);
+}
+
+/* 树中是否含"命中 operator 的二元展开": 需 op 已注册且两侧都 operator 类型 */
+static int dg_has_rewrite(int n)
+{
+    DGNode *nd;
+    if (n < 0)
+        return 0;
+    nd = &dg_ndo[n];
+    if (nd->op == 0)
+        return 0;
+    if (nd->op == DG_OP_CALL)
+        return dg_has_rewrite(nd->r);   /* 被调函数是叶(tag0), 只需查实参链 */
+    if (nd->op == DG_OP_CM)
+        return dg_has_rewrite(nd->l) || dg_has_rewrite(nd->r);
+    if (nd->op == DG_OP_TERN)
+        return dg_has_rewrite(nd->l) || dg_has_rewrite(nd->r) || dg_has_rewrite(nd->x);
+    if (dg_opid_for_char(nd->op)
+        && dg_optagged(nd->l) && dg_optagged(nd->r))
+        return 1;
+    return dg_has_rewrite(nd->l) || dg_has_rewrite(nd->r);
+}
+
+/* 构建函数调用节点: callee 为标识符叶, args 为 [from,to) 范围内的逗号链 */
+static int dg_call_node(int callee, int from, int to)
+{
+    int chain = -1, last = -1, i = from;
+    if (callee < 0)
+        return -1;
+    if (to <= from) {                       /* 空实参表 */
+        if (dg_nndo >= DG_NODEN)
+            return -1;
+        DGNode *nd = &dg_ndo[dg_nndo];
+        nd->op = DG_OP_CALL; nd->l = callee; nd->r = -1; nd->x = -1;
+        nd->tag = 0; nd->txt[0] = 0;
+        return dg_nndo++;
+    }
+    while (i < to) {                        /* 逐个实参: 递归解析, 逗号链接 */
+        int a = dg_expr(&i, 1);
+        if (a < 0)
+            return -1;
+        if (dg_nndo >= DG_NODEN)
+            return -1;
+        DGNode *cn = &dg_ndo[dg_nndo];
+        cn->op = DG_OP_CM; cn->l = a; cn->r = -1; cn->x = -1;
+        cn->tag = 0; cn->txt[0] = 0;
+        if (last >= 0)
+            dg_ndo[last].r = dg_nndo;
+        else
+            chain = dg_nndo;
+        last = dg_nndo++;
+        while (i < to && is_space(dg_buf[i]))
+            i++;
+        if (i < to && dg_tokchar(i) == ',') {
+            i++; continue;
+        }
+        break;
+    }
+    if (dg_nndo >= DG_NODEN)
+        return -1;
+    DGNode *nd = &dg_ndo[dg_nndo];
+    nd->op = DG_OP_CALL; nd->l = callee; nd->r = chain; nd->x = -1;
+    nd->tag = 0; nd->txt[0] = 0;
+    return dg_nndo++;
+}
+
+static int dg_primary(int *pi)
+{
+    int i = *pi, n, j;
+    while (i < dg_n && is_space(dg_buf[i]))  /* 跳过空格 token */
+        i++;
+    if (i >= dg_n)
+        return -1;
+    if (dg_tokchar(i) == '(') {
+        int inner;
+        i++;
+        inner = dg_expr(&i, 1);
+        if (inner < 0)
+            return -1;
+        if (i >= dg_n || dg_tokchar(i) != ')')
+            return -1;
+        i++;
+        while (i < dg_n && is_space(dg_buf[i]))   /* 归一: 定位下一个实 token */
+            i++;
+        n = inner;
+    } else {
+        n = dg_newleaf(i);
+        if (n < 0)
+            return -1;
+        i++;
+        while (i < dg_n && is_space(dg_buf[i]))
+            i++;
+    }
+    /* 后缀成员访问: `s.id` 折叠进叶文本 (标量成员, tag 清 0, 不误改).
+     * i 已指向首个非空 token, 直接判 '.'; 成员名用 next_ns 跳过其后的空格. */
+    while (i < dg_n && dg_tokchar(i) == '.'
+           && isid(dg_ndo[n].txt[0])) {
+        int k = dg_next_ns(i);
+        if (k < 0 || !isid(dg_tokchar(k)))
+            return -1;
+        {
+            size_t bl = strlen(dg_ndo[n].txt);
+            snprintf(dg_ndo[n].txt + bl, sizeof dg_ndo[n].txt - bl,
+                     ".%s", dg_txt[k] ? dg_txt[k] : "");
+        }
+        dg_ndo[n].tag = 0;       /* 成员是标量, 不再是 operator 类型 */
+        i = k + 1;
+        while (i < dg_n && is_space(dg_buf[i]))
+            i++;
+    }
+    /* 后缀函数调用: 叶 (标识) 后紧跟 '(' -> 参数改写调用 */
+    if (dg_ndo[n].op == 0 && i < dg_n && dg_tokchar(i) == '(') {
+        /* 定位与 '(' 配对的 ')' */
+        int b = i + 1, d = 1, clo = -1;
+        for (; b < dg_n; b++) {
+            if (is_space(dg_buf[b]))
+                continue;
+            if (dg_tokchar(b) == '(')
+                d++;
+            else if (dg_tokchar(b) == ')') {
+                if (--d == 0) { clo = b; break; }
+            }
+        }
+        if (clo < 0)
+            return -1;
+        n = dg_call_node(n, i + 1, clo);
+        if (n < 0)
+            return -1;
+        i = clo + 1;
+        while (i < dg_n && is_space(dg_buf[i]))
+            i++;
+    }
+    *pi = i;
+    return n;
+}
+
+static int dg_mkbin(int opch, int l, int r)
+{
+    DGNode *nd;
+    int tag;
+    if (l < 0 || r < 0)
+        return -1;
+    if (dg_nndo >= DG_NODEN)
+        return -1;
+    /* 类型向上传播: 仅当 op 已注册且两侧都为 operator 类型时, 该二元结果才视为 op 类型 */
+    tag = 0;
+    if (dg_op_reg[(unsigned char)opch] && dg_optagged(l) && dg_optagged(r))
+        tag = dg_ndo[l].tag;
+    nd = &dg_ndo[dg_nndo];
+    nd->op = opch; nd->l = l; nd->r = r; nd->x = -1; nd->tag = tag; nd->txt[0] = 0;
+    return dg_nndo++;
+}
+
+static int dg_mktern(int c, int t, int e)
+{
+    DGNode *nd;
+    int tag;
+    if (c < 0 || t < 0 || e < 0)
+        return -1;
+    if (dg_nndo >= DG_NODEN)
+        return -1;
+    tag = (dg_optagged(t) && dg_optagged(e)) ? dg_ndo[t].tag : 0;
+    nd = &dg_ndo[dg_nndo];
+    nd->op = DG_OP_TERN; nd->l = c; nd->r = t; nd->x = e; nd->tag = tag; nd->txt[0] = 0;
+    return dg_nndo++;
+}
+
+static int dg_expr(int *pi, int min_prec)
+{
+    int i = *pi, lhs;
+    lhs = dg_primary(&i);
+    if (lhs < 0)
+        return -1;
+    for (;;) {
+        int ch, prec, rhs, rp;
+        while (i < dg_n && is_space(dg_buf[i]))  /* 跳过空格 token */
+            i++;
+        if (i >= dg_n)
+            break;
+        ch = dg_tokchar(i);
+        prec = dg_prec(ch);
+        if (prec <= 0 || prec < min_prec)      /* 非二元/低于门槛 -> 交由上层 */
+            break;
+        i++;                      /* consume op */
+        rp = i;
+        rhs = dg_expr(&rp, prec + 1);  /* left-assoc: 右侧需更高级别 */
+        if (rhs < 0)
+            return -1;
+        i = rp;
+        lhs = dg_mkbin(ch, lhs, rhs);
+    }
+    /* 三元 (最低优先级, right-assoc): cond ? then : else.
+     * 注意: 循环结束后 i 已停在首个未消费的非空 token 上 (空格已跳过),
+     * 直接判 tokchar(i)=='?'. 不能 next_ns 越过 ')'/'/' 误判父级三元. */
+    if (min_prec <= 1) {
+        if (i < dg_n && dg_tokchar(i) == '?') {
+            int t, e;
+            i++;
+            t = dg_expr(&i, 1);      /* then */
+            if (t < 0)
+                return -1;
+            if (i >= dg_n || dg_tokchar(i) != ':')
+                return -1;
+            i++;
+            e = dg_expr(&i, 1);      /* else (可再含三元) */
+            if (e < 0)
+                return -1;
+            lhs = dg_mktern(lhs, t, e);
+        }
+    }
+    *pi = i;
+    return lhs;
+}
+
+/* 输出一个节点: 命中 operator 的简单变量运算 -> operator_<op>(l,r), 否则括号原样 */
+static void dg_pnode(CString *out, int n)
+{
+    DGNode *nd;
+    if (n < 0)
+        return;
+    nd = &dg_ndo[n];
+    if (nd->op == 0) {
+        cstr_cat(out, nd->txt, strlen(nd->txt));
+        return;
+    }
+    if (nd->op == DG_OP_CALL) {
+        dg_pnode(out, nd->l);             /* 被调函数名 (不改写) */
+        cstr_ccat(out, '(');
+        dg_pnode(out, nd->r);             /* 实参逗号链 */
+        cstr_ccat(out, ')');
+        return;
+    }
+    if (nd->op == DG_OP_CM) {
+        dg_pnode(out, nd->l);
+        if (nd->r >= 0) {
+            cstr_ccat(out, ',');
+            dg_pnode(out, nd->r);
+        }
+        return;
+    }
+    if (nd->op == DG_OP_TERN) {
+        cstr_ccat(out, '(');
+        dg_pnode(out, nd->l);
+        cstr_cat(out, ")?(", 3);
+        dg_pnode(out, nd->r);
+        cstr_cat(out, "):(", 3);
+        dg_pnode(out, nd->x);
+        cstr_ccat(out, ')');
+        return;
+    }
+    {
+        int opid = dg_opid_for_char(nd->op);
+        if (opid && dg_optagged(nd->l) && dg_optagged(nd->r)) {
+            cstr_cat(out, dg_op_name[opid], strlen(dg_op_name[opid]));
+            cstr_ccat(out, '(');
+            dg_pnode(out, nd->l);
+            cstr_ccat(out, ',');
+            dg_pnode(out, nd->r);
+            cstr_ccat(out, ')');
+        } else {
+            cstr_ccat(out, '(');
+            dg_pnode(out, nd->l);
+            cstr_ccat(out, ' ');
+            cstr_ccat(out, nd->op);
+            cstr_ccat(out, ' ');
+            dg_pnode(out, nd->r);
+            cstr_ccat(out, ')');
+        }
+    }
+}
+
+/* --------------------------------------------------------------------- */
+/* model 泛型脱糖 (token 层, struct/union 模板): 在实例化处展开为合成 typedef.
+ *
+ * 语法 (TCC 扩展):  model struct Name(T, int N, ...) { body };
+ *                  model union  Name(T)             { body };
+ * 实例化出现即改写:  Name(float, 4*3) var   ->   <synth> var
+ * 其中 <synth> 为合成 typedef 名 (Name_float_12), 首次用到时补发
+ *                  typedef struct <synth> { <body 参数替换> } <synth>;
+ * const 参数 (int N 声明) 实参做常量求值 (2+2->4) 用于合成名去重;
+ * body 内嵌套实例 (如 Node(T)* next) 递归展开.
+ * 函数泛型 (model (T) ret name(...) {...}) 不在此范围: 定义被丢弃, 相应调用点
+ * clang 会报类型错误 -> 已知限制 (见 docs/desugar.md roadmap).
+ */
+#define DG_MODEL_MAXP 32
+/* DgModelDef 已前向声明; 此处补全结构体定义 */
+struct DgModelDef {
+    char ntxt[24];               /* 模板名文本 */
+    int  kind;                   /* 'S' struct, 'U' union, 'F' 函数(丢弃) */
+    int  nparams;
+    char pk[DG_MODEL_MAXP];      /* 't' 类型参数 / 'c' 整型常量参数 */
+    char pn[DG_MODEL_MAXP][16];  /* 参数名 */
+    char *body;                  /* 体内 token 文本 (空格分隔, 无外层花括号) */
+    char *ret;                   /* 函数泛型: 返回类型文本 (待参数替换) */
+    char *fparams;               /* 函数泛型: 形参声明文本, 含左右括号 */
+    struct DgModelDef *next;
+};
+
+/* 清空 model 收集态 (dg_reset 调用; 结构体完整后定义) */
+static void dg_model_reset_impl(void)
+{
+    DgModelDef *m = dg_model_def, *nx;
+    int i;
+    while (m) {
+        nx = m->next;
+        if (m->body)
+            tcc_free(m->body);
+        if (m->ret)
+            tcc_free(m->ret);
+        if (m->fparams)
+            tcc_free(m->fparams);
+        tcc_free(m);
+        m = nx;
+    }
+    dg_model_def = NULL;
+    dg_model_nout = 0;
+    for (i = 0; i < dg_fout_typed; i++)
+        if (dg_fout_type[i]) {
+            tcc_free(dg_fout_type[i]);
+            dg_fout_type[i] = NULL;
+        }
+    dg_fout_typed = 0;
+    dg_mc = 0;
+    dg_mbr = 0;
+    dg_msemi = 0;
+    if (dg_mb.data) {
+        cstr_free(&dg_mb);
+        memset(&dg_mb, 0, sizeof dg_mb);
+    }
+    /* 待发射的函数泛型定义体 */
+    while (dg_fdefs) {
+        DgModelFDef *fp = dg_fdefs;
+        dg_fdefs = fp->next;
+        if (fp->synth)   tcc_free(fp->synth);
+        if (fp->proto)   tcc_free(fp->proto);
+        if (fp->def)     tcc_free(fp->def);
+        tcc_free(fp);
+    }
+    /* 函数泛型累积 typedef */
+    if (dg_fout_td_init) {
+        cstr_free(&dg_fout_td);
+        dg_fout_td_init = 0;
+    }
+    memset(&dg_fout_td, 0, sizeof dg_fout_td);
+}
+
+static void dg_model_emit(TCCState *s1, const DgModelDef *m, char av[][64]);
+static void dg_model_expand_src(TCCState *s1, const DgModelDef *m, char av[][64],
+                                const char *src, CString *out, CString *typedefs);
+static void dg_fdefs_flush(TCCState *s1);
+
+static DgModelDef *dg_model_find(const char *nm)
+{
+    DgModelDef *m;
+    for (m = dg_model_def; m; m = m->next)
+        if (!strcmp(m->ntxt, nm))
+            return m;
+    return NULL;
+}
+
+/* 把一个 token 文本并入收集缓冲 (token 间补单空格) */
+static void dg_madd(const char *s)
+{
+    if (dg_mb.size && dg_mb.data[dg_mb.size - 1] != ' ')
+        cstr_ccat(&dg_mb, ' ');
+    cstr_cat(&dg_mb, s, strlen(s));
+}
+
+/* 空格分隔文本 -> 单词数组 */
+static int dg_splitw(const char *s, char (*w)[16], int max)
+{
+    int n = 0;
+    while (s && *s) {
+        int j;
+        while (*s == ' ') s++;
+        if (!*s) break;
+        j = 0;
+        while (*s && *s != ' ' && j < 15) w[n][j++] = *s++;
+        w[n][j] = 0;
+        n++;
+        if (n >= max) break;
+    }
+    return n;
+}
+
+/* 是否为整型类型关键字 (常量参数判定: "int R") */
+static int dg_w_intkey(const char *w)
+{
+    return !strcmp(w, "int") || !strcmp(w, "char") || !strcmp(w, "short")
+        || !strcmp(w, "long") || !strcmp(w, "unsigned") || !strcmp(w, "signed");
+}
+
+/* 首尾空白就地裁掉, 返回指向正文的指针 (原地修改, 终有 NUL) */
+static const char *dg_trimstr(char *s)
+{
+    char *p = s;
+    size_t len;
+    while (*p == ' ' || *p == '\t' || *p == '\n')
+        p++;
+    len = strlen(p);
+    while (len && (p[len - 1] == ' ' || p[len - 1] == '\t' || p[len - 1] == '\n'))
+        p[--len] = 0;
+    return p;
+}
+
+/* word 数组 [a,b] 区间空格连接成 NUL 终结 C 字符串 (调用方 free) */
+static char *dg_join_words(char (*w)[16], int a, int b)
+{
+    CString c;
+    int i;
+    cstr_new(&c);
+    for (i = a; i <= b; i++) {
+        if (i > a)
+            cstr_ccat(&c, ' ');
+        if (w[i][0])
+            cstr_cat(&c, w[i], strlen(w[i]));
+    }
+    cstr_ccat(&c, 0);
+    {
+        char *r = tcc_strdup(c.data);
+        cstr_free(&c);
+        return r;
+    }
+}
+
+/* 从 word 数组 [ps,pe] 解析 model 类型参数段 ('(' ')' 之间, 以顶层 ',' 分段;
+ * 段含整型关键字=整型常量参数, 否则为类型参数). struct 与 函数泛型共用. */
+static void dg_model_parse_params(DgModelDef *m, char (*w)[16], int ps, int pe)
+{
+    int seg = ps, k;
+    m->nparams = 0;
+    for (k = ps; k <= pe; k++) {
+        int isconst = 0, j;
+        if (k != pe && strcmp(w[k], ","))
+            continue;
+        if (k == seg) { seg = k + 1; continue; }   /* 空段 */
+        for (j = seg; j < k; j++)
+            if (dg_w_intkey(w[j])) { isconst = 1; break; }
+        if (m->nparams >= DG_MODEL_MAXP)
+            break;
+        m->pk[m->nparams] = isconst ? 'c' : 't';
+        if (isconst) {
+            int li = k - 1;
+            while (li >= seg && dg_w_intkey(w[li])) li--;
+            snprintf(m->pn[m->nparams], 16, "%s", (li >= seg) ? w[li] : w[k - 1]);
+        } else {
+            snprintf(m->pn[m->nparams], 16, "%s", w[k - 1]);
+        }
+        m->nparams++;
+        seg = k + 1;
+    }
+}
+
+/* ---- 极小整型常量求值器 (空格分隔 token 文本) ---- */
+static long long dg_cint_expr(const char **pp);
+static long long dg_cint_factor(const char **pp)
+{
+    const char *p = *pp, *q;
+    char b[32];
+    int j = 0;
+    long long v;
+    while (*p == ' ') p++;
+    if (*p == '(') {
+        p++; *pp = p; v = dg_cint_expr(pp); p = *pp;
+        while (*p == ' ') p++; if (*p == ')') p++;
+        *pp = p; return v;
+    }
+    if (*p == '-') { p++; *pp = p; return -dg_cint_factor(pp); }
+    if (*p == '+') { p++; *pp = p; return dg_cint_factor(pp); }
+    q = p;
+    while (isid((unsigned char)*q) || isnum((unsigned char)*q)) q++;
+    j = (int)(q - p); if (j > 31) j = 31;
+    memcpy(b, p, j); b[j] = 0;
+    *pp = q;
+    return strtoll(b, NULL, 0);
+}
+static long long dg_cint_term(const char **pp)
+{
+    long long v = dg_cint_factor(pp);
+    const char *p = *pp;
+    for (;;) {
+        char c; long long r, base = v;
+        while (*p == ' ') p++; c = *p;
+        if (c != '*' && c != '/' && c != '%') { *pp = p; return v; }
+        p++; *pp = p; r = dg_cint_factor(pp); p = *pp;
+        if (c == '*') v = base * r;
+        else if (c == '/') v = r ? base / r : 0;
+        else v = r ? base % r : 0;
+    }
+}
+static long long dg_cint_expr(const char **pp)
+{
+    long long v = dg_cint_term(pp);
+    const char *p = *pp;
+    for (;;) {
+        char c; long long r, base = v;
+        while (*p == ' ') p++; c = *p;
+        if (c != '+' && c != '-') { *pp = p; return v; }
+        p++; *pp = p; r = dg_cint_term(pp); p = *pp;
+        v = (c == '+') ? base + r : base - r;
+    }
+}
+static long long dg_cint(const char *txt)
+{
+    const char *p = txt;
+    return dg_cint_expr(&p);
+}
+
+/* 收集结束: 解析 dg_mb 为一个 model 定义并登记.
+ * struct/union 泛型: 实例化处展开为合成 typedef;
+ * 函数泛型 `model (T, int N) RET name(args) { body }`: 登记为 'F' 模板,
+ * 实例化点(调用区)改写为合成函数名, 定义体延迟到文件末尾发射. */
+static void dg_model_finish(void)
+{
+    char w[512][16];
+    int n;
+    int i, openb = -1, closeb = -1;
+    DgModelDef *m;
+
+    cstr_ccat(&dg_mb, 0);            /* cstr_cat 不写 NUL, 先补终止符供 splitw */
+    n = dg_splitw(dg_mb.data, w, 512);
+
+    if (n < 3)
+        return;
+
+    if (!strcmp(w[1], "(")) {
+        /* ===== 函数泛型: w[1]='(' 类型参数表. 布局:
+         * model ( T , int N ) RET name ( args ) { body }                 */
+        int pclose = -1;
+        m = tcc_malloc(sizeof *m);
+        memset(m, 0, sizeof *m);
+        m->kind = 'F';
+        for (i = 2; i < n; i++)
+            if (!strcmp(w[i], ")")) { pclose = i; break; }
+        if (pclose < 0) { tcc_free(m); return; }
+        dg_model_parse_params(m, w, 2, pclose);
+        /* 函数名/体: 找最后一个 "{"(体) 前的函数名参数表 "(" */
+        for (i = n - 1; i >= 0; i--)
+            if (!strcmp(w[i], "}")) { closeb = i; break; }
+        if (closeb < 0) { tcc_free(m); return; }
+        for (i = closeb - 1; i >= 0; i--)
+            if (!strcmp(w[i], "{")) { openb = i; break; }
+        if (openb < 0) { tcc_free(m); return; }
+        {
+            int fp = -1, fname = -1, fpclose = -1, k;
+            /* 函数名参数表 "(": 其匹配 ")" 之后紧跟 "{" 者即为函数体参数表 */
+            for (i = pclose + 1; i < openb; i++) {
+                if (!strcmp(w[i], "(")) {
+                    int d = 1, j = i + 1;
+                    for (; j < n; j++) {
+                        if (!strcmp(w[j], "(")) d++;
+                        else if (!strcmp(w[j], ")") && --d == 0) break;
+                    }
+                    if (j < n && j + 1 < n && !strcmp(w[j + 1], "{")) { fp = i; fpclose = j; break; }
+                }
+            }
+            if (fp < 0 || fp - 1 <= pclose) { tcc_free(m); return; }
+            fname = fp - 1;
+            snprintf(m->ntxt, sizeof m->ntxt, "%s", w[fname]);
+            m->ret     = dg_join_words(w, pclose + 1, fname - 1);
+            m->fparams = dg_join_words(w, fp, fpclose);
+            m->body    = dg_join_words(w, openb + 1, closeb - 1);
+        }
+        m->next = dg_model_def;
+        dg_model_def = m;
+        return;
+    }
+
+    for (i = 0; i < n; i++) if (!strcmp(w[i], "{")) { openb = i; break; }
+    if (openb < 0)
+        return;
+    for (i = n - 1; i > openb; i--) if (!strcmp(w[i], "}")) { closeb = i; break; }
+    if (closeb < 0)
+        return;
+
+    m = tcc_malloc(sizeof *m);
+    memset(m, 0, sizeof *m);
+    m->kind = !strcmp(w[1], "union") ? 'U' : 'S';
+    snprintf(m->ntxt, sizeof m->ntxt, "%s", w[2]);
+
+    /* 参数: '(' ')' 之间按顶层 ',' 分段; 段含整型关键字=常量参数 */
+    {
+        int openp = -1, closep = -1;
+        for (i = 0; i < n; i++) if (!strcmp(w[i], "(")) { openp = i; break; }
+        if (openp < 0) { tcc_free(m); return; }
+        for (i = openp + 1; i < n; i++) if (!strcmp(w[i], ")")) { closep = i; break; }
+        if (closep < 0) { tcc_free(m); return; }
+        dg_model_parse_params(m, w, openp + 1, closep);
+    }
+
+    /* body: 外层花括号之间 token 文本 */
+    {
+        CString b;
+        cstr_new(&b);
+        for (i = openb + 1; i < closeb; i++) {
+            if (i > openb + 1)
+                cstr_ccat(&b, ' ');
+            cstr_cat(&b, w[i], strlen(w[i]));
+        }
+        cstr_ccat(&b, 0);            /* cstr_cat 不写 NUL, 补终止符供 strdup */
+        m->body = tcc_strdup(b.data);
+        cstr_free(&b);
+    }
+    m->next = dg_model_def;
+    dg_model_def = m;
+}
+
+/* 合成 typedef 名: Name_Arg1_Arg2... (类型参数去符号, 常量参数用值去重) */
+/* 合成类型名: 写入调用方提供的缓冲区 (此前返回 static buf, 嵌套 emit 递归调用
+ * dg_model_synth 会覆写之, 导致外层 fprintf 读到被污染的名字). */
+static void dg_model_synth(const DgModelDef *m, char av[][64], char *buf, int osize)
+{
+    CString n;
+    int i;
+    cstr_new(&n);
+    cstr_cat(&n, m->ntxt, strlen(m->ntxt));
+    for (i = 0; i < m->nparams; i++) {
+        const char *q;
+        cstr_ccat(&n, '_');
+        if (m->pk[i] == 'c') {
+            char tmp[24];
+            snprintf(tmp, sizeof tmp, "%lld", dg_cint(av[i]));
+            cstr_cat(&n, tmp, strlen(tmp));
+        } else {
+            for (q = av[i]; *q; q++) {
+                char c = *q;
+                if (!(isid((unsigned char)c) || isnum((unsigned char)c)))
+                    c = '_';
+                cstr_ccat(&n, c);
+            }
+        }
+    }
+    cstr_ccat(&n, 0);
+    snprintf(buf, osize, "%s", n.data);
+    cstr_free(&n);
+}
+
+/* 从单词数组中解析一个 model 实例的实参 (i 指向 '('), 返回实参数和终点下标 */
+static int dg_model_av_from_words(TCCState *s1, char (*w)[16], int n,
+                                  int i, const DgModelDef *m,
+                                  char av[][64], int *pend)
+{
+    int idx = i + 2, pos = 0, done = 0;   /* i->模板名, i+1='(', i+2 起为实参内容 */
+    if (idx > n)
+        return 0;
+    while (!done) {
+        CString a;
+        int d = 0, begin = 1;
+        cstr_new(&a);
+        for (; idx < n; idx++) {
+            const char *tok = w[idx];
+            if (!strcmp(tok, "(")) {
+                d++; cstr_ccat(&a, '('); begin = 0;
+            } else if (!strcmp(tok, ")")) {
+                /* 0 深度遇到 ')' = 本实例闭合 (实例自己的 '(' 已在 idx=i+2 前跳过,
+                 * 不再包进实参文本, 保证 `Node(int)` 的实参为干净的 `int` 而非 `( int`. */
+                if (d == 0) { done = 1; idx++; break; }
+                d--;
+                cstr_ccat(&a, ')'); begin = 0;
+            } else if (!strcmp(tok, ",") && d == 0) {
+                idx++; break;
+            } else {
+                DgModelDef *nn = dg_model_find(tok);
+                int nxj = idx + 1;
+                if (nn && nn->kind != 'F' && nxj < n && !strcmp(w[nxj], "(")) {
+                    char nav[DG_MODEL_MAXP][64];
+                    int ne;
+                    if (dg_model_av_from_words(s1, w, n, idx, nn, nav, &ne)) {
+                        char sn[384];
+                        dg_model_synth(nn, nav, sn, sizeof sn);
+                        dg_model_emit(s1, nn, nav);
+                        if (!begin) cstr_ccat(&a, ' ');
+                        cstr_cat(&a, sn, strlen(sn));
+                        begin = 0;
+                        idx = ne - 1;
+                        continue;
+                    }
+                }
+                if (!begin)
+                    cstr_ccat(&a, ' ');
+                cstr_cat(&a, tok, strlen(tok));
+                begin = 0;
+            }
+        }
+        if (pos < DG_MODEL_MAXP) {
+            int q = 0, e = a.size, L;
+            while (q < e && a.data[q] == ' ') q++;
+            while (e > q && a.data[e - 1] == ' ') e--;
+            L = (e - q < 63) ? (e - q) : 63;
+            memcpy(av[pos], a.data + q, L);
+            av[pos][L] = 0;
+            pos++;
+        }
+        cstr_free(&a);
+        if (done || pos > DG_MODEL_MAXP)
+            break;
+    }
+    if (pos != m->nparams)
+        return 0;
+    *pend = idx;
+    return 1;
+}
+
+/* 展开任意源文本 (body/ret/fparams): 先做参数名替换, 再解析体类嵌套实例并
+ * 递归发射. typedefs 非空时 (函数泛型定义体场景):
+ *   - 嵌套 struct/union 实例的合成 typedef 追加进 *typedefs (文件作用域累积),
+ *     引用以 `struct <n>`/`union <n>` tag 形式内联, 使整个定义自包含;
+ * typedefs 为空时沿用旧行为: 直接 dg_model_emit 打印到 ppfp (语句级). */
+static void dg_model_expand_src(TCCState *s1, const DgModelDef *m, char av[][64],
+                                const char *src, CString *out, CString *typedefs)
+{
+    char w[512][16], w2[512][16];
+    int n = dg_splitw(src ? src : "", w, 512);
+    int i, n2 = 0, pi;
+    /* phase1: 参数名替换为实参文本 */
+    for (i = 0; i < n; i++) {
+        int hit = 0, j;
+        for (j = 0; j < m->nparams; j++) {
+            if (!strcmp(w[i], m->pn[j])) {
+                pi = j; hit = 1; break;
+            }
+        }
+        if (hit && m->pk[pi] == 'c') {
+            char tmp[24];
+            snprintf(tmp, sizeof tmp, "%lld", dg_cint(av[pi]));
+            snprintf(w2[n2++], 16, "%s", tmp);
+        } else if (hit) {
+            /* 类型参数: 拆词填入 (av 可能含空格) */
+            char x[512][16];
+            int xn = dg_splitw(av[pi], x, 512), k;
+            for (k = 0; k < xn; k++)
+                snprintf(w2[n2++], 16, "%s", x[k]);
+        } else {
+            snprintf(w2[n2++], 16, "%s", w[i]);
+        }
+    }
+    /* phase2: 嵌套模型实例 -> tag/合成名 + 发射其 typedef */
+    for (i = 0; i < n2;) {
+        DgModelDef *nn = dg_model_find(w2[i]);
+        if (nn && nn->kind != 'F' && i + 1 < n2 && !strcmp(w2[i + 1], "(")) {
+            char na[DG_MODEL_MAXP][64];
+            int ne;
+            if (dg_model_av_from_words(s1, w2, n2, i, nn, na, &ne)) {
+                char sn[384];
+                dg_model_synth(nn, na, sn, sizeof sn);
+                if (typedefs) {
+                    /* 函数定义场景: 累积 typedef 到文件作用域, 引用用 tag 形式 */
+                    int k, seen = 0;
+                    for (k = 0; k < dg_fout_typed; k++)
+                        if (!strcmp(dg_fout_type[k], sn)) { seen = 1; break; }
+                    if (!seen && dg_fout_typed < 512) {
+                        CString tb;
+                        cstr_new(&tb);
+                        dg_model_expand_src(s1, nn, na, nn->body ? nn->body : "", &tb, typedefs);
+                        cstr_ccat(&tb, 0);
+                        /* 让内层递归先落 typedefs, 这里补自身 typedef 行 */
+                        {
+                            char decl[1024];
+                            snprintf(decl, sizeof decl, "typedef %s %s { %s } %s;\n",
+                                     nn->kind == 'U' ? "union" : "struct",
+                                     sn, tb.data, sn);
+                            cstr_cat(typedefs, decl, strlen(decl));
+                        }
+                        dg_fout_type[dg_fout_typed++] = tcc_strdup(sn);
+                        cstr_free(&tb);
+                    }
+                    if (out->size && out->data[out->size - 1] != ' ')
+                        cstr_ccat(out, ' ');
+                    cstr_cat(out, nn->kind == 'U' ? "union " : "struct ",
+                             nn->kind == 'U' ? 6 : 7);
+                    cstr_cat(out, sn, strlen(sn));
+                    i = ne;
+                    continue;
+                }
+                dg_model_emit(s1, nn, na);
+                if (out->size && out->data[out->size - 1] != ' ')
+                    cstr_ccat(out, ' ');
+                /* 体内嵌套实例用 tag 形式 (`struct Link_int`/`union Val_int`):
+                 * typedef 名要等花括号闭合后才进作用域, 自引成员 `Node(T)* next`
+                 * 若写成 `Node_int* next` 会触发 gcc "unknown type name". */
+                const char *tagpre = (nn->kind == 'U') ? "union " : "struct ";
+                cstr_cat(out, tagpre, strlen(tagpre));
+                cstr_cat(out, sn, strlen(sn));
+                i = ne;
+                continue;
+            }
+        }
+        if (out->size && out->data[out->size - 1] != ' ')
+            cstr_ccat(out, ' ');
+        cstr_cat(out, w2[i], strlen(w2[i]));
+        i++;
+    }
+}
+
+static void dg_model_expand(TCCState *s1, const DgModelDef *m,
+                            char av[][64], CString *out)
+{
+    dg_model_expand_src(s1, m, av, m->body ? m->body : "", out, NULL);
+}
+
+static int dg_model_out_has(const char *s)
+{
+    int i;
+    for (i = 0; i < dg_model_nout; i++)
+        if (!strcmp(dg_model_out[i], s))
+            return 1;
+    return 0;
+}
+
+/* 发射(并去重)合成 typedef; mark-before-expand 防递归自引无限展开 */
+static void dg_model_emit(TCCState *s1, const DgModelDef *m, char av[][64])
+{
+    char synth[384];
+    CString body;
+
+    dg_model_synth(m, av, synth, sizeof synth);
+    if (dg_model_out_has(synth))
+        return;
+    /* 若该合成名已在文件作用域落地(函数泛型定义所需), 则此处不再发射块作用域
+     * typedef —— 否则线file作用域 + 块作用域各一份同名 struct, 会形成两个不同
+     * 类型导致指针不兼容告警. 引用直接用文件作用域的 typedef 名即可. */
+    {
+        int k;
+        for (k = 0; k < dg_fout_typed; k++)
+            if (!strcmp(dg_fout_type[k], synth)) {
+                if (dg_model_nout < 512)
+                    dg_model_out[dg_model_nout++] = tcc_strdup(synth);
+                return;
+            }
+    }
+    if (dg_model_nout < 512)
+        dg_model_out[dg_model_nout++] = tcc_strdup(synth);
+    cstr_new(&body);
+    dg_model_expand(s1, m, av, &body);
+    if (body.size) {
+        cstr_ccat(&body, 0);        /* cstr_cat 不写 NUL, 需显式补终止符供 %s */
+        fprintf(s1->ppfp, "typedef %s %s { %s } %s;\n",
+                m->kind == 'U' ? "union" : "struct", synth, body.data, synth);
+    }
+    cstr_free(&body);
+}
+
+/* 登记一个函数泛型实例 (同类型实参去重, 每次调用仅登记一次):
+ * 展开返回/形参/体到自包含定义文本; 嵌套 struct 的 typedef 累积进 dg_fout_td
+ * (文件作用域, 全局去重), ref 用 `struct <sn>` tag 形式.
+ * 定义在 EOF 处 (dg_fdefs_flush) 发射且物理置于主体之前, 故 main 内调用点在
+ * 编译时先见到定义(即可充当原型), 无需在表达式内插入声明. */
+static void dg_model_f_register(TCCState *s1, const DgModelDef *m, char av[][64])
+{
+    char sn[384];
+    DgModelFDef *fp;
+    CString ret, fp_, body, def;
+    if (!dg_fout_td_init) {
+        cstr_new(&dg_fout_td);
+        dg_fout_td_init = 1;
+    }
+    dg_model_synth(m, av, sn, sizeof sn);
+    for (fp = dg_fdefs; fp; fp = fp->next)
+        if (!strcmp(fp->synth, sn))
+            return;                        /* 已登记 */
+    fp = tcc_malloc(sizeof *fp);
+    memset(fp, 0, sizeof *fp);
+    fp->synth = tcc_strdup(sn);
+    /* 展开: tag 形式引用 + 共享 dg_fout_td 累积 typedef.
+     * 注意 expand_src 输出 CString 不带 NUL, 全程用 .size 而非 strlen. */
+    cstr_new(&ret); cstr_new(&fp_); cstr_new(&body); cstr_new(&def);
+    dg_model_expand_src(s1, m, av, m->ret ? m->ret : "int", &ret, &dg_fout_td);
+    dg_model_expand_src(s1, m, av, m->fparams ? m->fparams : "", &fp_, &dg_fout_td);
+    dg_model_expand_src(s1, m, av, m->body ? m->body : "", &body, &dg_fout_td);
+    {
+        const char *R = ret.size ? ret.data : "int";
+        const char *B = body.size ? body.data : ";";
+        int Rlen = ret.size ? (int)ret.size : 3;
+        int Blen = body.size ? (int)body.size : 1;
+        cstr_cat(&def, "static ", 7);
+        cstr_cat(&def, R, Rlen);
+        cstr_ccat(&def, ' ');
+        cstr_cat(&def, sn, strlen(sn));
+        if (fp_.size && fp_.data)
+            cstr_cat(&def, fp_.data, (int)fp_.size);
+        cstr_cat(&def, "\n{\n", 3);
+        cstr_cat(&def, B, Blen);
+        cstr_cat(&def, "\n}\n", 3);
+        cstr_ccat(&def, 0);
+        fp->def = tcc_strdup(def.data);
+    }
+    cstr_free(&ret); cstr_free(&fp_); cstr_free(&body); cstr_free(&def);
+    fp->next = dg_fdefs;
+    dg_fdefs = fp;
+}
+
+/* EOF: 发射函数泛型所需 typedefs 与各定义 (先 typedef 后定义, 各定义经全局去重
+ * 的 typedef 前缀自引用 tag 均可见). */
+static void dg_fdefs_flush(TCCState *s1)
+{
+    DgModelFDef *fp;
+    if (dg_fout_td_init && dg_fout_td.size && dg_fout_td.data) {
+        fwrite(dg_fout_td.data, 1, dg_fout_td.size, s1->ppfp);
+        fputc('\n', s1->ppfp);
+    }
+    for (fp = dg_fdefs; fp; fp = fp->next)
+        if (fp->def)
+            fputs(fp->def, s1->ppfp);
+}
+
+/* 从 token 缓冲解析一个 model 实例 (i 指向模板名, 其后应为 '('), 返回实参 */
+static int dg_model_av_from_tokens(TCCState *s1, int i,
+                                   const DgModelDef *m,
+                                   char av[][64], int *pend)
+{
+    int idx = dg_next_ns(i), k, pos = 0, done = 0;
+    if (idx < 0 || dg_tokchar(idx) != '(')
+        return 0;
+    idx++;
+    k = idx;
+    while (k < dg_n && is_space(dg_buf[k])) k++;
+    if (k < dg_n && dg_tokchar(k) == ')') { *pend = k + 1; return 0; }
+    while (!done) {
+        CString a;
+        int d = 0, begin = 1;
+        cstr_new(&a);
+        for (; idx < dg_n; idx++) {
+            int ch, nx;
+            if (is_space(dg_buf[idx]))
+                continue;
+            ch = dg_tokchar(idx);
+            if (ch == '(') {
+                d++; cstr_ccat(&a, '('); begin = 0;
+            } else if (ch == ')') {
+                if (d == 0) { done = 1; idx++; break; }
+                d--; cstr_ccat(&a, ')'); begin = 0;
+            } else if (ch == ',' && d == 0) {
+                idx++; break;
+            } else {
+                DgModelDef *nn = (dg_buf[idx] >= TOK_IDENT) ? dg_model_find(dg_txt[idx]) : NULL;
+                nx = dg_next_ns(idx);
+                if (nn && nn->kind != 'F' && nx < dg_n && dg_tokchar(nx) == '(') {
+                    char na[DG_MODEL_MAXP][64];
+                    int ne;
+                    if (dg_model_av_from_tokens(s1, idx, nn, na, &ne)) {
+                        char sn[384];
+                        dg_model_synth(nn, na, sn, sizeof sn);
+                        dg_model_emit(s1, nn, na);
+                        if (!begin) cstr_ccat(&a, ' ');
+                        cstr_cat(&a, sn, strlen(sn));
+                        begin = 0;
+                        idx = ne - 1;
+                        continue;
+                    }
+                }
+                if (!begin)
+                    cstr_ccat(&a, ' ');
+                cstr_cat(&a, dg_txt[idx] ? dg_txt[idx] : "", dg_txt[idx] ? strlen(dg_txt[idx]) : 0);
+                begin = 0;
+            }
+        }
+        if (pos < DG_MODEL_MAXP) {
+            int q = 0, e = a.size, L;
+            while (q < e && a.data[q] == ' ') q++;
+            while (e > q && a.data[e - 1] == ' ') e--;
+            L = (e - q < 63) ? (e - q) : 63;
+            memcpy(av[pos], a.data + q, L);
+            av[pos][L] = 0;
+            pos++;
+        }
+        cstr_free(&a);
+        if (done || pos > DG_MODEL_MAXP)
+            break;
+    }
+    if (pos != m->nparams)
+        return 0;
+    *pend = idx;
+    return 1;
+}
+
+/* 预扫描 [from,to) 内全部 model 实例化点, 先把合成 typedef 落地到 ppfp.
+ * 保证 `Box(double)` 即使在表达式内 (sizeof/实参) 也能先以语句级 typedef 声明,
+ * 后续 token 处仅替换为合成类型名, 避免在表达式中内联 typedef (语法错误). */
+static void dg_emit_verbatim_pre_models(TCCState *s1, int from, int to)
+{
+    int i;
+    for (i = from; i < to; i++) {
+        if (is_space(dg_buf[i]))
+            continue;
+        if (dg_buf[i] >= TOK_IDENT) {
+            DgModelDef *mm = dg_model_find(dg_txt[i]);
+            if (mm && mm->kind != 'F') {
+                int nx = dg_next_ns(i);
+                if (nx < dg_n && nx < to && dg_tokchar(nx) == '(') {
+                    char av[DG_MODEL_MAXP][64];
+                    int end;
+                    if (dg_model_av_from_tokens(s1, i, mm, av, &end)) {
+                        dg_model_emit(s1, mm, av);  /* 去重, 先落地 typedef */
+                        i = end - 1;
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void dg_emit_verbatim(TCCState *s1, int from, int to)
+{
+    int i, last = 0;
+    /* 先把本单元内 model 实例的合成 typedef 落地到语句级, 再逐 token 替换名字 */
+    dg_emit_verbatim_pre_models(s1, from, to);
+    for (i = from; i < to; i++) {
+        int t = dg_buf[i];
+        if (is_space(t)) {          /* 空格 token: 快照精确重放 */
+            fputs(dg_txt[i] ? dg_txt[i] : " ", s1->ppfp);
+            continue;
+        }
+        if (last && pp_need_space(last, t))
+            fputc(' ', s1->ppfp);
+        /* model 实例化: 模板名紧接 '(' -> 合成 typedef 并改写 */
+        if (t >= TOK_IDENT) {
+            DgModelDef *mm = dg_model_find(dg_txt[i]);
+            if (mm && mm->kind == 'F') {
+                /* 函数泛型调用点: `Name(targs)(args)`. 只登记并改写名字,
+                 * 实参 `(args)` 原样保留; 定义/typedef 在 EOF 统一发射. */
+                int nx = dg_next_ns(i);
+                if (nx < dg_n && dg_tokchar(nx) == '(') {
+                    char av[DG_MODEL_MAXP][64];
+                    int end;
+                    if (dg_model_av_from_tokens(s1, i, mm, av, &end)) {
+                        char sn[384];
+                        dg_model_f_register(s1, mm, av);
+                        dg_model_synth(mm, av, sn, sizeof sn);
+                        fputs(sn, s1->ppfp);
+                        last = t;
+                        i = end - 1;      /* 跳过模板名与类型实参, `(args)` 续写 */
+                        continue;
+                    }
+                }
+            } else if (mm && mm->kind != 'F') {
+                int nx = dg_next_ns(i);
+                if (nx < dg_n && dg_tokchar(nx) == '(') {
+                    char av[DG_MODEL_MAXP][64];
+                    int end;
+                    if (dg_model_av_from_tokens(s1, i, mm, av, &end)) {
+                        char sn[384];
+                        dg_model_emit(s1, mm, av);
+                        dg_model_synth(mm, av, sn, sizeof sn);
+                        fputs(sn, s1->ppfp);
+                        last = t;
+                        i = end - 1;      /* 跳过模板名与实参 */
+                        continue;
+                    }
+                }
+            }
+        }
+        if (t == TOK_OPERATOR) {
+            int opid = dg_opat(i);     /* 顺带注册 op */
+            if (opid) {
+                fputs(dg_op_name[opid], s1->ppfp);
+                last = t;
+                i = dg_next_ns(i);     /* 跳过紧跟的运算符字符 token */
+                continue;
+            }
+        }
+        fputs(dg_txt[i] ? dg_txt[i] : "", s1->ppfp);
+        last = t;
+    }
+}
+
+/* 尝试改写表达式区域 [from,to): 命中则发射改写后的标准 C 文本并返回 1;
+ * 未命中/非简单/未启用则返回 0 (不发射, 调用方回退 verbatim). */
+static int dg_region_rewrite(TCCState *s1, int from, int to)
+{
+    int ypos, root;
+    if (!dg_active || from < 0 || from >= to)
+        return 0;
+    dg_nndo = 0;
+    ypos = from;
+    root = dg_expr(&ypos, 1);
+    if (root >= 0 && ypos >= to && ypos > from
+        && dg_check_simple(from, ypos) && dg_has_rewrite(root)) {
+        CString out;
+        cstr_new(&out);
+        dg_pnode(&out, root);
+        if (out.size) {
+            fwrite(out.data, 1, out.size, s1->ppfp);
+            cstr_free(&out);
+            return 1;
+        }
+        cstr_free(&out);
+    }
+    return 0;
+}
+
+/* 判断当前缓存单元是否以 `defer` 开头 (语句级这样写: `defer f(a);`) */
+static int dg_is_defer_line(void)
+{
+    int i;
+    for (i = 0; i < dg_n; i++)
+        if (!is_space(dg_buf[i]))
+            return dg_buf[i] == TOK_DEFER;
+    return 0;
+}
+
+/* 从 defer 行提取 `<call text>` 并存入当前深度 dg_dep; 调用文本 = 紧随 defer 的
+ * 标识符起至顶层 `;` 之前所有非空格 token, 紧凑拼接 (含 operator 名改写). */
+static void dg_defer_push(TCCState *s1)
+{
+    int i, start, end, depth = 0, last = 0;
+    CString cs;
+    (void)s1;
+    /* defer 后首个非空 token 下标 */
+    start = -1;
+    for (i = 0; i < dg_n; i++)
+        if (!is_space(dg_buf[i])) {
+            start = i + 1;
+            break;
+        }
+    if (start < 0)
+        return;
+    for (; start < dg_n && is_space(dg_buf[start]); start++)
+        ;
+    /* 找到顶层 `;` 作为调用文本终点 */
+    end = -1;
+    depth = 0;
+    for (i = start; i < dg_n; i++) {
+        int ch = dg_tokchar(i);
+        if (ch == '(')
+            depth++;
+        else if (ch == ')' && depth > 0)
+            depth--;
+        else if (ch == ';' && depth == 0) {
+            end = i;
+            break;
+        }
+    }
+    if (end < 0)
+        end = dg_n;
+    if (dg_dep < 0)
+        dg_dep = 0;
+    if (dg_dep >= DG_DEFER_MAXDEP || dg_defer_n[dg_dep] >= DG_DEFER_MAXN)
+        return;                     /* 超出容量: 保守地丢弃 (仍以 tcc -run 为准) */
+    cstr_new(&cs);
+    for (i = start; i < end; i++) {
+        int t = dg_buf[i];
+        if (is_space(t))
+            continue;
+        if (pp_need_space(last, t))
+            cstr_ccat(&cs, ' ');
+        if (t == TOK_OPERATOR) {
+            int opid = dg_opat(i);
+            if (opid) {
+                cstr_cat(&cs, dg_op_name[opid], strlen(dg_op_name[opid]));
+                last = t;
+                i = dg_next_ns(i);
+                continue;
+            }
+        }
+        cstr_cat(&cs, dg_txt[i] ? dg_txt[i] : "", strlen(dg_txt[i] ? dg_txt[i] : ""));
+        last = t;
+    }
+    /* 收集到的调用文本末尾一般不追求美观, 但 &&/|| 等需空格; 用紧凑即可 */
+    cstr_ccat(&cs, 0);               /* cstr_cat 不写 NUL, 先补终止符供 strdup */
+    dg_defer[dg_dep][dg_defer_n[dg_dep]++] = tcc_strdup(cs.data);
+    cstr_free(&cs);
+}
+
+/* 逆序发射第 dep 层的全部 defer 调用 (闭块处调用, 发射并释放) */
+static void dg_emit_defer_level(TCCState *s1, int dep)
+{
+    int k;
+    if (dep < 0 || dep >= DG_DEFER_MAXDEP)
+        return;
+    for (k = dg_defer_n[dep] - 1; k >= 0; k--) {
+        if (dg_defer[dep][k]) {
+            /* 缩进以示在块结束处逆序调用 */
+            fputs("    ", s1->ppfp);
+            fputs(dg_defer[dep][k], s1->ppfp);
+            fputs(";\n", s1->ppfp);
+            tcc_free(dg_defer[dep][k]);
+            dg_defer[dep][k] = NULL;
+        }
+    }
+    dg_defer_n[dep] = 0;
+}
+
+/* 早退 (return) 触发: 从当前深度 dg_dep 到函数体层 1 逆序发射各层 defer.
+ * 顺序 = 先内层后外层 (更高深度先), 每层内 LIFO. 关键: 只发射不释放 ——
+ * return 是终端的, 每次调用只执行其中一条 return, 因此每个 return 点都须把
+ * 尚在作用域的 defer 全部内联落地; 若此处释放, 其它分支的 return 就丢了它们
+ * (如 f(0) 的 return 9)。闭块 `}` 处的 dg_emit_defer_level 仍会释放, 形成
+ * return 与闭块两条收口路径各司其职, 不重复执行 (return 后是死代码). */
+static void dg_emit_defer_all(TCCState *s1, int topdep)
+{
+    int d, k;
+    if (topdep < 1)
+        topdep = 1;
+    for (d = topdep; d >= 1; d--) {
+        for (k = dg_defer_n[d] - 1; k >= 0; k--) {
+            if (dg_defer[d][k]) {
+                fputs("    ", s1->ppfp);
+                fputs(dg_defer[d][k], s1->ppfp);
+                fputs(";\n", s1->ppfp);
+            }
+        }
+    }
+}
+
+/* model 定义收集: 把本行 token 并入 dg_mb (空格分隔), 跟踪花括号深度;
+ * 外层 `}` 闭合且可选 `;` 已吞时调用 dg_model_finish 并返回 1 (定义完成). */
+static int dg_model_collect(TCCState *s1)
+{
+    (void)s1;
+    if (!dg_mb.data)
+        cstr_new(&dg_mb);
+    for (int i = 0; i < dg_n; i++) {
+        int t = dg_buf[i];
+        const char *s;
+        if (is_space(t))
+            continue;
+        s = dg_txt[i] ? dg_txt[i] : "";
+        if (!strcmp(s, "{")) {
+            dg_madd(s);
+            dg_mbr++;
+        } else if (!strcmp(s, "}")) {
+            dg_madd(s);
+            dg_mbr--;
+            /* 函数泛型 `model (...) R f(...) { ... }` 以 `}` 收尾(无 `;`),
+             * 只要定义体花括号回到平衡即视为定义完成, 否则会一直吞后续行. */
+            if (dg_mbr <= 0 && dg_mbody) {
+                dg_msemi = 1;
+                return 1;
+            }
+        } else if (!strcmp(s, ";")) {
+            dg_madd(s);
+            if (dg_mbr <= 0) {
+                dg_msemi = 1;
+                return 1;
+            }
+        } else {
+            dg_madd(s);
+            if (dg_mbody == 0)
+                dg_mbody = 1;   /* 首次非空 token 过后视为进入定义体 */
+        }
+    }
+    /* 本行尚未闭合 (跨行 model 定义), 继续收集 */
+    return dg_mbr <= 0 && dg_msemi;
+}
+
+/* 是否为一段 model 定义 (首非空 token 为 TOK_MODEL)? */
+static int dg_is_model_line(void)
+{
+    int i;
+    for (i = 0; i < dg_n; i++)
+        if (!is_space(dg_buf[i]))
+            return dg_buf[i] == TOK_MODEL;
+    return 0;
+}
+
+static void dg_flush(TCCState *s1)
+{
+    int i, eq = -1, ret = -1, depth = 0;
+    int start = -1, to;
+    /* ===== model 定义收集 (语句级, 先于 operator/defer) =====
+     *  `model struct Eq(T) { ... };` 不落地: 收进 dg_mb 后登记到 dg_model_def,
+     *  实例化点 `Eq(int) x` 由 dg_emit_verbatim 改写为合成 typedef. */
+    if (dg_mc || dg_is_model_line()) {
+        if (!dg_mc) {       /* 本行开始一段 model 定义 */
+            cstr_new(&dg_mb);
+            dg_mbr = 0;
+            dg_msemi = 0;
+            dg_mbody = 0;
+            dg_mc = 1;
+        }
+        if (!dg_model_collect(s1))
+            return;         /* 跨行仍未闭合: 不落地, 待下行续接 */
+        dg_model_finish();   /* 已闭合: 登记模板, 定义本身不落地 */
+        dg_mc = 0;
+        cstr_free(&dg_mb);
+        memset(&dg_mb, 0, sizeof dg_mb);
+        return;
+    }
+    /* ===== defer 处理 (语句级, 先于 operator) =====
+     *  `defer f(a);` 语句: 不落地, 把调用文本 `f(a)` 按当前块深度 dg_dep 入栈,
+     *  由闭块 `}` 时逆序重放 (与 TCC "离开作用域逆序执行" 语义一致).
+     *  块深度: 仅处理"单元首非空 token"为 { 或 } 的典型整行布局; 同行动作的
+     *  开闭/过早退出 (return/goto/break) 不在脱糖范围内, 以 tcc -run 为准. */
+    if (dg_is_defer_line()) {
+        dg_defer_push(s1);
+        return;                     /* defer 自身不落地, 交由闭块重放 */
+    }
+    {
+        /* 块深度: 逐 token 扫描本单元全部花括号. `{` 依前序有效 token 判定
+         * 语句块还是初始化器(`=`/`,` 前导即为初始化器/聚合, 不发射 defer);
+         * 持久栈 dg_brak 记录每层是否为块, 支撑跨多行的函数体/块开闭. */
+        int prev = 0;
+        for (i = 0; i < dg_n; i++) {
+            int ch;
+            if (is_space(dg_buf[i]))
+                continue;
+            ch = dg_tokchar(i);
+            if (ch == '{') {
+                int isblk = !(prev == '=' || prev == ',');
+                if (dg_dep < DG_DEFER_MAXDEP - 1) {
+                    dg_brak[dg_dep] = isblk;
+                    dg_dep++;
+                }
+            } else if (ch == '}') {
+                int lvl = dg_dep;
+                if (lvl > 0) {
+                    if (dg_brak[lvl - 1])           /* 刚闭合的是语句块 */
+                        dg_emit_defer_level(s1, lvl); /* 块内 defers 注册在层 lvl */
+                    dg_dep = lvl - 1;               /* 下潜到包围层 */
+                }
+            } else {
+                prev = ch;
+            }
+        }
+    }
+    /* 早退 return: 本单元以 `return` 开头时, 先把已进入作用域的 defer 逐层逆序
+     * 落地 (内层先), 再让下方 emit 路径把 return 行原样落地 —— 使 return 离开
+     * 函数时也能执行清理 (goto/break 仍不在范围, 以 tcc -run 为准). */
+    {
+        int first = -1;
+        for (i = 0; i < dg_n; i++)
+            if (!is_space(dg_buf[i])) { first = i; break; }
+        if (first >= 0 && dg_buf[first] == TOK_RETURN)
+            dg_emit_defer_all(s1, dg_dep);
+    }
+    /* 元数据 pass: 注册 operator 定义 / 收集 struct 变量声明类型.
+     * 登记所有 `struct <tag> <decl>[, <decl>...]` 的声明符(token >= TOK_IDENT 即
+     * 用户标识符)为 operator 类型变量, 覆盖局部变量与函数参数; 遇到另一类型
+     * 关键字/`{` 初始化器/`(` 调用/对应 operator 关键字则结束当前声明列表. */
+    {
+        int prev = 0, pp = 0, pending = 0;
+        for (i = 0; i < dg_n; i++) {
+            int t, ch;
+            if (is_space(dg_buf[i]))
+                continue;             /* 保持 prev/pp/pending 为纯净非空格 token */
+            t = dg_buf[i]; ch = dg_tokchar(i);
+            /* 先置 pending: `struct <tag>`(刚刚见 prev 是 tag) 已确立 */
+            if (pp == TOK_STRUCT && prev >= TOK_IDENT)
+                pending = prev;
+            if (t == TOK_OPERATOR) {
+                int opid = dg_opat(i);
+                if (opid) {
+                    dg_active = 1;
+                    if (prev >= TOK_IDENT)      /* prev 为返回类型 tag */
+                        dg_op_tag[opid] = prev;
+                }
+                pending = 0;
+            } else if (t == TOK_STRUCT) {
+                pending = 0;            /* 紧随的 tag 下面经 pp==TOK_STRUCT 置入 */
+            } else if (ch == '{' || ch == '(') {
+                pending = 0;            /* 初始化器 / 调用 / 形参列表终止声明 */
+            } else if (t >= TOK_IDENT) {        /* 用户标识符 */
+                if (pending)
+                    dg_add_var(t, pending);
+            } else if (ch == ';') {
+                pending = 0;            /* 声明结束 */
+            } else if (ch != ',' && ch != '*' && ch != '[' && ch != ']') {
+                pending = 0;            /* 其它关键字/标点(如 int/float/=)终止声明列表 */
+            }
+            pp = prev; prev = t;
+        }
+    }
+
+    /* 定位顶层赋值 '=' 与 `return` 关键字 (token 恰为单 '=' 字符, 排除 '=='/"*=等) */
+    for (i = 0; i < dg_n; i++) {
+        int ch = dg_tokchar(i);
+        if (ch == '[') {
+            depth++;
+        } else if (ch == ']') {
+            if (depth > 0)
+                depth--;
+        } else if (dg_buf[i] == '=' && depth == 0 && eq < 0) {
+            eq = i;
+        } else if (dg_buf[i] == TOK_RETURN && ret < 0) {
+            ret = i;
+        }
+    }
+
+    /* 确定候选表达式区域: 优先 `return <expr>;`, 否则顶层赋值右值 */
+    if (ret >= 0) {
+        start = dg_next_ns(ret);
+    } else if (eq >= 0) {
+        start = eq + 1;
+    }
+    if (start < 0 || start >= dg_n) {
+        dg_emit_verbatim(s1, 0, dg_n);
+        return;
+    }
+    /* region 上界: 首个顶层 ';' 之后 */
+    to = dg_n;
+    for (i = start; i < dg_n; i++)
+        if (dg_tokchar(i) == ';') {
+            to = i;
+            break;
+        }
+    if (to < start)
+        to = dg_n;
+
+    if (ret >= 0) {
+        /* return <expr>: 前缀(含 return 与空白) verbatim, 区域内改写 */
+        dg_emit_verbatim(s1, 0, start);
+        if (!dg_region_rewrite(s1, start, to))
+            dg_emit_verbatim(s1, start, dg_n);
+        else if (to < dg_n)
+            dg_emit_verbatim(s1, to, dg_n);
+        return;
+    }
+    if (eq >= 0) {
+        /* 顶层赋值: LHS verbatim, 手动补 '= ', RHS 区域内改写 */
+        dg_emit_verbatim(s1, 0, eq);
+        fputs("= ", s1->ppfp);
+        if (!dg_region_rewrite(s1, start, to))
+            dg_emit_verbatim(s1, start, dg_n);
+        else if (to < dg_n)
+            dg_emit_verbatim(s1, to, dg_n);
+        return;
+    }
+    dg_emit_verbatim(s1, 0, dg_n);
+}
+
+static void dg_step(TCCState *s1, int tok, int *token_seen, char *white, int *spcs)
+{
+    int i;
+    /* 统一缓冲整行到 LINEFEED 再整体 flush:
+     *  - 无 operator 的编译: flush 走 verbatim 精确重放(空格 token 原样),
+     *    输出与 --emit-c 现有行为一致 -> 零回归 (t052/simd_demo/t046).
+     *  - 有 operator 定义: flush 先跑元数据收集(定义改名/变量类型),
+     *    再对简单赋值右值做完全括号忠实改写. */
+    if (tok == TOK_LINEFEED) {
+        if (dg_n > 0) {
+            dg_flush(s1);
+            for (i = 0; i < dg_n; i++)      /* 释放文本快照 */
+                if (dg_txt[i]) {
+                    tcc_free(dg_txt[i]);
+                    dg_txt[i] = NULL;
+                }
+            dg_n = 0;
+        }
+        fputc('\n', s1->ppfp);
+        ++file->line_ref;
+        *token_seen = TOK_LINEFEED;
+        return;
+    }
+    if (dg_n < DG_BUFN) {
+        const char *s = get_tok_str(tok, &tokc);
+        size_t n;
+        if (!s)
+            s = "";
+        n = strlen(s);
+        dg_buf[dg_n] = tok;
+        dg_txt[dg_n] = tcc_malloc(n + 1);
+        memcpy(dg_txt[dg_n], s, n + 1);
+        dg_n++;
+    }
+}
+
+
+/* 预处理输出共用引擎: -E 与 --emit-c 都走这里.
+ * desugar != 0 时按脱糖语义处理(产物顶部注入来源标记, 预留扩展改写挂点). */
+static int preprocess_loop(TCCState *s1, int desugar)
 {
     BufferedFile **iptr;
     int token_seen, spcs, level;
@@ -3916,22 +5654,29 @@ ST_FUNC int tcc_preprocess(TCCState *s1)
                 | PARSE_FLAG_SPACES
                 | PARSE_FLAG_ACCEPT_STRAYS
                 ;
-    /* Credits to Fabrice Bellard's initial revision to demonstrate its
-       capability to compile and run itself, provided all numbers are
-       given as decimals. tcc -E -P10 will do. */
-    if (s1->Pflag == LINE_MACRO_OUTPUT_FORMAT_P10)
-        parse_flags |= PARSE_FLAG_TOK_NUM, s1->Pflag = 1;
-
     if (s1->do_bench) {
-	/* for PP benchmarks */
-	do next(); while (tok != TOK_EOF);
-	return 0;
+        do next(); while (tok != TOK_EOF);
+        return 0;
     }
 
     token_seen = TOK_LINEFEED, spcs = 0, level = 0;
     if (file->prev)
         pp_line(s1, file->prev, level++);
     pp_line(s1, file, level);
+
+    if (desugar) {
+        /* 脱糖产物: 注入来源标记; SIMD 头由用户源码自行 #include,
+         * 保证产物 = 标准 C, clang 可原生编译而不注入额外依赖.
+         * 函数泛型: 合成定义须物理置于其调用点(通常在函数体内)之前, 才能作为
+         * 原型被 gcc 识别; 故整段主体先缓冲到临时文件, EOF 处回放
+         * [typedefs+函数泛型定义][主体], 保证调用点先见原型. */
+        dg_reset();
+        dg_saved_ppfp = s1->ppfp;
+        fprintf(dg_saved_ppfp, "\n/* __TCC_DESUGAR__: 由 tcc --emit-c 生成的标准C产物 */\n");
+        dg_tmpfile = tmpfile();
+        dg_buffering = 1;
+        s1->ppfp = dg_tmpfile;
+    }
 
     for (;;) {
         iptr = s1->include_stack_ptr;
@@ -3949,6 +5694,13 @@ ST_FUNC int tcc_preprocess(TCCState *s1)
             pp_debug_defines(s1);
             if (s1->dflag & 4)
                 continue;
+        }
+
+        /* 脱糖扩展改写挂点: SIMD/intrinsic 直透传; operator 在 dg_step 内
+         * 做 token 级改写(定义改名 + 赋值右值忠实改写). */
+        if (desugar) {
+            dg_step(s1, tok, &token_seen, white, &spcs);
+            continue;
         }
 
         if (is_space(tok)) {
@@ -3970,7 +5722,34 @@ ST_FUNC int tcc_preprocess(TCCState *s1)
         fputs(p = get_tok_str(tok, &tokc), s1->ppfp);
         token_seen = pp_check_he0xE(tok, p);
     }
+    if (desugar && dg_tmpfile) {
+        /* --emit-c 收尾: 先落函数泛型 typedefs+定义到真实输出, 再回放缓冲主体 */
+        char tmp[8192];
+        size_t n;
+        fflush(dg_tmpfile);
+        s1->ppfp = dg_saved_ppfp;
+        dg_fdefs_flush(s1);
+        rewind(dg_tmpfile);
+        while ((n = fread(tmp, 1, sizeof tmp, dg_tmpfile)) > 0)
+            fwrite(tmp, 1, n, dg_saved_ppfp);
+        fclose(dg_tmpfile);
+        dg_tmpfile = NULL;
+        dg_buffering = 0;
+    }
     return 0;
+}
+
+ST_FUNC int tcc_preprocess(TCCState *s1)
+{
+    /* tcc -E: 前置 Pflag(P10 数字 token) 处理, 然后进共享循环 */
+    if (s1->Pflag == LINE_MACRO_OUTPUT_FORMAT_P10)
+        parse_flags |= PARSE_FLAG_TOK_NUM, s1->Pflag = 1;
+    return preprocess_loop(s1, 0);
+}
+
+ST_FUNC int tcc_desugar(TCCState *s1)
+{
+    return preprocess_loop(s1, 1);
 }
 
 /* ------------------------------------------------------------------------- */
