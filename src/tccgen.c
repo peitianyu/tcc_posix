@@ -6443,6 +6443,137 @@ static void parse_atomic(int atok)
     }
 }
 
+/* ============ 结构体反射 (__builtin_reflect, docs/reflect.md) ============
+ * 生成 struct/union/标量的只读元数据表到 .rdata, 并把 vtop 覆盖为指向它的
+ * `const void*`(调用方 cast 到 lib/tcc-reflect.h 的 __refl)。单遍完成, 无 AST。
+ * 反射表 ABI(PTR=8,int=4, 与 lib/tcc-reflect.h 一致):
+ *   __refl   : +0 name(8) +8 kind +12 size +16 align +20 nfield +24 fields(8) = 32B
+ *   __refl_field: +0 name(8) +8 kind +12 offset +16 size +20 align = 24B
+ * kind 编码见 lib/tcc-reflect.h 的 __refl_kind。 */
+enum { RE_STRUCT=1, RE_UNION, RE_PTR, RE_INT, RE_FLOAT, RE_LLONG, RE_BYTE,
+       RE_BOOL, RE_ENUM, RE_ARRAY, RE_VOID, RE_SHORT, RE_DOUBLE, RE_LDOUBLE, RE_OTHER };
+
+static int refl_kind(CType *t)
+{
+    switch (t->t & VT_BTYPE) {
+    case VT_BYTE:    return RE_BYTE;
+    case VT_SHORT:   return RE_SHORT;
+    case VT_INT:     return RE_INT;
+    case VT_LLONG:   return RE_LLONG;
+    case VT_FLOAT:   return RE_FLOAT;
+    case VT_DOUBLE:  return RE_DOUBLE;
+    case VT_LDOUBLE: return RE_LDOUBLE;
+    case VT_BOOL:    return RE_BOOL;
+    case VT_PTR:     return RE_PTR;
+    case VT_STRUCT:  return RE_STRUCT;
+    case VT_ENUM:    return RE_ENUM;
+    case VT_ARRAY:   return RE_ARRAY;
+    case VT_VOID:    return RE_VOID;
+    default:         return RE_OTHER;
+    }
+}
+
+static void refl_put32(unsigned char *p, int v)
+{
+    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
+}
+
+/* 覆盖 vtop 为指向反射元数据表的 const void* */
+static void refl_emit(CType *t)
+{
+    Section *sec;
+    Sym *f, *sym;
+    unsigned char *base;
+    int size, align, nfield, i, str_off, rec_len, hdr, fields_off, tlen, cur;
+    int fsz, fa, kind, tab_off;
+    const char *tp = NULL, *fn;
+
+    /* --- 布局 --- */
+    hdr = 32;
+    size = type_size(t, &align);
+    kind = refl_kind(t);
+    nfield = 0;
+    if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref)
+        for (f = t->ref->next; f; f = f->next)
+            if (!(f->type.t & VT_BITFIELD))
+                nfield++;
+    fields_off = hdr;                       /* 32, 8 对齐 */
+    /* 类型名串长度 */
+    if (t->ref && t->ref->v && !(t->ref->v & SYM_FIELD)
+        && t->ref->v < SYM_FIRST_ANOM && t->ref->v >= 0)
+        tp = get_tok_str(t->ref->v, NULL);
+    if (!tp) tp = "";
+    tlen = (int)strlen(tp);
+    /* 名字区起点 */
+    str_off = fields_off + nfield * 24;
+    str_off = (str_off + 7) & ~7;
+    rec_len = str_off + tlen + 1;
+    if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref)
+        for (f = t->ref->next; f; f = f->next)
+            if (!(f->type.t & VT_BITFIELD))
+                rec_len += (int)strlen(get_tok_str(f->v & ~SYM_FIELD, NULL)) + 1;
+
+    /* --- 一次性分配, 避免 section_ptr_add realloc 悬垂 --- */
+    sec = rodata_section;                       /* 复用只读段, 不重复建 __start/__stop */
+    tab_off = sec->data_offset;                 /* 本表在段内的绝对起点 */
+    base = section_ptr_add(sec, rec_len);
+    memset(base, 0, (size_t)rec_len);
+
+    /* header 数值 */
+    refl_put32(base + 8,  kind);
+    refl_put32(base + 12, size);
+    refl_put32(base + 16, align);
+    refl_put32(base + 20, nfield);
+
+    /* type 名串 + header.name reloc */
+    cur = str_off;
+    memcpy(base + cur, tp, (size_t)tlen + 1);
+    sym = get_sym_ref(&char_pointer_type, sec, str_off + tab_off, (unsigned long)tlen + 1);
+    greloca(sec, sym, (unsigned long)tab_off, R_X86_64_64, 0);
+    cur += tlen + 1;
+
+    /* fields 指针 reloc */
+    sym = get_sym_ref(&char_pointer_type, sec, (unsigned long)fields_off + tab_off,
+                      (unsigned long)(nfield * 24));
+    greloca(sec, sym, (unsigned long)(24 + tab_off), R_X86_64_64, 0);
+
+    /* 逐字段: 名字串 + 记录(rec) */
+    i = 0;
+    if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref)
+        for (f = t->ref->next; f; f = f->next) {
+            int rec;
+            if (f->type.t & VT_BITFIELD)
+                continue;
+            fn = get_tok_str(f->v & ~SYM_FIELD, NULL);
+            memcpy(base + cur, fn, (size_t)strlen(fn) + 1);
+            rec = fields_off + i * 24;
+            /* field.name reloc */
+            sym = get_sym_ref(&char_pointer_type, sec, (unsigned long)cur + tab_off,
+                              (unsigned long)strlen(fn) + 1);
+            greloca(sec, sym, (unsigned long)(rec + tab_off), R_X86_64_64, 0);
+            /* kind/offset/size/align */
+            fsz = type_size(&f->type, &fa);
+            refl_put32(base + rec + 8,  refl_kind(&f->type));
+            refl_put32(base + rec + 12, (int)f->c);   /* 字段偏移 (struct_layout 写入) */
+            refl_put32(base + rec + 16, fsz);
+            refl_put32(base + rec + 20, fa);
+            cur += (int)strlen(fn) + 1;
+            i++;
+        }
+
+    /* --- 返回 const void* 指向 header 起点 --- */
+    {
+        CType rv = char_pointer_type;
+        rv.t |= VT_CONSTANT;
+        sym = get_sym_ref(&rv, sec, (unsigned long)tab_off, hdr);
+        vtop->type = rv;
+        vtop->r = VT_CONST | VT_SYM;
+        vtop->sym = sym;
+        vtop->c.i = 0;
+    }
+}
+
 ST_FUNC void unary(void)
 {
     int n, t, align, size, r;
@@ -6711,6 +6842,11 @@ ST_FUNC void unary(void)
         type.t = VT_VOID;
         vpush(&type);
         CODE_OFF();
+        break;
+    case TOK_builtin_reflect:
+	/* __builtin_reflect(Type) -> const void*, 指向生成的反射元数据表 */
+	parse_builtin_params(0, "t");
+	refl_emit(&vtop->type);
         break;
     case TOK_builtin_frame_address:
     case TOK_builtin_return_address:

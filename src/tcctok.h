@@ -175,6 +175,7 @@
      DEF(TOK_builtin_return_address, "__builtin_return_address")
      DEF(TOK_builtin_expect, "__builtin_expect")
      DEF(TOK_builtin_unreachable, "__builtin_unreachable")
+     DEF(TOK_builtin_reflect, "__builtin_reflect")
      /* SIMD (B1: 内建函数发射打包 SSE 指令) */
      DEF(TOK_mm_setzero_ps, "_mm_setzero_ps")
      DEF(TOK_mm_load_ps, "_mm_load_ps")

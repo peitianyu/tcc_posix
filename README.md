@@ -25,12 +25,12 @@ build/tcc-win.exe -platform=linux examples/hello.c  # Linux ELF
 ./test.sh -linux       # 追加 Linux (WSL) 测试
 ```
 
-当前 **50/50 通过** (test.sh, Windows tcc 自编译运行)。覆盖 stdio/malloc/mmap/文件/目录/时间/
+当前 **51/51 通过** (test.sh, Windows tcc 自编译运行)。覆盖 stdio/malloc/mmap/文件/目录/时间/
 宽字符/信号/tmp 映射、pthread 全套 (create/join/mutex/cond/barrier/sem/递归锁)、
 线程压力、main 提前退出、tcc -run (含 futex 真阻塞)、ctype/setjmp/regex/search/
 fenv/multibyte/crypt/prng 模块 (t022-t028),语言扩展 defer (t029)、
 model 泛型 (t031-t032) 及 model 常量参数 (t032b)、
-运算符重载 (t050, operator 语法),
+运算符重载 (t050, operator 语法)、结构体反射 (t051, __builtin_reflect),
 SIMD 打包 SSE 内建 (t046,v4f/v2d/v4i/v8h/v16b),
 CPU 周期插桩 (t049, cpu-prof rdtsc),
 以及系统型回归 (t033-t045):
@@ -288,6 +288,21 @@ struct Vec3 e = a + b*b; /* 优先级由语法树天然保持: a + (b*b) */
   一元/比较暂不做;不显式调用 `operator+`(a,b)(它在表达式层是关键字)。
 - **性能红线**:重载是语法糖,应转发到手写内核(如矩阵平铺 GEMM),不得退化成
   标量 `for` 循环。
+
+**结构体反射 `__builtin_reflect`** (t051, 独立语言扩展):编译期把类型信息(名字/类型/
+偏移/大小/对齐)生成只读元数据表,单遍友好、不建 AST(设计见 docs/reflect.md):
+
+```c
+#include "tcc-reflect.h"
+const struct __refl *r = __builtin_reflect(struct Vec3);
+for (int i = 0; i < (int)r->nfield; i++)
+    printf("%s @%u %uB align%u\n", r->fields[i].name,
+           r->fields[i].offset, r->fields[i].size, r->fields[i].align);
+```
+
+- 复用 TCC 已有机制 (`parse_builtin_params("t")` 解析类型、`struct_layout` 的字段偏移、
+  `type_size`、写 `.rdata` + `greloca` 段内重定位),本表多类型时按段内绝对偏移落位。
+- 支持 struct/union 平铺字段 + 标量/枚举/指针 kind;bitfield/VLA/嵌套递归链为 v2。
 
 ## 开发-验证 + 正式产物策略 (TCC 魔改前端 → clang/LLVM)
 
