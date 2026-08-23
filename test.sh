@@ -37,11 +37,16 @@ run_win() {
     local src="tests/$name.c"
     [ -f "$src" ] || { echo "SKIP $name (无源码)"; return; }
     local o="$TESTDIR/$name.o" exe="$TESTDIR/$name.exe"
-    if ! "$TCC" -c "$src" -o "$o" -I "$BASE/include" -I "$INC_WIN" -I "$ARCH_WIN" \
+    if ! "$TCC" -c "$src" -o "$o" -I "$BASE/include" -I "$BASE/lib" -I "$INC_WIN" -I "$ARCH_WIN" \
         -std=c99 -D_XOPEN_SOURCE=700 2>"$TESTDIR/$name.cerr"; then
         FAIL=$((FAIL+1)); FAILED="$FAILED $name(编译)"; echo "FAIL $name: 编译错误"; head -3 "$TESTDIR/$name.cerr"; return
     fi
-    if ! "$TCC" "$o" -o "$exe" 2>"$TESTDIR/$name.lerr"; then
+    # 个别测试需要额外源文件一并链接 (如 t049_cpu 依赖 lib/cpu-prof.c)
+    local extra=""
+    case "$name" in
+        t049_cpu) extra="$BASE/lib/cpu-prof.c" ;;
+    esac
+    if ! "$TCC" "$o" $extra -I "$BASE/lib" -o "$exe" 2>"$TESTDIR/$name.lerr"; then
         FAIL=$((FAIL+1)); FAILED="$FAILED $name(链接)"; echo "FAIL $name: 链接错误"; head -3 "$TESTDIR/$name.lerr"; return
     fi
     local out rc

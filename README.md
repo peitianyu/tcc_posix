@@ -25,12 +25,13 @@ build/tcc-win.exe -platform=linux examples/hello.c  # Linux ELF
 ./test.sh -linux       # 追加 Linux (WSL) 测试
 ```
 
-当前 **48/48 通过** (test.sh, Windows tcc 自编译运行)。覆盖 stdio/malloc/mmap/文件/目录/时间/
+当前 **49/49 通过** (test.sh, Windows tcc 自编译运行)。覆盖 stdio/malloc/mmap/文件/目录/时间/
 宽字符/信号/tmp 映射、pthread 全套 (create/join/mutex/cond/barrier/sem/递归锁)、
 线程压力、main 提前退出、tcc -run (含 futex 真阻塞)、ctype/setjmp/regex/search/
 fenv/multibyte/crypt/prng 模块 (t022-t028),语言扩展 defer (t029) 与
 model 泛型 (t031-t032) 及 model 常量参数 (t032b),
 SIMD 打包 SSE 内建 (t046,v4f/v2d/v4i/v8h/v16b),
+CPU 周期插桩 (t049, cpu-prof rdtsc),
 以及系统型回归 (t033-t045):
 sched_yield、ENOSYS 兜底、socket、process、statfs/fstatfs、pwd/grp 虚拟 /etc、
 unsupported、select/poll、termios console 映射、dlfcn、timer、mq、System V ipc、aio。
@@ -139,6 +140,10 @@ offset=0 始终是"未分配"哨兵)给每个 `__emutls_object` 分配对齐 off
   reset 后 `check` 打出 "ESCAPED pointer ... still referenced by 'g_slot'"。
 - **memtrack 泄漏明细**: bcheck 内的 `mem_lives` 表逐活体对象记录 (ptr+size+caller),
   `__mem_report(1)` 逐条列出泄漏对象 (调用点经 `__bt_resolve_addr` 归因为 func@file:line)。
+- **可插拔输出 sink**: memtrack 报告去向由用户决定 —— 全局函数指针
+  `__tccmem_writer` (lib/tcc-own.h 的 `tccmem_writer_set`), 用户赋值后报告每行
+  经它回调 (文件/日志/单测捕获), 未赋值默认回落 stderr。注意: 不用弱函数,
+  因 TCC 的 PE/COFF 后端不做弱符号绑定 (详见 memory-governance §6.5)。
 
 测试: `build/tests/t_own.c`/`t_epoch.c`/`t_esc.c`/`t_refcnt.c` (前两个 `-b` 也跑通)。
 
@@ -160,6 +165,40 @@ offset=0 始终是"未分配"哨兵)给每个 `__emutls_object` 分配对齐 off
 | System V ipc (msg/sem/shm) | ✅ t044 |
 | aio | ✅ t045 (后台线程退出段错误已修复) |
 | ENOSYS 兜底 / sched_yield / env PATH | ✅ t034/t039 / t033 / t008 |
+
+## CPU 周期插桩 (cpu-prof)
+
+用户端 C 库, 用 `rdtsc` 插桩得到每段代码的**精确周期数**, 把 CPU 时间归因到具体
+函数/段。纯 POSIX, 零 winapi, 零编译器改动, 不依赖 bcheck。设计见 docs/cpu-prof.md。
+
+```c
+#include "cpu-prof.h"            /* lib/ 下; 编译需有 -I <lib目录> */
+
+void hot_fn(void) {
+    CPU_BEGIN(hot_fn);            /* 入口: 读 TSC, 按调用点自动建 site */
+    ... 纯计算段 ...
+    CPU_END(hot_fn);              /* 出口: 读 TSC, 累进该 site */
+}
+int main(void) {
+    ...
+    cpu_prof_report();                 /* 默认 stderr */
+    cpu_prof_report_to(my_printer, ctx); /* 或交给用户 sink */
+}
+```
+
+- 三份数归因: **总周期 / 调用次数 / avg (每调用周期)**, 采样分不清"高频低单次"与
+  "低频高单次", 插桩的 `avg cycle` 能 —— 这是选插桩的根本理由 (度 CPU 忙用, 不是
+  全局利用率)。
+- site 以 `CPU_BEGIN` 处返回地址为键自动登记 (固定容量 open array + 零分配,
+  memtrack 骨架); `#name` 字符串化为报告标签; 同函数不同调用点是独立 site。
+- 递归用深度栈配平 (BEGIN/END 对), 每对累加自身跨幅 (inclusive)。
+- 陷阱: `__builtin_ia32_rdtsc` tcc 不支持 → 退化为内联汇编 `rdtsc`/`lfence`。
+  插桩点只包**纯计算段** (io/锁/休眠不算 CPU 忙用)。
+- 输出可插拔: 报告每行交给回调 `cpu_printer(void *ctx, const char *line)`, 不写死
+  stderr, 可打到 cerr/cout/文件/日志/单测捕获, 或只取 `cpu_prof_sites` 数据。
+- 符号渲染: 复用弱钩子 `__bt_resolve_addr` (link `-bt`), 输出 `func@file:line`。
+
+测试: `tests/t049_cpu.c` — 编译: `bin/tcc.exe -I lib tests/t049_cpu.c lib/cpu-prof.c -o t.exe`。
 
 ## 语言扩展
 

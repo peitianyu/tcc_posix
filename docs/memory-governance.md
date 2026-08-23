@@ -181,6 +181,45 @@ reset/destroy 时若发现「仍有未撤销的逃逸引用」，打印提醒：
 - 属 §6.2 epoch 的延伸：逃逸表记录「持有者 + 分配的 epoch」，reset 时持有者 epoch 过期 → 触发提醒。
 - 常配套**配对撤销口** `tcc_descend(p)` 在持有者不再用时撤销登记，正常生命周期内无提醒。
 
+### 6.5 可插拔输出 sink（让报告去向由用户决定）
+
+现状问题: bcheck/memtrack 的报告**硬编码 `fprintf(stderr)`**, 无任何注入点. 改动报告去向
+目前只有两条脏路: `dup2`/`freopen` 重定向 fd2 (进程级, 对 cerr/cout/日志库不透明),
+或改源码重编. 期望: **输出策略 (stderr/文件/单测捕获/只取数据) 与累加逻辑解耦**.
+
+设计: 报告「按行产生, 交给全局函数指针回调」, **默认 NULL 回落 stderr**:
+
+```c
+/* bcheck.o 定义的全局函数指针; 用户赋值后报告每行经它回调, 否则回落 stderr */
+extern void (*__tccmem_writer)(const char *line);
+#define tccmem_writer_set(fn)  (__tccmem_writer = (fn))
+```
+
+用户侧一行接管到任一处:
+
+```c
+static void to_file(const char *line) { fputs(line, fp); }   /* 日志/文件 */
+static void to_capture(const char *line) { test_buf[tl++] = line; }  /* 单测 */
+/* main 里: */
+tccmem_writer_set(to_file);      /* 接管 */
+tccmem_writer_set(0);            /* 恢复 stderr */
+```
+
+> **实现决策（关键）**: 用**可赋值的函数指针变量**而非同类场景常见的**弱函数**
+> (`__attribute__((weak))`). 原因是 TCC 的 PE/COFF 后端 (`tccpe.c`) **不实现弱符号绑定**
+> (只有 ELF 的 `tccelf.c` 有 `STB_WEAK` 处理), 弱引用在 Windows 产物里**不会被用户
+> 强定义覆盖**, 恒为 NULL → 钩子永远空转. 函数指针变量在 PE/ELF 下都可靠, 也让恢复
+> 默认 (赋 NULL) 与换 sink 变成纯运行时可换.
+
+- **兼容既有**: 不改 `__tccmem_writer` 的程序行为不变 (仍打 stderr), t_refcnt 等
+  既有测试不受影响; 赋值者才接管.
+- 按行回调而非传 FILE*: 便于用户重定向到字符串缓冲/日志框架/单测断言, 不强制 FILE*.
+- 范围: 只改 `__mem_report`/`__mem_snapshot` 的输出路径; bcheck 的 dprintf 诊断与
+  `bound_alloc_error` fatal 保持 stderr (属调试输出, 非归因报告).
+- 与 cpu-prof 的 sink 一致: 两者共用「钩子渲染」思路, 可抽公共帮助 (§7 P3).
+- 注意: 每行 `fprintf(stderr, ...)` → `snprintf` 组一行再回调, memtrack 报告句可先
+  snprintf 到局部缓冲再统一走 sink, 避免改句路线.
+
 ---
 
 ## 7. 落地路线图
@@ -195,6 +234,7 @@ reset/destroy 时若发现「仍有未撤销的逃逸引用」，打印提醒：
 | P2 | epoch 存取核验 (reset 悬垂) | ✅ 已落地 tcc-arena.h epoch/outstanding, t_epoch.c | — |
 | P2 | 显式逃逸 `escalate/descend` + 提醒打印 (§6.4) | ✅ 已落地 `lib/tcc-esc.h`, t_esc.c | — |
 | P2 | memtrack `refcnt` 精确化 (泄漏两端定位) | ✅ 已落地 bcheck.c mem_lives 活体对象表 (ptr/size/caller), `__mem_report(1)` 逐条列出泄漏指针+尺寸+分配点; t_refcnt.c | 固定容量 8192, 溢出降级但全局计数不失真 |
+| P3 | 可插拔输出 sink (报告去向用户决定) | ✅ 已落地 bcheck.c `__tccmem_writer` 全局函数指针 + tcc-own.h `tccmem_writer_set`, 逐行回调, 默认回落 stderr, 兼容既有测试; hook_test 验证 | — |
 | 不做 | 强类型隔离 / 全路径 destroy 配对 | — | 与 void* 通用化冲突 / 误报率高 |
 | 不做 | 编译期跨函数别名分析 | — | TCC 单遍架构硬伤 |
 

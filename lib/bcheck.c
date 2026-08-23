@@ -1581,6 +1581,16 @@ static int memtrack_enabled = 1;
 __attribute__((weak))
 int __bt_resolve_addr(unsigned long long pc, char *buf, unsigned long len);
 
+/* --- 可插拔输出 sink (memgovernance §6.5) --- *
+ * 全局函数指针 __tccmem_writer: 用户赋值后, memtrack 报告(归因行)逐行经它
+ * 回调; 默认 NULL -> fprintf(stderr). 兼容既有: 不改这个指针的程序行为不变.
+ * 之所以用"可赋值的函数指针"而非弱函数, 是 TCC 的 PE/COFF 后端 (tccpe.c)
+ * 不支持弱符号绑定(ELF 的 tccelf.c 才有 STB_WEAK), 弱引用在 Windows 下不会
+ * 被强定义覆盖, 会恒为 NULL. 函数指针变量在 PE/ELF 都可靠.
+ * 只接管归因报告路径 (__mem_report/__mem_snapshot); bcheck 的 dprintf 诊断
+ * 与 bound_alloc_error fatal 保持 stderr 不变. */
+void (*__tccmem_writer)(const char *line);
+
 static void memtrack_alloc(void *ptr, unsigned long long size,
                            unsigned long long caller)
 {
@@ -1635,6 +1645,25 @@ static void memtrack_free(void *ptr, unsigned long long size)
         }
 }
 
+/* Emit one report line through the pluggable sink. The line is composed once
+ * with vsnprintf, then routed to the user hook __tccmem_writer if it supplied
+ * one; otherwise it falls back to fprintf(stderr).  Every __mem_report site
+ * routes through the same sink so the output destination is user-controlled. */
+static void memhdr_printf(const char *fmt, ...)
+{
+    char buf[768];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+
+    if (__tccmem_writer)
+        __tccmem_writer(buf);
+    else
+        fprintf(stderr, "%s", buf);
+}
+
 /* print live heap totals and the top allocation sites in file:line */
 __attribute__((dllexport)) void __mem_report(int check_leak)
 {
@@ -1642,7 +1671,7 @@ __attribute__((dllexport)) void __mem_report(int check_leak)
     char where[192];
     int i, j, n, shown;
 
-    fprintf(stderr,
+    memhdr_printf(
             "\n[tccmem] live %llu bytes / %llu blocks  peak %llu  "
             "total-alloc %llu  calloc %llu\n",
             mem_live, mem_live_blocks, mem_peak, mem_total_alloc,
@@ -1650,12 +1679,12 @@ __attribute__((dllexport)) void __mem_report(int check_leak)
 
     n = nb_mem_sites;
     if (n == 0) {
-        fprintf(stderr, "[tccmem] no heap allocations tracked\n");
+        memhdr_printf("[tccmem] no heap allocations tracked\n");
         return;
     }
     copy = (mem_site *) malloc((size_t) n * sizeof (mem_site));
     if (!copy) {
-        fprintf(stderr, "[tccmem] (report: out of memory)\n");
+        memhdr_printf("[tccmem] (report: out of memory)\n");
         return;
     }
     memcpy(copy, mem_sites, (size_t) n * sizeof (mem_site));
@@ -1672,20 +1701,20 @@ __attribute__((dllexport)) void __mem_report(int check_leak)
     }
 
     shown = (n > MEMTRACK_PRINT) ? MEMTRACK_PRINT : n;
-    fprintf(stderr, "[tccmem] top %d allocation sites of %d:\n", shown, n);
+    memhdr_printf("[tccmem] top %d allocation sites of %d:\n", shown, n);
     for (i = 0; i < shown; i++) {
         where[0] = 0;
         if (__bt_resolve_addr)
             __bt_resolve_addr(copy[i].caller, where, sizeof where);
         else
             snprintf(where, sizeof where, "0x%llx", copy[i].caller);
-        fprintf(stderr, "[tccmem]   %10llu bytes  %6llu calls  %s\n",
+        memhdr_printf("[tccmem]   %10llu bytes  %6llu calls  %s\n",
                 copy[i].alloc_bytes, copy[i].count, where);
     }
     free(copy);
 
     if (check_leak && mem_live_blocks) {
-        fprintf(stderr,
+        memhdr_printf(
                 "[tccmem] LEAK: %llu bytes still live / %llu blocks  "
                 "(object table tracks %d live object%s%s)\n",
                 mem_live, mem_live_blocks, nb_mem_lives,
@@ -1697,7 +1726,7 @@ __attribute__((dllexport)) void __mem_report(int check_leak)
                 __bt_resolve_addr(mem_lives[i].caller, where, sizeof where);
             else
                 snprintf(where, sizeof where, "0x%llx", mem_lives[i].caller);
-            fprintf(stderr,
+            memhdr_printf(
                     "[tccmem]   leak %12llu bytes  live ptr=%p  alloc @ %s\n",
                     mem_lives[i].size, mem_lives[i].ptr, where);
         }

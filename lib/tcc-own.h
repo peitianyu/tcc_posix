@@ -48,6 +48,19 @@ enum tcc_owner {
 #endif
 TCC_OWN_WEAK_DECL int __bt_resolve_addr(unsigned long long pc, char *buf, unsigned long len);
 
+/* 可插拔报告 sink: bcheck.o 的 __mem_report/__mem_snapshot 逐行回调这个
+ * 全局函数指针. 用户赋值(如写文件/日志/单测捕获)后报告即改道; 默认 NULL
+ * 回落 stderr, 与既有行为一致.
+ *
+ * 注意: 不用弱函数而用可赋值指针 —— TCC 的 PE/COFF 后端不支持弱符号绑定
+ * (tccelf.c 才有 STB_WEAK), 弱引用在 Windows 下不会被用户强定义覆盖.
+ *
+ *   __tccmem_writer = my_writer;      // 接管
+ *   __tccmem_writer = 0;              // 恢复 stderr
+ */
+extern void (*__tccmem_writer)(const char *line);
+#define tccmem_writer_set(fn)  (__tccmem_writer = (fn))
+
 typedef struct tcc_own_entry {
     const void *ptr;
     int  owner;
