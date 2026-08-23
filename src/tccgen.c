@@ -4872,7 +4872,8 @@ static int model_synth_name(ModelDef *md, TokenString **args)
             str = get_tok_str(t, &cv);
             for (q = str; *q; q++) {
                 char c = *q;
-                if (!isalnum((unsigned char)c) && c != '_')
+                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                      || (c >= '0' && c <= '9')) && c != '_')
                     c = '_';
                 cstr_ccat(&name, c);
             }

@@ -327,10 +327,11 @@ docs/matrix-library.md 附录 C。
 `tcc @build.txt` 一条命令做「包管理 + glob 选源 + 编译选择 + 嵌套」:
 
 ```c
-%dep user/mathlib            // 包管理: git clone/curl 到 .tcc_cache/, 注入 -I include/-L lib
-src/*.c                      // 终端式通配符展开
-@platform.list               // 嵌套子文件(独立于父 %if 上下文)
-%if @os == win               // 编译选择: @os/@arch/@tcc + 命令行 -D(x == y / x != y)
+%dep boot=tinycc/tinycc#release    // 包管理: git clone/curl 到 .tcc_cache/, 起名 boot
+boot/tcc.c -I boot/win32           // 前缀引用: boot/<...> 展开为缓存目录下的文件/目录
+src/*.c                            // 终端式通配符展开
+@platform.list                     // 嵌套子文件(独立于父 %if 上下文)
+%if @os == win                     // 编译选择: @os/@arch/@tcc + 命令行 -D(x == y / x != y)
   -D_WIN  win.c
 %else
   -D_POSIX posix.c
@@ -338,6 +339,9 @@ src/*.c                      // 终端式通配符展开
 # 注释
 ```
 
+- `%dep` 无名(`%dep user/mathlib`)自动注入根 `include`→`-I`、`lib`→`-L`;
+  有名(`%dep name=owner/repo[#ref]`)登记前缀别名, 之后 `name/<path>` 前缀替换为缓存目录,
+  用普通参数语法覆盖多 .c/.h、任意层级、单个文件。
 - 复用 TCC 内置 `@file` 响应文件 (src/libtcc.c 增强)。`*.c` 无匹配时原样保留。
 - env 校验等细节见 docs/listfile.md。glob 与 `%dep` 仅在最终 musl 版启用
   (`#ifdef CONFIG_TCC_MUSL`, 以便外部 BOOT 自举)。

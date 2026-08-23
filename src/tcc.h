@@ -1838,14 +1838,11 @@ ST_FUNC void tcc_run_free(TCCState *s1);
 #endif
 
 /* ------------ tcctools.c ----------------- */
-#if 0 /* included in tcc.c */
-ST_FUNC int tcc_tool_ar(TCCState *s, int argc, char **argv);
-#ifdef TCC_TARGET_PE
-ST_FUNC int tcc_tool_impdef(TCCState *s, int argc, char **argv);
-#endif
-ST_FUNC int tcc_tool_cross(char **argv, int option);
+/* 单源(tcc.c #include tcctools.c)时这些是被并入的 static 函数, 需先声明;
+   非单源(tcctools.c 作为独立 TU)不在此声明, 由自身提供。
+   仅声明真正被前序文件(libtcc.c)引用的, 其余由 tcctools.c 顺序定义。 */
+#if ONE_SOURCE
 ST_FUNC int tcc_tool_platform(char **argv, const char *platform);
-ST_FUNC int gen_makedeps(TCCState *s, const char *target, const char *filename);
 #endif
 
 /* ------------ tccdbg.c ------------ */

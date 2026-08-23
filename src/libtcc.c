@@ -1839,6 +1839,7 @@ static uint32_t parse_version(TCCState *s1, const char *version)
  * 变量来源: @os/@arch/@tcc 内建 + 现有 -D。 */
 #ifdef CONFIG_TCC_MUSL
 #include <glob.h>
+#include <dirent.h>
 #endif
 
 /* 内置变量求值 */
@@ -1993,11 +1994,13 @@ static void parse_list_args(const char *p, char **argv, int argc,
             } else if (!strcmp(s, "%end")) {
                 if (sp > 0)
                     sp--;
-            } else if (!strncmp(s, "%dep ", 5)) {
-                const char *d = s + 5;
-                while (*d == ' ' || *d == '\t')
-                    d++;
-                list_dep(d, out, outn);       /* 拉取/复用依赖并注入 -I/-L */
+            } else if (!strncmp(s, "%dep", 4) && (s[4] == ' ' || s[4] == '\t')) {
+                if (S[sp].on) {                 /* %dep 受 %if 条件控制 */
+                    const char *d = s + 4;
+                    while (*d == ' ' || *d == '\t')
+                        d++;
+                    list_dep(d, out, outn);     /* 拉取/复用依赖, 注入编译参数 */
+                }
             }
             continue;
         }
@@ -2015,9 +2018,36 @@ static void parse_list_args(const char *p, char **argv, int argc,
 }
 
 #ifdef CONFIG_TCC_MUSL
+
+/* ---- %dep 别名表: name -> 缓存目录 (token 前缀展开用) ---- */
+#define DEP_ALIAS_MAX 16
+static struct {
+    char name[64];
+    char path[700];
+} dep_alias[DEP_ALIAS_MAX];
+static int nb_dep_alias;
+
+/* token 以 "<name>/" 开头 → 前缀替换为缓存目录路径; 命中写 buf 返回 1 */
+static int dep_alias_expand(const char *tok, char *buf, int nbuf)
+{
+    int i, k;
+    for (i = 0; i < nb_dep_alias; i++) {
+        k = (int)strlen(dep_alias[i].name);
+        if (k && (int)strlen(tok) > k && tok[k] == '/'
+                && !strncmp(tok, dep_alias[i].name, k)) {
+            snprintf(buf, nbuf, "%s%s", dep_alias[i].path, tok + k);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* 通配符展开: 含 * ? [ 的 token 用 glob 展开(相对 cwd); 无匹配则保留原样 */
 static void list_emit_token(char ***out, int *outn, const char *tok)
 {
+    char buf[900];
+    if (dep_alias_expand(tok, buf, sizeof buf))   /* 命中 %dep 前缀 → 展开为缓存路径 */
+        tok = buf;
     if (strpbrk(tok, "*?[")) {
         glob_t g;
         size_t np, i;
@@ -2041,42 +2071,79 @@ static void list_emit_token(char ***out, int *outn, const char *tok)
 }
 #endif
 
-/* 依赖标识符白名单 (防路径穿越/注入) */
+/* 依赖白名单字符 (防 shell 注入/路径穿越): name/owner/repo/ref 段 */
 static int list_idchar(int c)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
         || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
 }
 
-/* %dep owner/repo[#ref]: 拉取依赖到缓存并复用, 注入 -I <cache>/include -L <cache>/lib.
- * 仅最终 musl 版启用([1/3] BOOT 无 POSIX system/access 也无目录遍历语义)。 */
+/* 40 位十六进制 → 视为 commit sha(走 codeload tarball, 无需 git 也可取) */
+static int dep_is_hex(int c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+static int dep_is_space(unsigned char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+static int dep_is_hashref(const char *s)
+{
+    int i;
+    if (strlen(s) != 40)
+        return 0;
+    for (i = 0; i < 40; i++)
+        if (!dep_is_hex((unsigned char)s[i]))
+            return 0;
+    return 1;
+}
+
+/* %dep [name=]owner/repo[#ref]:
+ *   有 name  → 登记前缀别名; 之后 token 以 "name/" 开头自动替换为缓存目录(最简洁用法).
+ *   无 name  → 自动注入 -I/-L 根 include/lib(常见简写).
+ * 缓存按 owner__repo[@ref] 隔离; 用 .dep.ok 作"已就绪"标记, 防半截拉取误判命中.
+ * 仅最终 musl 版启用([1/3] BOOT 无 POSIX glob/system/access, 排除以利自举)。 */
 #ifdef CONFIG_TCC_MUSL
 static void list_dep(const char *arg, char ***out, int *outn)
 {
-    char owner[128], repo[128], ref[64], dir[640], inc[704], lib[704], cmd[1200];
+    char name[64], owner[128], repo[128], ref[64];
+    char dir[700], okf[724], inc[704], lib[704], cmd[1400];
     const char *base, *p;
-    int i;
+    int i, fetched;
 
-    /* 解析 owner/repo[#ref] */
-    owner[0] = repo[0] = ref[0] = 0;
+    name[0] = owner[0] = repo[0] = ref[0] = 0;
     p = arg;
-    for (i = 0; p[i] && p[i] != '/' && i < 127; i++)
-        owner[i] = p[i];
-    owner[i] = 0;
-    if (p[i] == '/' && owner[0]) {
+
+    /* 1) 可选 "name=" */
+    for (i = 0; p[i] && p[i] != '='; i++)
+        ;
+    if (p[i] == '=' && i > 0) {
+        pstrncpy(name, sizeof name, p, (size_t)i);
         p += i + 1;
-        for (i = 0; p[i] && p[i] != '#' && i < 127; i++)
-            repo[i] = p[i];
-        repo[i] = 0;
-        if (p[i] == '#') {
-            p += i + 1;
-            for (i = 0; p[i] && i < 63; i++)
-                ref[i] = p[i];
-            ref[i] = 0;
-        }
     }
+
+    /* 2) owner [/ repo] [# ref]  每段到 '/' '#' 空白 串尾 */
+    for (i = 0; p[i] && p[i] != '/' && p[i] != '#'
+            && !dep_is_space((unsigned char)p[i]) && i < 127; i++)
+        ;
+    pstrncpy(owner, sizeof owner, p, (size_t)i);
+    if (p[i] == '/') {
+        p += i + 1;
+        for (i = 0; p[i] && p[i] != '#'
+                && !dep_is_space((unsigned char)p[i]) && i < 127; i++)
+            ;
+        pstrncpy(repo, sizeof repo, p, (size_t)i);
+    }
+    if (p[i] == '#') {
+        p += i + 1;
+        for (i = 0; p[i] && !dep_is_space((unsigned char)p[i]) && i < 63; i++)
+            ;
+        pstrncpy(ref, sizeof ref, p, (size_t)i);
+    }
+
     if (!owner[0] || !repo[0])
         return;
+    for (i = 0; name[i]; i++)  if (!list_idchar(name[i]))  return;
     for (i = 0; owner[i]; i++) if (!list_idchar(owner[i])) return;
     for (i = 0; repo[i]; i++)  if (!list_idchar(repo[i]))  return;
     for (i = 0; ref[i]; i++)   if (!list_idchar(ref[i]))   return;
@@ -2088,39 +2155,69 @@ static void list_dep(const char *arg, char ***out, int *outn)
         snprintf(dir, sizeof dir, "%s/%s__%s@%s", base, owner, repo, ref);
     else
         snprintf(dir, sizeof dir, "%s/%s__%s", base, owner, repo);
+    snprintf(okf, sizeof okf, "%s/.dep.ok", dir);
 
-    if (access(dir, F_OK) != 0) {               /* 缓存未就绪: 拉取 */
-        snprintf(cmd, sizeof cmd, "mkdir -p %s && git clone --depth 1%s%s "
-                 "https://github.com/%s/%s %s",
-                 base, ref[0] ? " --branch " : "", ref[0] ? ref : "",
-                 owner, repo, dir);
-        if (system(cmd) != 0) {                 /* 无 git 回退 curl tarball */
-            if (ref[0])
-                snprintf(cmd, sizeof cmd, "mkdir -p %s && curl -Ls "
-                         "https://codeload.github.com/%s/%s/tar.gz/%s | "
-                         "tar -xz --strip-components=1 -C %s",
-                         base, owner, repo, ref, dir);
-            else
+    if (access(okf, F_OK) != 0) {               /* 未就绪: 拉取(sha 走 codeload) */
+        fetched = 0;
+        if (dep_is_hashref(ref)) {
+            snprintf(cmd, sizeof cmd, "mkdir -p %s && curl -Ls "
+                     "https://codeload.github.com/%s/%s/tar.gz/%s | "
+                     "tar -xz --strip-components=1 -C %s",
+                     base, owner, repo, ref, dir);
+            fetched = (system(cmd) == 0);
+        } else if (!ref[0]) {
+            snprintf(cmd, sizeof cmd, "mkdir -p %s && git clone --depth 1 "
+                     "https://github.com/%s/%s %s", base, owner, repo, dir);
+            if (system(cmd) != 0) {
                 snprintf(cmd, sizeof cmd, "mkdir -p %s && curl -Ls "
                          "https://codeload.github.com/%s/%s/tar.gz/HEAD | "
                          "tar -xz --strip-components=1 -C %s",
                          base, owner, repo, dir);
-            if (system(cmd) != 0) {
-                fprintf(stderr, "tcc: dep %s/%s%s: fetch failed (need git/curl "
-                        "or pre-seeded cache)\n", owner, repo,
-                        ref[0] ? ref : "");
-                return;
+                fetched = (system(cmd) == 0);
+            } else {
+                fetched = 1;
             }
+        } else {
+            snprintf(cmd, sizeof cmd, "mkdir -p %s && git clone --depth 1 "
+                     "--branch %s https://github.com/%s/%s %s",
+                     base, ref, owner, repo, dir);
+            if (system(cmd) != 0) {
+                snprintf(cmd, sizeof cmd, "mkdir -p %s && curl -Ls "
+                         "https://codeload.github.com/%s/%s/tar.gz/%s | "
+                         "tar -xz --strip-components=1 -C %s",
+                         base, owner, repo, ref, dir);
+                fetched = (system(cmd) == 0);
+            } else {
+                fetched = 1;
+            }
+        }
+        if (fetched) {
+            snprintf(cmd, sizeof cmd, "touch %s/.dep.ok", dir);
+            (void)system(cmd);
+        } else {
+            fprintf(stderr, "tcc: dep %s/%s#%s: fetch failed, no cached copy "
+                    "(need git/curl or pre-seeded .dep.ok)\n",
+                    owner, repo, ref[0] ? ref : "");
+            return;
         }
     }
 
-    /* 注入 include/lib */
-    snprintf(inc, sizeof inc, "%s/include", dir);
-    snprintf(lib, sizeof lib, "%s/lib", dir);
-    dynarray_add(out, outn, tcc_strdup("-I"));
-    dynarray_add(out, outn, tcc_strdup(inc));
-    dynarray_add(out, outn, tcc_strdup("-L"));
-    dynarray_add(out, outn, tcc_strdup(lib));
+    if (name[0]) {                              /* 有名: 登记前缀别名 */
+        if (nb_dep_alias < DEP_ALIAS_MAX) {
+            pstrncpy(dep_alias[nb_dep_alias].name, sizeof dep_alias[0].name,
+                     name, strlen(name));
+            pstrncpy(dep_alias[nb_dep_alias].path, sizeof dep_alias[0].path,
+                     dir, strlen(dir));
+            nb_dep_alias++;
+        }
+    } else {                                    /* 无名: 自动注入根 include/lib */
+        snprintf(inc, sizeof inc, "%s/include", dir);
+        snprintf(lib, sizeof lib, "%s/lib", dir);
+        dynarray_add(out, outn, tcc_strdup("-I"));
+        dynarray_add(out, outn, tcc_strdup(access(inc, F_OK) == 0 ? inc : dir));
+        dynarray_add(out, outn, tcc_strdup("-L"));
+        dynarray_add(out, outn, tcc_strdup(access(lib, F_OK) == 0 ? lib : dir));
+    }
 }   /* list_dep */
 #else /* !CONFIG_TCC_MUSL */
 static void list_dep(const char *arg, char ***out, int *outn)
