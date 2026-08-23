@@ -20,6 +20,12 @@ int main(void)
 
     if (!v3 || !mx) { puts("FAIL: null reflect"); return 1; }
 
+    /* 缓存: 同类型多次 __builtin_reflect 复用同一张表 (同地址) */
+    if (v3 != (const struct __refl *)__builtin_reflect(struct Vec3)
+        || mx != (const struct __refl *)__builtin_reflect(struct Mixed)) {
+        puts("FAIL: reflect cache reuse"); fail = 1;
+    }
+
     /* Vec3 header */
     if (v3->nfield != 3) { printf("FAIL: Vec3 nfield=%u\n", v3->nfield); fail = 1; }
     if (v3->size != sizeof(struct Vec3)) { printf("FAIL: Vec3 size=%u\n", v3->size); fail = 1; }

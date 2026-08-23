@@ -6479,6 +6479,41 @@ static void refl_put32(unsigned char *p, int v)
     p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
 }
 
+/* 把 vtop 覆盖为指向 (rodata_section 中 off 处) 的 const void* */
+static void refl_vpush(unsigned long off)
+{
+    CType rv = char_pointer_type;
+    rv.t |= VT_CONSTANT;
+    vtop->type = rv;
+    vtop->r = VT_CONST | VT_SYM;
+    vtop->sym = get_sym_ref(&rv, rodata_section, off, 32);
+    vtop->c.i = 0;
+}
+
+/* 反射表缓存: 同一 struct/union 符号只生成一张表, 多次 __builtin_reflect 复用 */
+#define REFL_CACHE_MAX 256
+static Sym *refl_cache_ref[REFL_CACHE_MAX];
+static unsigned long refl_cache_off[REFL_CACHE_MAX];
+static int refl_cache_n;
+
+static unsigned long refl_cache_lookup(Sym *s)
+{
+    int i;
+    for (i = 0; i < refl_cache_n; i++)
+        if (refl_cache_ref[i] == s)
+            return refl_cache_off[i];
+    return (unsigned long)-1;
+}
+
+static void refl_cache_add(Sym *s, unsigned long off)
+{
+    if (refl_cache_n < REFL_CACHE_MAX) {
+        refl_cache_ref[refl_cache_n] = s;
+        refl_cache_off[refl_cache_n] = off;
+        refl_cache_n++;
+    }
+}
+
 /* 覆盖 vtop 为指向反射元数据表的 const void* */
 static void refl_emit(CType *t)
 {
@@ -6488,6 +6523,16 @@ static void refl_emit(CType *t)
     int size, align, nfield, i, str_off, rec_len, hdr, fields_off, tlen, cur;
     int fsz, fa, kind, tab_off;
     const char *tp = NULL, *fn;
+    unsigned long off;
+
+    /* 缓存命中: 同 struct/union 复用已有表 */
+    if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref) {
+        off = refl_cache_lookup(t->ref);
+        if (off != (unsigned long)-1) {
+            refl_vpush(off);
+            return;
+        }
+    }
 
     /* --- 布局 --- */
     hdr = 32;
@@ -6562,16 +6607,10 @@ static void refl_emit(CType *t)
             i++;
         }
 
-    /* --- 返回 const void* 指向 header 起点 --- */
-    {
-        CType rv = char_pointer_type;
-        rv.t |= VT_CONSTANT;
-        sym = get_sym_ref(&rv, sec, (unsigned long)tab_off, hdr);
-        vtop->type = rv;
-        vtop->r = VT_CONST | VT_SYM;
-        vtop->sym = sym;
-        vtop->c.i = 0;
-    }
+    /* --- 返回 const void* 指向 header 起点, 并登记缓存 --- */
+    if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref)
+        refl_cache_add(t->ref, (unsigned long)tab_off);
+    refl_vpush((unsigned long)tab_off);
 }
 
 ST_FUNC void unary(void)
