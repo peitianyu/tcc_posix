@@ -1,0 +1,57 @@
+# Release 记录 (CHANGELOG)
+
+> 里程碑级变更摘要。README 只做概览。按时间序, 最新在上。
+> 完整逐提交历史用 `git log --oneline`。
+
+## 2026-08-23 — 脱糖输出 → clang/LLVM 正式产物 完整闭环 (v-next)
+
+编译管线确定"标准 C 为底层": TCC 魔改前端做**快速验证**, 正式产物由
+`--emit-c` 脱糖输出标准 C → clang/LLVM 生成, 吃满 AVX/FMA。
+
+- **`--emit-c` 输出模式**: 与 `-E` 共用 preprocess_loop 引擎但 include 处走不同
+  分支 — 保留系统 `#include` 不展开、预定义头不落地 (`-DCONFIG_TCC_PREDEFS=1`)。
+- **扩展点改写闭环** (tccpp `dg_*` 模块, token/precedence 级):
+  - operator 完整表达式忠实改写 (嵌套/混合优先级, t058)
+  - defer 作用域逆序重放 + `return` 早退深度栈 LIFO (t056)
+  - model 泛型实例化排出具体 struct/函数 (含常量参数, t032b/t054)
+  - SIMD `v4f a+b` 原样透传 → clang 侧 `__m128` 原生 addps (双模式 simd.h)
+- **script/desugar.ps1**: host tcc emit-c + WSL clang -O3 + 数字比对一键验收。
+- **性能对照** (build/simd_bench.c): tcc 2.264s vs clang -O3 ≈0.06s, **≈37×**, 校验和一致。
+- **新增** docs/desugar.md (设计), docs/desugar-perf.md (性能)。
+
+## 2026-07/08 — 系统模块补齐 (R1-R12)
+
+- socket/process/statfs/pwdgrp/select-poll/termios-console/dlfcn/timer/mq/System-V
+  ipc/aio 全落地 (t033-t045)。aio 后台线程段错误根因 (`__psx_vtbl` 未初始化) 修复。
+- ENOSYS 兜底 (`__syscall_vtbl[n]==NULL → -ENOSYS`, t034/t039)。
+- 均按"接口层/编译器层"合入, 不改 musl 语义。docs/system-modules.md。
+
+## 2026-08 — 运行时内存治理 + 调试体验
+
+- `-b` 边界检查 + `-bt` 回溯 (bcheck.o / bt-exe.o / bt-log.o): 越界报 `文件:行`,
+  反查全局/static 变量名 (`.btsym`), 命中块执行/缩小分为 `t045/probe_b*`。
+- 统一销毁 `tcc_release`、mmap 登记、arena epoch、逃逸声明、memtrack 泄漏明细、
+  可插拔输出 sink (`__tccmem_writer`)。docs/memory-governance.md。
+- `-run -b` 透明回退临时 exe (规避内存执行自举缺陷)。
+
+## 2026-08 — 纯 musl 编译器 (零 winapi)
+
+- CONFIG_TCC_MUSL 自举, 编译器代码去全部 winapi 依赖, PE 导入表为空, 系统调用
+  经 psxscl→ntdll 直通。install.sh `[3/3]` 产出 `bin/tcc.exe`。
+
+## 2026-08 — TLS via emutls
+
+- `__thread/_Thread_local` 打通: 编译器生成 `__emutls_object` + 运行时懒分配器,
+  关键字引用拦截 → `__emutls_get_address`。t047。
+
+## 2026-08 — 语言扩展系列
+
+- C 运算符重载 `operator` 语法 (t050), 编译期静态分派零开销。
+- 结构体反射 `__builtin_reflect` (t051)。
+- x86_64-simd 模块拆分 + 原生运算符 (simd_demo, 双模式 simd.h)。
+- cpu-prof rdtsc 周期插桩 + memtrack 可插拔 sink (t049)。
+
+## 2026-08 — `@listfile` 编译描述 (P0-P2)
+
+- `tcc @build.txt`: `%dep` 包管理 + glob 选源 + `%if` 编译选择 + 嵌套子文件。
+  docs/listfile.md。
