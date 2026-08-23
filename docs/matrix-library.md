@@ -332,3 +332,113 @@ Vec3 d = a * b;     /* → operator*(a, b)  */
 - A.1/A.2 (mat 库) 为当前交付范围, 零编译器改动.
 - 附录 B `operator` 语法 **已实现** (需编译器改动的语言扩展), 回归 t050, 与
   矩阵层正交 (mat 表达式重载 A.3 可声明 operator 转发到手写 GEMM 内核).
+
+---
+
+## 附录 C. 性能对照与懒运算可达性归档
+
+> 状态: 2026-08-23 讨论结论固化. 覆盖: 懒运算能用户端做到哪层、Eigen 对照、
+> 加编译器特性能否追平、传统 BLAS 如何高效、我们在 tcc_posix 上能否做到.
+> 目标: 为「矩阵层是否立项 + VT_SIMDEXPR 编译器特性时机」留下可执行依据.
+
+### C.1 懒运算能用户端实现到哪一层
+
+懒/惰性求值分两级, **用户端只够得到算法/内存级**, 寄存器级必须编译器:
+
+| 级 | 能做什么 | 省什么 | 归属 |
+|---|---|---|---|
+| 算法/内存级 | operator 返回 `Expr{op,l,r}` 表达式树, 赋值/取元素时**单遍物化** | 中间临时**整块分配 + 整体搬运**(大向量/矩阵大头) | ✅ 用户端可做 (表达式模板) |
+| 寄存器级 | `(a*b+c)*d` 在 xmm0 链上算完, 只 load 叶子、最后 store | 少量 load/store 指令(若干 movaps) | ❌ 需编译器 (VT_SIMDEXPR) |
+
+- 结论: 长向量/大矩阵收益大头在内存级 → **用户端表达式模板就够**(复用 operator);
+  4–8 元素小 SIMD 的寄存器级熔合收益小, 且用户端 Expr 树开销可能抵消 → 不优先.
+
+### C.2 Eigen 对照
+
+| 维度 | Eigen (C++) | 用户端 C (operator) |
+|---|---|---|
+| `A*B+C` 语法 | C++ 运算符重载 | operator 扩展 (编译期改写为调用) |
+| 表达式编码 | **编译期类型** (每步不同模板类型携带整棵树) | **运行时 Expr 值**, 物化遍历 |
+| 求值决策时机 | 编译期经 traits 挑 lazy/eager + 派发内核 | 运行时 `switch(op)` 单遍 |
+| 代数/恒等式优化 | ✅ (traits 特化: inv×B→solve、乘积 vs 系数式) | ❌ (只能用户手写内核) |
+| 向量化 | 模板内联后后端自动向量化/显式 SIMD | 需**手动** v4f/_mm |
+| 临时寿命 | C++ 引用延长 + RVO/移动 | C 无引用寿命 → Expr 指针须活得比物化点久 |
+| 性能上限 | 逼近手写 BLAS | 靠手写内核, 结构上低于 Eigen |
+
+### C.3 加编译器特性能否追平 Eigen —— 三档
+
+Eigen 性能来源拆三条, 逐条判定:
+
+| 特性 | 追平对象 | 判定 |
+|---|---|---|
+| SIMD 表达式折叠 (VT_SIMDEXPR 惰性节点) | 系数式 + 寄存器级熔合 | ✅ 可追平 · 编译器本职 · **推荐后续做** |
+| 自动向量化 pass | SIMD 生成 | 🟡 部分 · TCC 无, 加=重工程 · 暂以 operator/_mm 手动替代 |
+| 编译期类型分流 (type-traits/特化) | `A·inv(B)→solve` 等恒等式 | ❌ 结构受限 · 需类 C++ 元编程, 违背 TCC 单遍架构, 不建议 |
+
+- **关键边界**: 矩阵总性能上限由**手写内核质量**决定, 编译器特性追不平内核.
+  Eigen 快一半靠表达引擎、一半靠 BLAS 级 GEMM.
+
+### C.4 传统 BLAS (SGEMM) 如何高效
+
+朴素 `for i,j,k` 三重标量循环 = bandwidth-bound (性能惨). 高效实现按三层拆,
+目标转成 **compute-bound (受 FMA 吞吐限制)**:
+
+1. **缓存分块 + 打包**: 外层 `jj/ii` 块到 cache 尺寸, 内层 `kk` 块到 L1; 把
+   A/B 子块**拷贝进连续缓冲**(packing) → 消除 TLB 缺失、跨步访存、重复读 B.
+2. **寄存器微内核 (microkernel)**: 对 `r×c` 子块(如 4×8), 累加器**钉在 r×c 个
+   寄存器**里, `for k: acc[][]+=a[r]·b[c]`; A 每行只读一次, 几乎无中间 store/load.
+3. **向量化 SIMD**: 微内核用 FMA 一次算 8 float (AVX2), 累加器即一组矢量寄存器.
+
+   → GotoBLAS/OpenBLAS/BLIS 路线, SGEMM 可达 ~90%+ 峰值.
+
+### C.5 我们在 tcc_posix 上能否做到
+
+**关键事实**: TCC 的 x86_64 SIMD 只到 **SSE (128 位 XMM)**, 无 AVX/YMM/vfmadd.
+
+- ✅ **能做到**: 缓存分块 + packing + `v4f` 寄存器微内核 + SSE 向量化 —— **全用户端,
+  零编译器改动**. 三者叠加可达 **SSE compute-bound 峰值**(等价 2005–2011 SSE BLAS).
+  - 微内核累加用 operator 糖或 `_mm_mul_ps/_mm_add_ps` 组合(无单条 FMA, 用 mul+add).
+- ❌ **追不平**: AVX2/FMA(256 位) 不存在 → 每周期只算 4 float, **绝对 flops 峰值约为
+  AVX2 版 BLAS 的一半**(SIMD 宽度硬上限, 非写法问题). 极致峰值(>90% SSE)还依赖手写
+  微内核 + 逐指令微调, 且热循环由 TCC 生成, 寄存器分配质量是变量.
+
+- **是否值得做**: 目标若是「亲手搭一个真实可用的 GEMM、把 BLAS 原理落地、验证能否
+  打到 SSE 峰值」→ 值得, 即 A.1/A.2 手写平铺 GEMM 内核; 若想拼现代 OpenBLAS 绝对
+  峰值 → 不可达(卡在 TCC 缺 AVX/FMA). SIMD 表达式折叠 (VT_SIMDEXPR) 是后续
+  优先级最高的编译器特性切入点 (C.3).
+
+### C.6 TCC 验证前端 + 脱糖输出 → clang/LLVM 正式产物 (立项)
+
+> 目标: TCC 做**前期代码验证**(秒级 `-run`、`-b -bt` 内存治理、operator/model/
+> SIMD/defer 提前验证); **正式产物由 clang/LLVM 出**(吃满 LLVM 优化: 自动向量化/
+> FMA/内联, 补 TCC 无 AVX/FMA 的短板). 起因: clang **不认 TCC 魔改语法** → 正式
+> 产物只能由 TCC 前端「吐出来」.
+
+**架构 (路径 D, 已定)**: TCC 前端(可单遍 hook, 不必先建完整 AST) → **脱糖输出
+标准 C (`gnu11` + intrinsic)** → `clang/LLVM` 编译:
+
+| 魔改特性 | 脱糖落点 | 需编译器动作 |
+|---|---|---|
+| `operator a+b` | `operator+(a,b)` 普通函数调用 | gen_op 处改写(已实现) + C 文本发射 |
+| `model` 泛型 | 实例化后的具体 `struct`/`typedef`/函数 | 实例化后在 parse 处出 C |
+| SIMD `v4f` 运算 | `_mm_*` SSE intrinsic (`__m128`) | simd_emit_* 处映射 intrinsic |
+| `defer` | 作用域退出清理 (`__attribute__((cleanup))` 或 goto 展开) | defer 注册点展开 C |
+
+- **C 标准落点**: `gnu11` 优先(C11 才有 `_Thread_local`; GNU 扩展 `__thread`/
+  `__attribute__`/`typeof` 少一层脱糖); **C99 只是迁移下限, 不作为默认**. SIMD 走
+  `<immintrin.h>`(vendor 头) + `-msse*/-mavx2 -mfma`.
+- **驱动**: `clang -std=gnu11 -O3 -mavx2 -march=native out.c <链接> -o prod`,
+  收敛进一份 Makefile/脚本.
+- **与 C.1/C.5 关系**: 懒运算仍走 gen_op/用户端表达式模板 (C.1); 矩阵内核写成
+  标准 C + 可移植 intrinsic, 正式产物吃 LLVM 的 AVX/FMA (补 C.5 的 SSE 上限).
+
+**musl 兼容性 (修正)**: musl 是 libc, 非语法. 源码层 POSIX/musl 用法在脱糖产物中
+照样 `#include`, 无损. 真正的门槛在**构建/链接**:
+- **Linux + musl**: clang 原生 `--sysroot=<musl>` 一套, 无需 psxscl.
+- **Windows + psxscl**: psxscl/musl 是**编译无关的 `.a` + 头**(TCC 能用,lld 同样能用),
+  不用另做一份; 只需写一个 **clang 驱动**(target/flag/链接参数). 需盯**TLS 对齐**
+  (`-femulated-tls`, 因 musl-nt64 走 emutls) 与调用约定/结构体 ABI.
+
+**关于 AST 输出层的定位**: 本方案证明 AST/中间层不再是绕远 —— 它的真实价值是作为
+**「脱糖 → 标准 C 的输出端」**, 而非直接到 LLVM IR. 完整 AST→LLVM IR 后端(保留扩展
+直达优化器)任务更重, 仅在做自定义 LLVM pass/跨语言时才需要, 暂不立项.

@@ -289,6 +289,24 @@ struct Vec3 e = a + b*b; /* 优先级由语法树天然保持: a + (b*b) */
 - **性能红线**:重载是语法糖,应转发到手写内核(如矩阵平铺 GEMM),不得退化成
   标量 `for` 循环。
 
+## 开发-验证 + 正式产物策略 (TCC 魔改前端 → clang/LLVM)
+
+本项目把编译器用作 `TCC 魔改前端`(operator/model/SIMD/defer 等扩展)做**前期验证**,
+正式产物交给 **clang/LLVM** 生成 —— 因 clang 不认 TCC 扩展语法, 正式产物由 TCC 前端
+**脱糖输出标准 C (`gnu11` + `<immintrin.h>` intrinsic)**, 再 `clang -O3 -mavx2 -mfma`
+编译, 吃满 LLVM 自动向量化/FMA/内联(补 TCC 无 AVX/FMA 的短板)。映射:
+
+| 扩展 | 脱糖落点 |
+|---|---|
+| `operator a+b` | `operator+(a,b)` 函数调用 |
+| `model` 泛型 | 实例化后的具体类型/函数 |
+| SIMD `v4f` | `_mm_*` SSE intrinsic |
+| `defer` | `__attribute__((cleanup))` 或 goto 展开 |
+
+musl 是 libc 非语法: Linux+musl 用 clang `--sysroot` 原生; Windows+psxscl 复用
+`.a`+头、另写 clang 驱动(盯 `-femulated-tls` 与 ABI)。完整决策链见
+docs/matrix-library.md 附录 C。
+
 ## 已知限制
 
 - **纯 musl 编译器 (CONFIG_TCC_MUSL)** 走 POSIX 接口, **不含任何 winapi 依赖**:
