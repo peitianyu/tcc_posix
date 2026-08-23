@@ -11,6 +11,20 @@
 
 struct Vec3 { float x, y, z; };
 struct Mixed { char c; int i; double d; short s; };
+struct Node { struct Vec3 v; int tag; };
+
+/* P2: 通用按反射递归深拷贝 (ssub 让嵌套值字段递归) */
+static void refl_copy(char *dst, const char *src, const struct __refl *r)
+{
+    int i;
+    for (i = 0; i < (int)r->nfield; i++) {
+        const struct __refl_field *f = r->fields + i;
+        if (f->sub)
+            refl_copy(dst + f->offset, src + f->offset, f->sub);
+        else
+            memcpy(dst + f->offset, src + f->offset, f->size);
+    }
+}
 
 int main(void)
 {
@@ -63,6 +77,28 @@ int main(void)
             memcpy(buf + f[i].offset, (char *)&a + f[i].offset, f[i].size);
         if (*(float *)buf != 1.f || *(float *)(buf + 4) != 2.f) { puts("FAIL: reflect-driven copy"); fail = 1; }
         (void)off;
+    }
+
+    /* P1: 嵌套 struct 值字段 sub 指向子表 */
+    {
+        const struct __refl *nd = (const struct __refl *)__builtin_reflect(struct Node);
+        const struct __refl_field *fv, *ft;
+        if (nd->nfield != 2) { puts("FAIL: Node nfield"); fail = 1; }
+        fv = &nd->fields[0];
+        ft = &nd->fields[1];
+        if (!fv->sub || fv->sub->nfield != 3 || fv->sub != v3) { puts("FAIL: Node.v sub"); fail = 1; }
+        if (ft->offset != offsetof(struct Node, tag)) { puts("FAIL: Node.tag offset"); fail = 1; }
+        if (ft->sub != NULL) { puts("FAIL: Node.tag sub null"); fail = 1; }
+    }
+
+    /* P2: 通用按反射递归深拷贝 (嵌套经 sub) */
+    {
+        struct Node a = { { 4.f, 5.f, 6.f }, 42 };
+        struct Node b;
+        const struct __refl *nd = (const struct __refl *)__builtin_reflect(struct Node);
+        memset(&b, 0, sizeof b);
+        refl_copy((char *)&b, (const char *)&a, nd);
+        if (b.v.x != 4.f || b.v.z != 6.f || b.tag != 42) { puts("FAIL: refl deep copy"); fail = 1; }
     }
 
     if (fail) { puts("FAIL: t051_reflect"); return 1; }

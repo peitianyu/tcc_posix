@@ -120,8 +120,8 @@ cpu-prof 骨架)。
 | 阶段 | 产出 | 验收 |
 |---|---|---|
 | P0 | 内建 `__builtin_reflect` + struct/union/scalar 平铺元数据落 `.rdata` | ✅ 已实现; t051 PASS (字段名/offset/size/align/kind) |
-| P1 | 嵌套 struct 链接 (sub), 递归/多级; array 字段 | 多级反射正确 |
-| P2 | 序列化 demo; 与 C.6 脱糖输出端 / 调试器配合 | end-to-end |
+| P1 | 嵌套 struct 链接 (sub), 递归/多级; array 字段 | ✅ 已实现: __refl_field 扩到 32B(+sub), refl_emit 返回段偏移递归生成子表(深优先), 表起点 8 对齐, -1 哨兵表示"无子表"; t051 断言 Node.v->Vec3 |
+| P2 | 序列化 demo; 与 C.6 脱糖输出端 / 调试器配合 | ✅ 序列化 demo: t051 的 refl_copy 按反射递归深拷贝(嵌套经 sub) |
 
 ---
 
