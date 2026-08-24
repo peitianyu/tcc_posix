@@ -3971,6 +3971,24 @@ static unsigned char dg_oreg[DG_MAXOP + 1];/* [op id] = 该运算符已被 opera
 static int dg_op_tag[DG_MAXOP + 1];        /* [op id] = struct tag token, 0 无 */
 static int dg_active;                      /* 出现过 operator 定义 -> 启用改写 */
 
+/* operator 脱糖定义/调用名: `operator_<wrd>[_<typeBase>]`(typeBase 空则无后缀,
+ * 兼容旧名 operator_lt). 使分派不依赖定义用何种运算符符号, 且同名 operator
+ * 用于不同类型时生成 operator_lt_Cmp / operator_lt_Other 互不冲突. */
+static const char *dg_op_nm_txt(int opid, const char *typ)
+{
+    static char nm[88];
+    size_t l;
+    snprintf(nm, sizeof nm, "%s", dg_op_name[opid]);
+    if (typ && *typ) {
+        l = strlen(nm);
+        if (l + 2 + strlen(typ) < sizeof nm) {
+            strcat(nm, "_");
+            strcat(nm, typ);
+        }
+    }
+    return nm;
+}
+
 /* 运算符 token 的文本形式 (算术单字符, 比较/自增减多字符) */
 static const char *dg_optxt(int t)
 {
@@ -4589,7 +4607,8 @@ static void dg_pnode(CString *out, int n)
                 /* 一元/自增减: 操作数为 op 类型 -> operator_!(l) / operator_inc(l);
                  * 否则 verbatim !(l) / (l)++. */
                 if (dg_optagged(nd->l)) {
-                    cstr_cat(out, dg_op_name[opid], strlen(dg_op_name[opid]));
+                    { const char *__t = get_tok_str(dg_ndo[nd->l].tag, NULL);
+                  cstr_cat(out, dg_op_nm_txt(opid, __t), strlen(dg_op_nm_txt(opid, __t))); }
                     cstr_ccat(out, '(');
                     dg_pnode(out, nd->l);
                     cstr_ccat(out, ')');
@@ -4604,7 +4623,8 @@ static void dg_pnode(CString *out, int n)
             }
             /* 'B' 二元 / 'C' 比较: 两侧均 op 类型 -> operator_X(l,r) */
             if (dg_optagged(nd->l) && dg_optagged(nd->r)) {
-                cstr_cat(out, dg_op_name[opid], strlen(dg_op_name[opid]));
+                { const char *__t = get_tok_str(dg_ndo[nd->l].tag, NULL);
+                  cstr_cat(out, dg_op_nm_txt(opid, __t), strlen(dg_op_nm_txt(opid, __t))); }
                 cstr_ccat(out, '(');
                 dg_pnode(out, nd->l);
                 cstr_ccat(out, ',');
@@ -5262,6 +5282,35 @@ static const char *dg_typbase(const char *t)
     b[i] = 0;
     return b;
 }
+/* operator 定义行(i 为 operator/`operator_<wrd>` token)的操作数基础类型名,
+ * 用于定义端改名 operator_<wrd>_<type> 与调用端对齐 */
+static const char *dg_op_def_typ(int i)
+{
+    static char tn[48];
+    int j, d = 0;
+    tn[0] = 0;
+    for (j = i + 1; j < dg_n; j++) {
+        if (is_space(dg_buf[j]))
+            continue;
+        if (dg_tokchar(j) == '(') { d = 1; continue; }
+        if (d > 0) {
+            const char *tj;
+            if (dg_tokchar(j) == ')')
+                break;
+            if (!isid((unsigned char)dg_tokchar(j)))
+                continue;
+            tj = dg_txt[j] ? dg_txt[j] : "";
+            if (!strcmp(tj, "struct") || !strcmp(tj, "union")
+                || !strcmp(tj, "const") || !strcmp(tj, "unsigned")
+                || !strcmp(tj, "signed"))
+                continue;
+            snprintf(tn, sizeof tn, "%s", dg_typbase(tj));
+            break;
+        }
+    }
+    return tn;
+}
+
 static void dg_optyp_add(const char *tn)
 {
     const char *b = dg_typbase(tn);
@@ -5477,6 +5526,8 @@ static void dg_gbody_oprewrite(CString *out, const char *fp_txt,
                 if (out->size && out->data[out->size - 1] != ' ') cstr_ccat(out, ' ');
                 cstr_cat(out, "operator_", 9);
                 cstr_cat(out, wr, strlen(wr));
+                cstr_ccat(out, '_');
+                cstr_cat(out, opbase, strlen(opbase));   /* operator_lt_Cmp */
                 cstr_cat(out, "( ", 2);
                 cstr_cat(out, lbt[isop], strlen(lbt[isop]));
                 cstr_cat(out, " , ", 3);
@@ -5717,7 +5768,7 @@ static void dg_emit_verbatim(TCCState *s1, int from, int to)
         if (t == TOK_OPERATOR) {
             int opid = dg_opat(i);     /* 顺带注册 op */
             if (opid) {
-                fputs(dg_op_name[opid], s1->ppfp);
+                fputs(dg_op_nm_txt(opid, dg_op_def_typ(i)), s1->ppfp);
                 last = t;
                 i = dg_next_ns(i);     /* 跳过紧跟的运算符字符 token */
                 continue;
@@ -6177,7 +6228,8 @@ static void dg_flush(TCCState *s1)
             break;                              /* 非简单 LHS */
         dg_emit_verbatim(s1, 0, i);             /* LHS `a ` */
         fputs("= ", s1->ppfp);
-        fputs(dg_op_name[id], s1->ppfp);
+        { const char *__t = get_tok_str(dg_var_of(dg_buf[lh]), NULL);
+          fputs(dg_op_nm_txt(id, __t), s1->ppfp); }
         fputs("(", s1->ppfp);
         fputs(dg_txt[lh], s1->ppfp);
         fputs(", ", s1->ppfp);
@@ -6216,7 +6268,8 @@ static void dg_flush(TCCState *s1)
             break;
         fputs(dg_txt[spec], s1->ppfp);
         fputs(" = ", s1->ppfp);
-        fputs(dg_op_name[id], s1->ppfp);
+        { const char *__t = get_tok_str(dg_var_of(dg_buf[spec]), NULL);
+          fputs(dg_op_nm_txt(id, __t), s1->ppfp); }
         fputs("(", s1->ppfp);
         fputs(dg_txt[spec], s1->ppfp);
         fputs(");", s1->ppfp);
