@@ -85,6 +85,17 @@ int main(void) {
         CHECK(m->stl_map_key_at(struct Cmp, int)(1)->id == 9);
     }
 
+    /* 4. getor: 未设置的键返回默认值(不改表) */
+    {
+        STL_Map(int,int) m; m->stl_map_init(int,int)(ar);
+        CHECK(m->stl_map_set(int,int)(5, 55) == 0);
+        CHECK(m->stl_map_getor(int,int)(5, -1) == 55);   /* 已设置 → 值 */
+        CHECK(m->stl_map_getor(int,int)(9, -1) == -1);   /* 未设置 → 默认 */
+        /* 默认查询不插入 */
+        CHECK(!m->stl_map_contains(int,int)(9));
+        CHECK(m->stl_map_size(int,int)() == 1);
+    }
+
     stl_arena_destroy(ar);
     return 0;
 }

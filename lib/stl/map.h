@@ -91,6 +91,19 @@ model (K,V) int stl_map_set(STL_Map(K,V) *self, K key, V val) {
     return 0;
 }
 
+/* get 键值, 未设置时返回默认值 dflt (不改表; 见 std::map 语义的 "or default") */
+model (K,V) V stl_map_getor(STL_Map(K,V) *self, K key, V dflt) {
+    STL_MAP_EN();
+    struct __stl_map_e *d = (struct __stl_map_e *)self->data;
+    int lo = 0, hi = self->len;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (d[mid].key < key) lo = mid + 1; else hi = mid;
+    }
+    if (lo < self->len && !(key < d[lo].key)) return d[lo].val;
+    return dflt;
+}
+
 /* 删键: 仅 operator<。等价命中→左移压缩返回 1; 无→0 */
 model (K,V) int stl_map_erase(STL_Map(K,V) *self, K key) {
     STL_MAP_EN();
