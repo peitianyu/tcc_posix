@@ -6835,6 +6835,8 @@ static void method_call_sugar(void)
     int nb_args, ret_nregs, ret_align, regsize, variadic, r2, talign;
     int recv_is_ptr = 0;
     int ms_on_stack = 0;   /* 泛型方法: 实例化后内部函数符号已压栈 (vtop=func) */
+    int ret_sret = 0;      /* 大 struct 返回: sret 隐藏指针 */
+    int ret_addr = 0;      /* sret 返回槽偏移 */
     SValue ret;
 
     /* 1. receiver 的结构体类型与形态.
@@ -6886,10 +6888,9 @@ static void method_call_sugar(void)
         ret_nregs = gfunc_sret(&ret_type, variadic, &ret.type,
                                &ret_align, &regsize);
         if (ret_nregs <= 0)
-            tcc_error("method returning a large struct is not yet supported "
-                      "by .method() sugar");
+            ret_sret = 1;   /* 大 struct (>16B) → sret 隐藏指针, 不走寄存器 */
     }
-    if (ret_nregs > 0) {
+    if (ret_nregs > 0 && !ret_sret) {
         ret.c.i = 0;
         PUT_R_RET(&ret, ret.type.t);
     }
@@ -6905,7 +6906,18 @@ static void method_call_sugar(void)
     vswap();   /* [.., receiver, func] -> [.., func, receiver] */
 
     /* 5. receiver 作为实参 0.
-       '->' 指针语义: receiver 已是 A* 则直接用; 是 struct 值 → 取址注入. */
+       '->' 指针语义: receiver 已是 A* 则直接用; 是 struct 值 → 取址注入.
+       大 struct(sret): 先在栈上压返回槽指针(隐藏首参), 再处理 receiver. */
+    if (ret_sret) {
+        size_t sz;
+        int ea;
+        sz = type_size(&ret_type, &ea);
+        sz = (sz + 15) & ~(size_t)15;        /* 保守 16 对齐返回槽 */
+        loc = (loc - (int)sz) & -16;
+        ret_addr = loc;
+        vseti(VT_LOCAL, ret_addr);            /* [.., receiver, slot] */
+        vswap();                              /* [.., slot, receiver], vtop=receiver */
+    }
     if (!recv_is_ptr) {
         test_lvalue();            /* 取址要求 receiver 为左值 */
         if (vtop->sym)
@@ -6914,7 +6926,7 @@ static void method_call_sugar(void)
         mk_pointer(&vtop->type);  /* type 改为 A* */
     }
     gfunc_param_typed(fsig, sa);
-    nb_args = 1;
+    nb_args = 1 + (ret_sret ? 1 : 0);   /* sret 槽指针 + receiver */
     if (sa)
         sa = sa->next;
 
@@ -6939,11 +6951,14 @@ static void method_call_sugar(void)
     }
     skip(')');
 
-    /* 7. 调用并得到返回值 (复制常规函数调用的返回处理, 含 packed struct 存回内存) */
+    /* 7. 调用并得到返回值 (复制常规函数调用的返回处理, 含 packed struct 存回内存).
+       大 struct(sret): 结果已在隐藏指针指向的返回槽, vtop 置该槽 lvalue. */
     vcheck_cmp();   /* 生成器不喜 vtop 为 VT_CMP */
     gfunc_call(nb_args);
 
-    if (ret_nregs < 0) {
+    if (ret_sret) {
+        vset(&ret_type, VT_LOCAL | VT_LVAL, ret_addr);
+    } else if (ret_nregs < 0) {
         vsetc(&ret.type, ret.r, &ret.c);
     } else {
         int n = ret_nregs;
