@@ -50,9 +50,9 @@ int main(void) {
         STL_string y = stl_string_from_c(ar, "banana");
         STL_string pfx = stl_string_from_c(ar, "app");   /* x 的前缀 */
 
-        CHECK(x == same);                    /* operator_eq */
+        CHECK(x == same);                    /* operator== */
         CHECK(!(x == y));                    /* 不同 */
-        CHECK(x < y);                        /* operator_lt: 字典序 */
+        CHECK(x < y);                        /* operator<: 字典序 */
         CHECK(!(y < x));
         CHECK(pfx < x);                      /* 前缀更短 → 更小 */
         CHECK(x == x);                       /* 自反 */

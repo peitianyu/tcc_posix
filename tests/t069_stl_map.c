@@ -11,7 +11,7 @@
 
 /* 自定义键类型: 用 operator== 判键 */
 struct Key { int id; };
-int operator_eq(struct Key a, struct Key b) { return a.id == b.id; }
+int operator==(struct Key a, struct Key b) { return a.id == b.id; }
 
 int main(void) {
     STL_Arena *ar = stl_arena_new(0);

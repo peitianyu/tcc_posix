@@ -10,7 +10,7 @@
  * 未做(记为后续): SSO 内联缓冲 23B、长串 ptr 字段、UTF-8 码点迭代(string_length
  * O(N))、heap 后端、脱糖 dg_op_tbl 同步 —— 见 docs/stl.md §7.4。
  * 约束: operator 为编译期静态分派, 仅结构体值类型可重载; + / == / < 映射到
- *   operator_add / operator_eq / operator_lt 名(与 features.md §4.4 同款)。
+ *   operator+ / operator== / operator< 名(与 features.md §4.4 同款)。
  */
 #ifndef STL_STRING_H
 #define STL_STRING_H
@@ -83,11 +83,11 @@ STL_STATIC STL_string stl_string_from_c(STL_Arena *ar, const char *c)
 }
 
 /* ---- operator 重载 (具体类型, 编译期静态分派) ---- */
-int operator_eq(STL_string a, STL_string b) {
+int operator==(STL_string a, STL_string b) {
     if (a.len != b.len) return 0;
     return a.len ? memcmp(a.ptr, b.ptr, a.len) == 0 : 1;
 }
-int operator_lt(STL_string a, STL_string b) {
+int operator<(STL_string a, STL_string b) {
     size_t n = a.len < b.len ? a.len : b.len;
     int c = n ? memcmp(a.ptr, b.ptr, n) : 0;
     return c < 0 || (c == 0 && a.len < b.len);

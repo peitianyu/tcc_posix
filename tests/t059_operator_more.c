@@ -1,7 +1,7 @@
 /* t059_operator_more.c — 运算符重载补全: 比较 / 一元 / 自增自减 / 复合赋值
  *
  * 覆盖新增运算符类别 (值语义静态分派):
- *   a == b, a != b, a < b, a <= b, a > b, a >= b   → operator_eq/ne/lt/le/gt/ge (返回 int)
+ *   a == b, a != b, a < b, a <= b, a > b, a >= b   → operator== / != / < / <= / > / >= (返回 int)
  *   !a, ~a                                          → operator! / operator~
  *   ++a / a++ / --a / a--                          → operator++ / operator-- (值语义, 增后新struct)
  *   a += b, a -= b, a *= b, a /= b, a %= b         → operator+ - * / % 后存回
@@ -32,12 +32,12 @@ static struct Vec3 operator~ (struct Vec3 a) { struct Vec3 r = { ~a.x, ~a.y, ~a.
 static struct Vec3 operator++ (struct Vec3 a) { a.x++; a.y++; a.z++; return a; }
 static struct Vec3 operator-- (struct Vec3 a) { a.x--; a.y--; a.z--; return a; }
 
-static int operator_eq (struct Vec3 a, struct Vec3 b) { return a.x==b.x&&a.y==b.y&&a.z==b.z; }
-static int operator_ne (struct Vec3 a, struct Vec3 b) { return a.x!=b.x||a.y!=b.y||a.z!=b.z; }
-static int operator_lt (struct Vec3 a, struct Vec3 b) { return a.x<b.x&&a.y<b.y&&a.z<b.z; }
-static int operator_le (struct Vec3 a, struct Vec3 b) { return a.x<=b.x&&a.y<=b.y&&a.z<=b.z; }
-static int operator_gt (struct Vec3 a, struct Vec3 b) { return a.x>b.x&&a.y>b.y&&a.z>b.z; }
-static int operator_ge (struct Vec3 a, struct Vec3 b) { return a.x>=b.x&&a.y>=b.y&&a.z>=b.z; }
+static int operator==(struct Vec3 a, struct Vec3 b) { return a.x==b.x&&a.y==b.y&&a.z==b.z; }
+static int operator!=(struct Vec3 a, struct Vec3 b) { return a.x!=b.x||a.y!=b.y||a.z!=b.z; }
+static int operator< (struct Vec3 a, struct Vec3 b) { return a.x<b.x&&a.y<b.y&&a.z<b.z; }
+static int operator<=(struct Vec3 a, struct Vec3 b) { return a.x<=b.x&&a.y<=b.y&&a.z<=b.z; }
+static int operator> (struct Vec3 a, struct Vec3 b) { return a.x>b.x&&a.y>b.y&&a.z>b.z; }
+static int operator>=(struct Vec3 a, struct Vec3 b) { return a.x>=b.x&&a.y>=b.y&&a.z>=b.z; }
 
 static int is3(struct Vec3 v, int x, int y, int z) { return v.x==x&&v.y==y&&v.z==z; }
 
