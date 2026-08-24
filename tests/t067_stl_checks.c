@@ -9,6 +9,7 @@
  *      (注: STL_ASSERT 的 abort 路径在本 Windows nt64 musl 端口因 raise(SIGABRT)
  *       无效而挂死, 越界 at() 的 "Assertion failed" 输出已在单独探针验证,
  *       见 docs/KNOWN_ISSUES.md。)
+ * 容器调用风格: 对象方法糖 `v->stl_vector_push_back(int)(x)`。
  * 退出码 0 = 通过.
  */
 #include "lib/stl/vector.h"
@@ -22,19 +23,19 @@ int main(void) {
 
     /* 1) 正向 —— 断言开启下合法访问不误伤 */
     {
-        STL_Vector(int) v; stl_vector_init(int)(&v, ar);
-        for (int i = 0; i < 20; i++) stl_vector_push_back(int)(&v, i * 5);
-        CHECK(stl_vector_at(int)(&v, 0) == 0);
-        CHECK(stl_vector_at(int)(&v, 10) == 50);
-        CHECK(stl_vector_at(int)(&v, 19) == 95);
-        CHECK(stl_vector_front(int)(&v) == 0);
-        CHECK(stl_vector_back(int)(&v) == 95);
+        STL_Vector(int) v; v->stl_vector_init(int)(ar);
+        for (int i = 0; i < 20; i++) v->stl_vector_push_back(int)(i * 5);
+        CHECK(v->stl_vector_at(int)(0) == 0);
+        CHECK(v->stl_vector_at(int)(10) == 50);
+        CHECK(v->stl_vector_at(int)(19) == 95);
+        CHECK(v->stl_vector_front(int)() == 0);
+        CHECK(v->stl_vector_back(int)() == 95);
     }
 
     /* 2) allocator 自检 —— 活指针被追踪, reset 清仓 + epoch 自增 */
     {
-        STL_Vector(int) v; stl_vector_init(int)(&v, ar);
-        for (int i = 0; i < 3; i++) stl_vector_push_back(int)(&v, i);
+        STL_Vector(int) v; v->stl_vector_init(int)(ar);
+        for (int i = 0; i < 3; i++) v->stl_vector_push_back(int)(i);
         /* 活指针使 outstanding>0 —— 正是 reset/destroy 报 "now dangle" 的条件 */
         CHECK(ar->outstanding >= 1);
 
