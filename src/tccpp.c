@@ -4031,6 +4031,7 @@ static int dg_oreg_tok(int tok)
 
 static int dg_var_nm[8192];       /* var token */
 static int dg_var_tag[8192];      /* var 对应的 struct tag token */
+static int dg_var_ptr[8192];      /* var 是否为 struct 指针 (声明为 A* / 显式 &) */
 static int dg_varcnt;
 
 /* 语句级 token 缓冲 (收集到 LINEFEED 再整体处理) */
@@ -4103,6 +4104,10 @@ static int  dg_fout_td_init;
 static FILE *dg_tmpfile;          /* --emit-c 函数泛型: 主体缓冲临时文件 */
 static FILE *dg_saved_ppfp;       /* --emit-c 函数泛型: 真实的输出流 (EOF 回放) */
 static int  dg_buffering;
+/* 正被展开定义的函数泛型名与其合成实例名: 支撑泛型体**自递归**绑定 ——
+ * body 里裸引用 `<func>(args)`(无类型实参)改写为 `<synth>(args)`. */
+static const char *dg_fdef_name;
+static char dg_fdef_synth[384];
 static void dg_model_reset_impl(void); /* 结构体完整后再定义 */
 
 static void dg_reset(void)
@@ -4197,6 +4202,15 @@ static int dg_var_of(int tok)
     return 0;
 }
 
+static int dg_var_isptr(int tok)
+{
+    int i;
+    for (i = 0; i < dg_varcnt; i++)
+        if (dg_var_nm[i] == tok)
+            return dg_var_ptr[i];
+    return 0;
+}
+
 static int dg_add_var(int tok, int tag)
 {
     if (tok <= 0 || tag <= 0)
@@ -4206,9 +4220,29 @@ static int dg_add_var(int tok, int tag)
     if (dg_varcnt < 8192) {
         dg_var_nm[dg_varcnt] = tok;
         dg_var_tag[dg_varcnt] = tag;
+        dg_var_ptr[dg_varcnt] = 0;
         dg_varcnt++;
     }
     return 1;
+}
+
+/* 登记变量时为已登记的 var 更新指针性(dg_add_var 后), 用于方法糖 recv 值/指针判定 */
+static void dg_var_setptr(int tok)
+{
+    int i;
+    for (i = 0; i < dg_varcnt; i++)
+        if (dg_var_nm[i] == tok)
+            dg_var_ptr[i] = 1;
+}
+
+/* 按值覆写 var 的指针性("最近声明优先"; 处理函数参数与局部同名变量),
+ * 未登记则不新增。val: 0=值 1=指针 */
+static void dg_var_setptr2(int tok, int val)
+{
+    int i;
+    for (i = 0; i < dg_varcnt; i++)
+        if (dg_var_nm[i] == tok)
+            dg_var_ptr[i] = val;
 }
 
 /* ---- 完全括号/忠实改写: 右值 -> DGNode 树 ---- */
@@ -5128,6 +5162,16 @@ static void dg_model_expand_src(TCCState *s1, const DgModelDef *m, char av[][64]
     }
     /* phase2: 嵌套模型实例 -> tag/合成名 + 发射其 typedef */
     for (i = 0; i < n2;) {
+        /* 泛型体自递归: 当前函数泛型自身名后跟 '(' → 裸调用绑定到本实例合成名.
+         * (如 `stl_qsort(a,lo,j)` → `stl_qsort_<T>(a,lo,j)` 以匹配已落地定义) */
+        if (dg_fdef_name && !strcmp(w2[i], dg_fdef_name) &&
+            i + 1 < n2 && !strcmp(w2[i + 1], "(")) {
+            if (out->size && out->data[out->size - 1] != ' ')
+                cstr_ccat(out, ' ');
+            cstr_cat(out, dg_fdef_synth, strlen(dg_fdef_synth));
+            i++;
+            continue;
+        }
         DgModelDef *nn = dg_model_find(w2[i]);
         if (nn && nn->kind != 'F' && i + 1 < n2 && !strcmp(w2[i + 1], "(")) {
             char na[DG_MODEL_MAXP][64];
@@ -5346,6 +5390,130 @@ static int dg_gvget(char gv[][40], const int *gvk, int gvc, const char *nm)
     return 0;
 }
 
+/* '.' 之前对象基址起始词索引: 支持 `d [ .. ]`(下标) / '.' 链(递归) / 标识符 */
+static int dg_gbody_obj_start(char (*w2)[128], int dot)
+{
+    int p = dot - 1;
+    while (p >= 0 && !w2[p][0]) p--;
+    if (p < 0) return dot;
+    if (!strcmp(w2[p], "]")) {
+        int dep = 1, q = p - 1;
+        for (; q >= 0; q--) {
+            while (q >= 0 && !w2[q][0]) q--;
+            if (q < 0) break;
+            if (!strcmp(w2[q], "]")) dep++;
+            else if (!strcmp(w2[q], "[")) { dep--; if (!dep) break; }
+        }
+        if (q < 0) return p;
+        { int b = q - 1; while (b >= 0 && !w2[b][0]) b--;
+          return b < 0 ? q : b; }
+    }
+    if (!strcmp(w2[p], "."))
+        return dg_gbody_obj_start(w2, p);
+    return p;                       /* 普通标识符 */
+}
+
+/* 左侧操作数: k 为比较运算符词索引, 回写 [ls,le]. 返回 1=OP 类型命中 */
+static int dg_gbody_op_left(char (*w2)[128], int k,
+                            char gv[][40], const int *gvk, int gvc,
+                            int *ls, int *le)
+{
+    int a = k - 1, end;
+    while (a >= 0 && !w2[a][0]) a--;
+    if (a < 0) return 0;
+    end = a;
+    if (!strcmp(w2[end], "]")) {           /* 下标: 基为 OP 指针 */
+        int dep = 1, q = end - 1;
+        for (; q >= 0; q--) {
+            while (q >= 0 && !w2[q][0]) q--;
+            if (q < 0) break;
+            if (!strcmp(w2[q], "]")) dep++;
+            else if (!strcmp(w2[q], "[")) { dep--; if (!dep) { q--; break; } }
+        }
+        while (q >= 0 && !w2[q][0]) q--;
+        if (q >= 0 && isid((unsigned char)w2[q][0])
+            && dg_gvget(gv, gvk, gvc, w2[q]) == 2) { *ls = q; *le = end; return 1; }
+        return 0;
+    }
+    if (isid((unsigned char)w2[end][0])) {
+        int gv1 = dg_gvget(gv, gvk, gvc, w2[end]);
+        if (gv1 == 2) {                   /* `* p` 一元解引用 */
+            int q = end - 1;
+            while (q >= 0 && !w2[q][0]) q--;
+            if (q >= 0 && !strcmp(w2[q], "*")) { *ls = q; *le = end; return 1; }
+            return 0;
+        }
+        if (gv1 == 1) {                   /* OP 值, 可带 '.成员' 前缀 */
+            *le = end; *ls = end;
+            { int dot = end - 1;
+              while (dot >= 0 && !w2[dot][0]) dot--;
+              if (dot >= 0 && !strcmp(w2[dot], ".")) {
+                  *ls = dg_gbody_obj_start(w2, dot);
+                  { int q = *ls - 1; while (q >= 0 && !w2[q][0]) q--;
+                    if (q >= 0 && !strcmp(w2[q], "*")) *ls = q; }
+              } }
+            return 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+/* 右侧操作数: k 为比较运算符词索引, 回写 [rs,re]. 返回 1=OP 类型命中 */
+static int dg_gbody_op_right(char (*w2)[128], int N, int k,
+                             char gv[][40], const int *gvk, int gvc,
+                             int *rs, int *re)
+{
+    int b = k + 1, i, end;
+    while (b < N && !w2[b][0]) b++;
+    if (b >= N) return 0;
+    end = b - 1;
+    i = b;
+    while (i < N) {                       /* 收集到语句分隔符 */
+        if (!w2[i][0]) { i++; continue; }
+        if (isid((unsigned char)w2[i][0]) || isnum((unsigned char)w2[i][0]))
+            { end = i; i++; continue; }
+        if (!strcmp(w2[i], ".") || !strcmp(w2[i], "->"))
+            { i++; continue; }
+        if (!strcmp(w2[i], "*")) { i++; continue; }
+        if (!strcmp(w2[i], "[")) {
+            int dep = 1, q = i + 1;
+            for (; q < N; q++) {
+                if (!w2[q][0]) continue;
+                if (!strcmp(w2[q], "[")) dep++;
+                else if (!strcmp(w2[q], "]")) { dep--; if (!dep) break; }
+            }
+            end = q;                  /* 下标值位置 (']'), 后续 .member 可覆盖 */
+            i = q + 1;
+            while (i < N && !w2[i][0]) i++;
+            continue;
+        }
+        break;
+    }
+    if (end < b) return 0;
+    /* 尾词判定 OP 类型 */
+    if (!strcmp(w2[end], "]")) {          /* 下标: 基为 OP 指针 */
+        int dep = 1, q = end - 1;
+        for (; q >= b; q--) {
+            while (q >= b && !w2[q][0]) q--;
+            if (q < b) break;
+            if (!strcmp(w2[q], "]")) dep++;
+            else if (!strcmp(w2[q], "[")) { dep--; if (!dep) { q--; break; } }
+        }
+        while (q >= b && !w2[q][0]) q--;
+        if (q >= b && isid((unsigned char)w2[q][0])
+            && dg_gvget(gv, gvk, gvc, w2[q]) == 2) { *rs = b; *re = end; return 1; }
+        return 0;
+    }
+    if (isid((unsigned char)w2[end][0])) {
+        if (dg_gvget(gv, gvk, gvc, w2[end]) == 1) { *rs = b; *re = end; return 1; }
+        if (dg_gvget(gv, gvk, gvc, w2[end]) == 2 && !strcmp(w2[b], "*"))
+            { *rs = b; *re = end; return 1; }   /* `* p` 一元解引用 */
+        return 0;
+    }
+    return 0;
+}
+
 /* 在 operator 定义行收集操作数基础类型名 (供泛型体改写判断) */
 static void dg_optyp_collect_line(void)
 {
@@ -5449,47 +5617,11 @@ static void dg_gbody_oprewrite(CString *out, const char *fp_txt,
                      || !strcmp(wc, ">=") || !strcmp(wc, "==") || !strcmp(wc, "!=");
             int lop = 0, rop = 0, ls = k - 1, le = k - 1, rs = -1, re = -1;
             if (iscmp) {
-                /* 左侧: 尾 ']' → OP 指针下标 [ls..le]; 标识符 OP 值 (单词) */
-                { int a = k - 1; while (a >= 0 && !w2[a][0]) a--;
-                  if (a >= 0) {
-                    if (!strcmp(w2[a], "]")) {
-                        int b, dep = 1;
-                        for (b = a - 1; b >= 0; b--) {
-                            if (!strcmp(w2[b], "]")) dep++;
-                            else if (!strcmp(w2[b], "[")) { dep--; if (!dep) break; }
-                        }
-                        if (b >= 0) {
-                            int nm = b - 1; while (nm >= 0 && !w2[nm][0]) nm--;
-                            if (nm >= 0 && dg_gvget(gv, gvk, gvc, w2[nm]) == 2) {
-                                lop = 1; ls = nm; le = a;
-                            }
-                        }
-                    } else if (isid((unsigned char)w2[a][0]) && a - 1 >= 0
-                        && !strcmp(w2[a - 1], "*") && dg_gvget(gv, gvk, gvc, w2[a]) == 2) {
-                        lop = 1; ls = a - 1; le = a;   /* 一元解引用 `* it` */
-                    } else if (isid((unsigned char)w2[a][0]) && dg_gvget(gv, gvk, gvc, w2[a]) == 1) {
-                        lop = 1; ls = le = a;
-                    }
-                  } }
-                /* 右侧: OP 值变量(单词) 或 OP 指针 `v[..]` [rs..re] 或 `* v` */
-                { int b = k + 1; while (b < N && !w2[b][0]) b++;
-                  if (b < N) {
-                    if (isid((unsigned char)w2[b][0]) && dg_gvget(gv, gvk, gvc, w2[b]) == 1) {
-                        rop = 1; rs = re = b;
-                    } else if (isid((unsigned char)w2[b][0]) && dg_gvget(gv, gvk, gvc, w2[b]) == 2
-                               && b + 1 < N && !strcmp(w2[b + 1], "[")) {
-                        int dep = 1, c;
-                        for (c = b + 2; c < N; c++) {
-                            if (!strcmp(w2[c], "[")) dep++;
-                            else if (!strcmp(w2[c], "]")) { dep--; if (!dep) break; }
-                        }
-                        if (c < N) { rop = 1; rs = b; re = c; }
-                    } else if (!strcmp(w2[b], "*") && b + 1 < N
-                               && isid((unsigned char)w2[b + 1][0])
-                               && dg_gvget(gv, gvk, gvc, w2[b + 1]) == 2) {
-                        rop = 1; rs = b; re = b + 1;   /* 一元解引用 `* v` */
-                    }
-                  } }
+                /* 左侧/右侧操作数识别, 支持 '.成员' 前缀与下标基础 */
+                if (dg_gbody_op_left(w2, k, gv, gvk, gvc, &ls, &le))
+                    lop = 1;
+                if (dg_gbody_op_right(w2, N, k, gv, gvk, gvc, &rs, &re))
+                    rop = 1;
             }
             if (iscmp && lop && rop && onp < 64) {
                 int jj, r;
@@ -5560,9 +5692,14 @@ static void dg_model_f_register(TCCState *s1, const DgModelDef *m, char av[][64]
     /* 展开: tag 形式引用 + 共享 dg_fout_td 累积 typedef.
      * 注意 expand_src 输出 CString 不带 NUL, 全程用 .size 而非 strlen. */
     cstr_new(&ret); cstr_new(&fp_); cstr_new(&body); cstr_new(&def);
+    /* 登记当前函数泛型的抽象名/合成实例名, 供泛型体自递归裸调用绑定 */
+    dg_fdef_name = m->ntxt;
+    snprintf(dg_fdef_synth, sizeof dg_fdef_synth, "%s", sn);
     dg_model_expand_src(s1, m, av, m->ret ? m->ret : "int", &ret, &dg_fout_td);
     dg_model_expand_src(s1, m, av, m->fparams ? m->fparams : "", &fp_, &dg_fout_td);
     dg_model_expand_src(s1, m, av, m->body ? m->body : "", &body, &dg_fout_td);
+    dg_fdef_name = NULL;
+    dg_fdef_synth[0] = 0;
     /* P1: 泛型体内 operator 改写 — 类型实参 T(av[0]) 为 op 类型时, 比较/判等
      * 调 operator_X; 否则(int 等)原样透传. 注意复制 opbase 到局部, 因
      * dg_typbase 返回 static 缓冲, 持久引用会被后续调用覆盖. */
@@ -5969,6 +6106,137 @@ static int dg_is_model_line(void)
     return 0;
 }
 
+/* 语句级二进制运算改写: 对一整行中"两侧均为 operator 类型变量"的二元算术/比较
+ * (+ - * / % == != < <= > >=) 改写成 operator_<wrd>_<opbase>(l, r). 周边 `!`/`(`
+ * /`if`/`(`) 等保持原样 verbatim —— 不解析整表达式树 (DGNode 对未注册一元 ! 会误拼
+ * 出口). 安全前提: 仅当两侧操作数都是登记过的 op 类型变量才改写, 普通 int/指针
+ * 比较不受影响. 命中并整行重建返回 1 (调用方 emit 收尾), 否则返回 0. */
+static int dg_line_rewrite(TCCState *s1)
+{
+    char w2[512][128]; int widx[512]; int N = 0, k, q, i;
+    char gv[288][40]; int gvk[288]; int gvc = 0;
+    char lbt[64][256], rbt[64][256], opw[64][8], opbase[40];
+    int opat[64], onp = 0;
+    char omit[512];
+    CString out;
+
+    if (!dg_active)
+        return 0;
+    for (i = 0; i < dg_n; i++) {
+        if (is_space(dg_buf[i]))
+            continue;
+        if (N >= 512)
+            break;
+        snprintf(w2[N], sizeof w2[N], "%s", dg_txt[i] ? dg_txt[i] : "");
+        widx[N] = i;
+        N++;
+    }
+    if (N < 3)
+        return 0;
+    opbase[0] = 0;
+    /* 收集当前行内 op 类型变量: 名 -> gv, kind = 指针?2:1; 记录首个 opbase */
+    for (k = 0; k < N; k++) {
+        const char *w = w2[k];
+        int tag, ptr, qo, fo = 0;
+        if (!isid((unsigned char)w[0]))
+            continue;
+        tag = dg_var_of(dg_buf[widx[k]]);
+        if (!tag)
+            continue;
+        {
+            const char *nm = get_tok_str(tag, NULL);
+            if (!nm || !*nm || !dg_optyp_has(nm))
+                continue;
+            ptr = dg_var_isptr(dg_buf[widx[k]]);
+            for (qo = 0; qo < gvc; qo++)
+                if (!strcmp(gv[qo], w)) { gvk[qo] = ptr ? 2 : 1; fo = 1; break; }
+            if (!fo && gvc < 288) {
+                snprintf(gv[gvc], sizeof gv[gvc], "%s", w);
+                gvk[gvc] = ptr ? 2 : 1;
+                gvc++;
+            }
+            if (!opbase[0])
+                snprintf(opbase, sizeof opbase, "%s", nm);
+        }
+    }
+    if (!opbase[0])
+        return 0;                       /* 本行无 op 类型变量 */
+    /* 扫描二元算术/比较运算符, 两侧均为 op 变量则标记改写点 */
+    memset(omit, 0, N);
+    for (k = 0; k < N; k++) {
+        const char *wc = w2[k];
+        const char *wrd = NULL;
+        int lop = 0, rop = 0, ls = k - 1, le = k - 1, rs = -1, re = -1, jj, r;
+        if (!strcmp(wc, "+")) wrd = "add";
+        else if (!strcmp(wc, "-")) wrd = "sub";
+        else if (!strcmp(wc, "*")) wrd = "mul";
+        else if (!strcmp(wc, "/")) wrd = "div";
+        else if (!strcmp(wc, "%")) wrd = "mod";
+        else if (!strcmp(wc, "==")) wrd = "eq";
+        else if (!strcmp(wc, "!=")) wrd = "ne";
+        else if (!strcmp(wc, "<")) wrd = "lt";
+        else if (!strcmp(wc, "<=")) wrd = "le";
+        else if (!strcmp(wc, ">")) wrd = "gt";
+        else if (!strcmp(wc, ">=")) wrd = "ge";
+        else continue;
+        if (dg_gbody_op_left(w2, k, gv, gvk, gvc, &ls, &le))
+            lop = 1;
+        if (dg_gbody_op_right(w2, N, k, gv, gvk, gvc, &rs, &re))
+            rop = 1;
+        if (lop && rop && onp < 64) {
+            lbt[onp][0] = 0; r = 0;
+            for (jj = ls; jj <= le; jj++) {
+                if (r && w2[jj][0]) lbt[onp][r++] = ' ';
+                if (w2[jj][0]) { int L = (int)strlen(w2[jj]);
+                    if (r + L < 255) { memcpy(lbt[onp] + r, w2[jj], (size_t)L); r += L; lbt[onp][r] = 0; } }
+            }
+            rbt[onp][0] = 0; r = 0;
+            for (jj = rs; jj <= re; jj++) {
+                if (r && w2[jj][0]) rbt[onp][r++] = ' ';
+                if (w2[jj][0]) { int L = (int)strlen(w2[jj]);
+                    if (r + L < 255) { memcpy(rbt[onp] + r, w2[jj], (size_t)L); r += L; rbt[onp][r] = 0; } }
+            }
+            snprintf(opw[onp], sizeof opw[onp], "%s", wrd);
+            opat[onp] = k;
+            for (q = ls; q <= le; q++) omit[q] = 1;
+            for (q = rs; q <= re; q++) omit[q] = 1;
+            onp++;
+        }
+    }
+    if (!onp)
+        return 0;                       /* 无改写点: 交由上层 verbatim/其它 pass */
+    /* 两遍输出: 重建整行, 空词跳过, 改写点处输出 operator_<wrd>_<opbase>(l,r) */
+    cstr_new(&out);
+    for (q = 0; q < N; q++) {
+        int p, isop = -1;
+        if (omit[q])
+            continue;
+        for (p = 0; p < onp; p++)
+            if (opat[p] == q) { isop = p; break; }
+        if (isop >= 0) {
+            if (out.size && out.data[out.size - 1] != ' ')
+                cstr_ccat(&out, ' ');
+            cstr_cat(&out, "operator_", 9);
+            cstr_cat(&out, opw[isop], strlen(opw[isop]));
+            cstr_ccat(&out, '_');
+            cstr_cat(&out, opbase, strlen(opbase));
+            cstr_cat(&out, "( ", 2);
+            cstr_cat(&out, lbt[isop], strlen(lbt[isop]));
+            cstr_cat(&out, " , ", 3);
+            cstr_cat(&out, rbt[isop], strlen(rbt[isop]));
+            cstr_cat(&out, " )", 2);
+        } else {
+            if (out.size && out.data[out.size - 1] != ' ')
+                cstr_ccat(&out, ' ');
+            cstr_cat(&out, w2[q], strlen(w2[q]));
+        }
+    }
+    cstr_ccat(&out, 0);
+    fputs(out.data, s1->ppfp);
+    cstr_free(&out);
+    return 1;
+}
+
 /* 泛型对象方法糖改写: `recv -> mname ( targs ) ( args )` → `mname ( targs ) ( & recv , args )`.
  * 判据: 标识符接着 TOK_ARROW, 其后是另一标识符紧跟 **两个连续括号组** —— 这是
  * model 泛型方法调用的签名 `mname(targs)(args)`, 不会与普通 `p->field(x)`(单括号)
@@ -5980,7 +6248,7 @@ static int dg_sugar_rewrite(TCCState *s1)
         int hit = 0, i;
         for (i = 0; i < dg_n; i++) {
             int recv = -1, mnam = -1, targ_o = -1, targ_c = -1, arg_o = -1, j, depth;
-            int hasarg = 0, k, d;
+            int k, d;
             int *nbuf; char **ntxt; int nb, nnew;
             if (is_space(dg_buf[i]) || dg_buf[i] != TOK_ARROW)
                 continue;
@@ -6000,48 +6268,67 @@ static int dg_sugar_rewrite(TCCState *s1)
             if (targ_c < 0) continue;
             arg_o = targ_c + 1;
             while (arg_o < dg_n && is_space(dg_buf[arg_o])) arg_o++;
-            if (arg_o >= dg_n || dg_tokchar(arg_o) != '(') continue;   /* 单括号: 非泛型方法糖 */
-            /* 实参区 [arg_o+1, 收尾')'): 除空格/嵌套括号外是否还有实效参 token */
-            d = 0;
-            for (k = arg_o + 1; k < dg_n; k++) {
-                char c;
-                if (is_space(dg_buf[k]))
-                    continue;
-                c = dg_tokchar(k);
-                if (c == '(') d++;
-                else if (c == ')' && d > 0) d--;
-                else if (c == ')' && d == 0) break;      /* 收尾 ')' */
-                else hasarg = 1;
-            }
-            /* ---- 命中: 重建为 mname ( targs ) ( & recv [ , 原args... ] ) ----
-             * 新数组长度 = 保留 [0,recv) + 复用 mnam + 复用 [targ_o,targ_c] 括号组 +
-             * 新增 '(' '&' recv [','] (5/6) + 保留 [arg_o+1,dg_n) (dg_n-1-arg_o).
-             * 即 dg_n-(arg_o-recv)+7+(targ_c-targ_o) —— 括号组长度(≥3)必须计入,
-             * 否则缓冲区过小 → 堆写越界崩溃(fix: 原式少算 targ_c-targ_o+1). */
-            nnew = dg_n - (arg_o - recv) + 7 + (targ_c - targ_o);
-            nbuf = tcc_malloc(nnew * sizeof(int));
-            ntxt = tcc_malloc(nnew * sizeof(char *));
-            nb = 0;
+            /* 泛型形式: recv->mname(targs)(args) —— 第二段 '(' 存在;
+             * 非泛型形式: recv->mname(args) —— 无第二段, targ_o..targ_c 即实参组. */
+            {
+                int generic = (arg_o < dg_n && dg_tokchar(arg_o) == '(');
+                int amp = dg_var_isptr(dg_buf[recv]) ? 0 : 1;  /* 指针接收器不再取址 */
+                /* 实参是否非空: 泛型扫 [arg_o+1, 收尾')'), 非泛型扫 [targ_o+1, targ_c] */
+                int ahs = 0, al, ac;
+                if (generic) {
+                    al = arg_o + 1; d = 0;
+                    for (k = al; k < dg_n; k++) {
+                        char c;
+                        if (is_space(dg_buf[k])) continue;
+                        c = dg_tokchar(k);
+                        if (c == '(') d++;
+                        else if (c == ')' && d > 0) d--;
+                        else if (c == ')' && d == 0) break;
+                        else ahs = 1;
+                    }
+                    ac = -1;
+                } else {
+                    for (k = targ_o + 1; k < targ_c; k++)
+                        if (!is_space(dg_buf[k])) { ahs = 1; break; }
+                    al = 0; /* 未用 */
+                    ac = targ_c;
+                }
+                /* ---- 命中: 重建为 mname (targs) ( [&] recv [, args...] ) (或单括号) ----
+                 * 缓冲余量取 dg_n+8 ≥ 实际 nb (泛型至多多插 '(' '&' ',' 3 个). */
+                nnew = dg_n + 8;
+                nbuf = tcc_malloc(nnew * sizeof(int));
+                ntxt = tcc_malloc(nnew * sizeof(char *));
+                nb = 0;
 #define DG_MOVE(TK) do { nbuf[nb]=dg_buf[TK]; ntxt[nb]=dg_txt[TK]; nb++; } while (0)
 #define DG_PUT(CH) do { nbuf[nb]=(CH); ntxt[nb]=(char *)tcc_malloc(2); ntxt[nb][0]=(CH); ntxt[nb][1]=0; nb++; } while (0)
-            for (j = 0; j < recv; j++) DG_MOVE(j);        /* 前缀 */
-            DG_MOVE(mnam);                                 /* 方法名 */
-            for (j = targ_o; j <= targ_c; j++) DG_MOVE(j); /* (targs) */
-            DG_PUT('(');                                   /* 调用参数 '(' */
-            DG_PUT('&');                                   /* & */
-            DG_MOVE(recv);                                 /* receiver 指针注入 */
-            if (hasarg) DG_PUT(',');                       /* 空参方法: 无 ',' */
-            for (j = arg_o + 1; j < dg_n; j++) DG_MOVE(j); /* 原 args 内容 + 收尾 ')' */
+                for (j = 0; j < recv; j++) DG_MOVE(j);        /* 前缀 */
+                DG_MOVE(mnam);                                 /* 方法名 */
+                if (generic) {
+                    for (j = targ_o; j <= targ_c; j++) DG_MOVE(j); /* (targs) */
+                    DG_PUT('(');                               /* 调用参数 '(' */
+                    if (amp) DG_PUT('&');
+                    DG_MOVE(recv);                             /* receiver 注入 */
+                    if (ahs) DG_PUT(',');
+                    for (j = arg_o + 1; j < dg_n; j++) DG_MOVE(j); /* 原 args + ')' */
+                } else {
+                    DG_MOVE(targ_o);                           /* '(' 复用 */
+                    if (amp) DG_PUT('&');
+                    DG_MOVE(recv);                             /* receiver 注入 */
+                    if (ahs) DG_PUT(',');
+                    for (j = targ_o + 1; j <= targ_c; j++) DG_MOVE(j); /* args... + ')' */
+                    for (j = targ_c + 1; j < dg_n; j++) DG_MOVE(j); /* 尾部(; 及后续)原样保留 */
+                }
 #undef DG_MOVE
 #undef DG_PUT
-            /* 丢弃的旧 lexeme: arrow(i) 与 arg_o 的 '(' (此时 dg_txt 仍是旧数组) */
-            if (dg_txt[i])   { tcc_free(dg_txt[i]);   dg_txt[i] = NULL; }
-            if (dg_txt[arg_o]){ tcc_free(dg_txt[arg_o]); dg_txt[arg_o] = NULL; }
-            /* 静态数组不能 free: 把新序列外壳拷回 dg_buf/dg_txt(lexeme 指针复用) */
-            for (j = 0; j < nb; j++) { dg_buf[j] = nbuf[j]; dg_txt[j] = ntxt[j]; }
-            dg_n = nb;
-            tcc_free(nbuf);
-            tcc_free(ntxt);
+                /* 丢弃旧 lexeme: arrow(i); 泛型还弃 arg_o 的 '(' (旧数组在此刻仍有效) */
+                if (dg_txt[i]) { tcc_free(dg_txt[i]); dg_txt[i] = NULL; }
+                if (generic && dg_txt[arg_o]) { tcc_free(dg_txt[arg_o]); dg_txt[arg_o] = NULL; }
+                for (j = 0; j < nb; j++) { dg_buf[j] = nbuf[j]; dg_txt[j] = ntxt[j]; }
+                dg_n = nb;
+                tcc_free(nbuf);
+                tcc_free(ntxt);
+                (void)ac; (void)al;
+            }
             hit = 1;
             break;      /* 一次只改一个 -- 跳出内层, 外层 for(;;) 重新扫描新数组 */
         }
@@ -6130,15 +6417,20 @@ static void dg_flush(TCCState *s1)
      * 用户标识符)为 operator 类型变量, 覆盖局部变量与函数参数; 遇到另一类型
      * 关键字/`{` 初始化器/`(` 调用/对应 operator 关键字则结束当前声明列表. */
     {
-        int prev = 0, pp = 0, pending = 0;
+        int prev = 0, pp = 0, pending = 0, star = 0;
         for (i = 0; i < dg_n; i++) {
             int t, ch;
             if (is_space(dg_buf[i]))
                 continue;             /* 保持 prev/pp/pending 为纯净非空格 token */
             t = dg_buf[i]; ch = dg_tokchar(i);
+            if (ch == '*')
+                star = 1;             /* A* 指针指示(延迟到变量登记时消费) */
             /* 先置 pending: `struct <tag>`(刚刚见 prev 是 tag) 已确立 */
-            if (pp == TOK_STRUCT && prev >= TOK_IDENT)
+            if (pp == TOK_STRUCT && prev >= TOK_IDENT) {
                 pending = prev;
+                if (ch != '*')        /* '*' 自身确立 pending 时保留指针指示 */
+                    star = 0;
+            }
             if (t == TOK_OPERATOR) {
                 int opid = dg_opat(i);
                 if (opid) {
@@ -6159,12 +6451,25 @@ static void dg_flush(TCCState *s1)
                         dg_op_tag[wid] = prev;
                 } else {
                     const char *w = dg_txt[i] ? dg_txt[i] : "";
-                    if (dg_w_intkey(w) || !strcmp(w, "float") ||
+                    if (!pending && dg_optyp_has(w)) {
+                        pending = t;    /* typedef operator 类型名(如 STL_string):
+                                          后续声明符登记为 op 类型, 触发运算符改写 */
+                    } else if (dg_w_intkey(w) || !strcmp(w, "float") ||
                         !strcmp(w, "double") || !strcmp(w, "void") ||
                         !strcmp(w, "_Bool"))
                         pending = 0;   /* 标量类型关键字终止 struct 声明列表 */
-                    else if (pending)
-                        dg_add_var(t, pending);
+                    else if (pending) {
+                        /* 登记变量; 指针性按"最近声明"覆盖 —— 同名(如函数形参
+                         * `struct Point *a` 与局部 `struct Point a`)以作用域内
+                         * 最新一次声明为准(C 先声明后用, 文本序近似作用域).
+                         * 顺序: 先 dg_add_var 落槽(槽内 ptr 初始 0), 再
+                         * dg_var_setptr2 写入 star —— 若先 setptr2 后 add,
+                         * add 的 0 会覆盖首次声明的指针标记, 丢失 A*. */
+                        if (!dg_var_of(t))
+                            dg_add_var(t, pending);
+                        dg_var_setptr2(t, star);
+                        star = 0;
+                    }
                 }
             } else if (ch == ';') {
                 pending = 0;            /* 声明结束 */
@@ -6204,6 +6509,14 @@ static void dg_flush(TCCState *s1)
             return;
         }
     }
+
+    /* ===== 语句级二元算子改写 (通用兜底, 先于复合赋值/return 等特例):
+     * `CHECK(x == same)` 等被宏展开成 `if (!(x==same)) return N;` 的行, 因含
+     * return 会误入下方 return-表达式路径而漏改比较运算; 此处先行把两侧均为
+     * operator 类型变量的算术/比较算子改写为 operator_<wrd>_<type>(l,r).
+     * 若无改要点(0), 则原样落回下方复合赋值/自增减/return=路径. ===== */
+    if (dg_line_rewrite(s1))
+        return;
 
     /* ===== 复合赋值改写: `a op= b` (op ∈ + - * / %) → `a = operator_<wrd>(a, b);`
      * 仅当 base 二元算子已注册且 LHS 为 operator 类型变量; 否则 verbatim. ===== */
@@ -6299,6 +6612,10 @@ static void dg_flush(TCCState *s1)
         start = eq + 1;
     }
     if (start < 0 || start >= dg_n) {
+        /* 无赋值/return/复合赋/自增减: 若是 operator 类型变量的二元运算行
+         * (如 `CHECK(x == same);`), 交 dg_line_rewrite 做语句级运算符改写. */
+        if (dg_line_rewrite(s1))
+            return;
         dg_emit_verbatim(s1, 0, dg_n);
         return;
     }
@@ -6331,7 +6648,8 @@ static void dg_flush(TCCState *s1)
             dg_emit_verbatim(s1, to, dg_n);
         return;
     }
-    dg_emit_verbatim(s1, 0, dg_n);
+    if (!dg_line_rewrite(s1))
+        dg_emit_verbatim(s1, 0, dg_n);
 }
 
 static void dg_step(TCCState *s1, int tok, int *token_seen, char *white, int *spcs)
