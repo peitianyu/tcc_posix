@@ -83,4 +83,19 @@ model (T) void stl_vector_pop_back(STL_Vector(T) *self) {
     if (self->len > 0) self->len--;
 }
 
+/* 深拷贝(元素逐项拷贝到独立 arena 数据区). 按值返回新容器, 不改 self.
+ * M0 元素为 POD 值语义 → 逐元素位拷贝即"深"拷贝; 新 data 从 self->ar 分配. */
+model (T) STL_Vector(T) stl_vector_copy(const STL_Vector(T) *self) {
+    STL_Vector(T) r;
+    r.data = 0; r.len = 0; r.cap = 0; r.ar = self->ar;
+    if (self->len > 0 && self->data) {
+        T *nd = (T *)stl_arena_alloc(self->ar, (size_t)self->len * sizeof(T), STL_ALIGN);
+        if (nd) {
+            for (int i = 0; i < self->len; i++) nd[i] = self->data[i];
+            r.data = nd; r.len = self->len; r.cap = self->len;
+        }
+    }
+    return r;
+}
+
 #endif /* STL_VECTOR_H */

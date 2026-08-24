@@ -98,4 +98,23 @@ model (T) void stl_list_clear(STL_List(T) *self) {
     self->head = self->tail = 0; self->len = 0;   /* 节点留 arena, 整池回收 */
 }
 
+/* 深拷贝: 逐节点 data 重建新链表(节点自 self->ar 分配), 按值返回, 不改 self. */
+model (T) STL_List(T) stl_list_copy(const STL_List(T) *self) {
+    STL_NODE_DEF(T);
+    STL_List(T) r;
+    r.head = r.tail = 0; r.len = 0; r.ar = self->ar;
+    struct __stl_node_ *n = (struct __stl_node_ *)self->head;
+    while (n) {
+        struct __stl_node_ *nn = (struct __stl_node_ *)
+            stl_arena_alloc(self->ar, sizeof(struct __stl_node_), STL_ALIGN);
+        if (!nn) break;
+        nn->data = n->data; nn->next = 0; nn->prev = (struct __stl_node_ *)r.tail;
+        if (r.tail) ((struct __stl_node_ *)r.tail)->next = nn;
+        else        r.head = nn;
+        r.tail = nn; r.len++;
+        n = n->next;
+    }
+    return r;
+}
+
 #endif /* STL_LIST_H */
