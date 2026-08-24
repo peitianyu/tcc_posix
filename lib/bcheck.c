@@ -304,6 +304,7 @@ int __bound_munmap (void *start, size_t size);
 DLL_EXPORT void __bound_siglongjmp(jmp_buf env, int val);
 #endif
 DLL_EXPORT void __bound_new_region(void *p, size_t size);
+DLL_EXPORT void __bound_add_region(void *p, size_t size);
 DLL_EXPORT void __bound_setjmp(jmp_buf env);
 DLL_EXPORT void __bound_longjmp(jmp_buf env, int val);
 DLL_EXPORT void *__bound_memcpy(void *dst, const void *src, size_t size);
@@ -856,6 +857,23 @@ void __bound_new_region(void *p, size_t size)
                 __FILE__, __FUNCTION__, cur->p);
         BOUND_FREE (cur);
     }
+}
+
+/* Register a persistent checked region that must stay valid across coroutine
+   context switches.  Unlike __bound_new_region (alloca/VLA: FP-bound, and
+   auto-deleted when the creating frame returns), this region lives for the
+   whole run.  Covers coroutine (ucontext) stacks built from a buffer whose
+   owning frame may return / be re-used, so explicit OOB access on it stays
+   reported.  NOTE: the raw parameter spill at coroutine entry is a plain
+   [rbp/rsp+off] frame store -- never instrumented -- so it is NOT caught here;
+   that is handled by makecontext's stack-top reserve instead. */
+DLL_EXPORT void __bound_add_region(void *p, size_t size)
+{
+    if (!inited || size == 0)
+        return;
+    WAIT_SEM ();
+    tree = splay_insert((size_t)p, size, tree);
+    POST_SEM ();
 }
 
 void __bound_setjmp(jmp_buf env)

@@ -209,6 +209,14 @@ swapcontext(&main_ctx, &co1);   /* 切到协程; 协程 swapcontext 切回 */
   参数 spill 空间。曾因带参函数把前几个参数 spill 到入口栈顶上方(如 `[rbp+0x20]`),
   越界写坏相邻全局——exit 清理时经被污染的全局函数指针槽间接调用近似 null 而崩。
   现预留 ≥0x40, 带参协程也能正常 `return` 退出 (不再需要 `_Exit`)。
+- **-b 协程感知 (`__bound_add_region`)**: makecontext 经**弱引用**调用 bcheck 的
+  持久登记接口, 把协程栈显式登记为检查区(不随创建它的帧返回而失效, 区别于
+  FP-bound 的 `__bound_new_region`)。作用: 协程体内**显式**越界访问(数组下标/指针
+  解引用落在协程栈上)能被 `-b` 报出, 且回溯能跨上下文切换解析到协程函数。
+  局限(结构性): makecontext 入口的参数 spill 属**非插桩的帧内写** `[rbp/rsp+off]`,
+  登记也不能拦截, 只能靠上面的栈顶预留兜底。验证 `tests/t061_corob.c`:
+  `-b` 报 `outside of the region ... overran its end by 1 bytes (co_fn)`, 不带 `-b`
+  照常运行。线程/进程不受此问题影响(见下)。
 
 ## 5. 运行时内存治理 (memory/mmap/arena/esc/memtrack)
 

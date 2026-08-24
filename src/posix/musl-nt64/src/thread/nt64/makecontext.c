@@ -15,6 +15,12 @@
 
 extern void __uc_finish(void);
 
+/* bcheck 感知 (弱引用, 未链接 bcheck.o 时为 no-op): 显式把协程栈登记为
+ * 持久检查区, 使落在协程栈上的显式越界访问(数组下标/指针解引用)能被 -b 报出。
+ * 注意: makecontext 入口的参数 spill 属非插桩的帧内写(见下方栈顶预留注释),
+ * 不依赖本登记兜底。 */
+extern void __bound_add_region(void *, size_t) __attribute__((weak));
+
 void makecontext(ucontext_t *u, void (*fn)(void), int argc, ...)
 {
 	va_list ap;
@@ -61,4 +67,8 @@ void makecontext(ucontext_t *u, void (*fn)(void), int argc, ...)
 	case 1: u->uc_mcontext.uc_rcx = r[0];
 	default: break;
 	}
+
+	/* 登记协程栈为持久检查区(-b 下生效; 见 __bound_add_region 弱声明注释)。 */
+	if (__bound_add_region)
+		__bound_add_region(u->uc_stack.ss_sp, u->uc_stack.ss_size);
 }
