@@ -96,6 +96,20 @@ int main(void) {
         CHECK(m->stl_map_size(int,int)() == 1);
     }
 
+    /* 5. at(operator[] 语义): 缺键自动插入零值槽并可写入 */
+    {
+        STL_Map(int,int) m; m->stl_map_init(int,int)(ar);
+        int *p = m->stl_map_at(int,int)(7);          /* 缺键 → 插入零值槽 */
+        CHECK(p && *p == 0);                          /* 默认零值 */
+        CHECK(m->stl_map_contains(int,int)(7));
+        CHECK(m->stl_map_size(int,int)() == 1);
+        *m->stl_map_at(int,int)(7) = 777;             /* 写回既有键 */
+        CHECK(*m->stl_map_at(int,int)(7) == 777);
+        *m->stl_map_at(int,int)(3) = 33;              /* 再插新键 */
+        CHECK(*m->stl_map_at(int,int)(3) == 33);
+        CHECK(m->stl_map_size(int,int)() == 2);
+    }
+
     stl_arena_destroy(ar);
     return 0;
 }

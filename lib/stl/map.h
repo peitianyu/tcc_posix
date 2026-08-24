@@ -104,6 +104,35 @@ model (K,V) V stl_map_getor(STL_Map(K,V) *self, K key, V dflt) {
     return dflt;
 }
 
+/* operator[] 语义: 返回键对应值的引用指针; 缺键则自动插入**零值默认槽**(POD 值
+   语义下零初始化)并返回其指针, 可 m->stl_map_at(int,int)(k) = v 直接写入. */
+model (K,V) V *stl_map_at(STL_Map(K,V) *self, K key) {
+    STL_MAP_EN();
+    struct __stl_map_e *d = (struct __stl_map_e *)self->data;
+    int lo = 0, hi = self->len;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (d[mid].key < key) lo = mid + 1; else hi = mid;
+    }
+    if (lo < self->len && !(key < d[lo].key)) return &d[lo].val;
+    /* 缺键: 有序插入新槽, 值零初始化 */
+    if (self->len >= self->cap) {
+        int nc = self->cap ? (self->cap * 2) : 4;
+        struct __stl_map_e *nd = (struct __stl_map_e *)
+            stl_arena_alloc(self->ar, (size_t)nc * sizeof(struct __stl_map_e), STL_ALIGN);
+        if (!nd) return 0;
+        for (int j = 0; j < self->len; j++) nd[j] = d[j];
+        self->data = nd; self->cap = nc; d = nd;
+    }
+    for (int j = self->len; j > lo; j--) d[j] = d[j - 1];
+    d[lo].key = key;
+    {   char *vp = (char *)&d[lo].val;   /* 零初始化值槽 */
+        for (int k = 0; k < (int)sizeof(V); k++) vp[k] = 0;
+    }
+    self->len++;
+    return &d[lo].val;
+}
+
 /* 删键: 仅 operator<。等价命中→左移压缩返回 1; 无→0 */
 model (K,V) int stl_map_erase(STL_Map(K,V) *self, K key) {
     STL_MAP_EN();
