@@ -6141,16 +6141,35 @@ static int preprocess_loop(TCCState *s1, int desugar)
         dg_tmpfile = NULL;
         dg_buffering = 0;
         s1->ppfp = dg_saved_ppfp;
-        /* 找末尾 `# NN "主文件" 2\n` -> 其后的字符作为插入点(引号头已展开完) */
+        /* 优先把函数泛型 typedefs+定义插到 `int main` 之前: 保证其引用的用户
+         * 顶层实体(struct Cmp / operator_lt 等, 主文件直接代码)已先定义. 若用
+         * "最后一个回到主文件行标记"作插点, 会插在用户主文件代码(main 前的
+         * struct 定义/顶层函数)之前, 使函数泛型引用未定义类型 → incomplete type. */
         ins = -1;
-        for (i = body.size; i >= 4; i--)
-            if (body.data[i - 4] == '"' && body.data[i - 3] == ' '
-                && body.data[i - 2] == '2' && body.data[i - 1] == '\n') {
-                ins = (int)i;
-                break;
+        {
+            const char *pats[2] = { "int  main", "int main" };
+            int pi;
+            for (pi = 0; pi < 2 && ins < 0; pi++) {
+                size_t plen = strlen(pats[pi]);
+                if (body.size >= plen) {
+                    size_t k = body.size - plen;
+                    for (;;) {
+                        if (!memcmp(body.data + k, pats[pi], plen)) { ins = (int)k; break; }
+                        if (k == 0) break;
+                        k--;
+                    }
+                }
             }
-        if (ins < 0)
-            ins = 0;   /* 无行标记(如无引号头): 放最前, 保持 m0 行为 */
+        }
+        if (ins < 0) {   /* 库文件无 main: 回退到最后一个回主文件行标记之后 */
+            for (i = body.size; i >= 4; i--)
+                if (body.data[i - 4] == '"' && body.data[i - 3] == ' '
+                    && body.data[i - 2] == '2' && body.data[i - 1] == '\n') {
+                    ins = (int)i; break;
+                }
+            if (ins < 0)
+                ins = 0;
+        }
         fwrite(body.data, 1, ins, dg_saved_ppfp);
         dg_fdefs_flush(s1);
         fwrite(body.data + ins, 1, body.size - ins, dg_saved_ppfp);
