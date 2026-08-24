@@ -26,8 +26,11 @@ void makecontext(ucontext_t *u, void (*fn)(void), int argc, ...)
 		return;
 
 	top = (uintptr_t)u->uc_stack.ss_sp + (uintptr_t)u->uc_stack.ss_size;
-	/* 最高处 16 对齐(向下), 预留返回地址槽上方余量 */
-	a   = ((top - 16) & ~(uintptr_t)15);    /* a % 16 == 0 */
+	/* 栈顶下方预留 Windows x64 影子区/参数 spill 空间: tcc 生成的带参函数
+	 * 会把前几个参数 spill 到入口 rsp 上方 (如 [rbp+0x20]), 若 rsp 紧贴栈缓冲
+	 * 上界会越界写坏相邻内存 (曾导致 exit 清理间接调用全局指针槽被污染崩溃)。
+	 * 故把 fn 入口 rsp 下移, 顶部预留 ≥0x40。 */
+	a   = ((top - 0x40) & ~(uintptr_t)15);   /* a % 16 == 0 */
 	fr  = (uintptr_t *)(a + 8);
 	fr[0] = (uintptr_t)__uc_finish;         /* fn 返回后的兜底 */
 

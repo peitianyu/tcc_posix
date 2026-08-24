@@ -14,8 +14,9 @@ musl 头声明但缺失的 4 个协程原语补全到 nt64 (x86_64)：
 - 寄存器槽偏移按 `arch/nt64/bits/signal.h` (NT CONTEXT 布局) offsetof 实测。
 - **验证**: t060 协程冒烟 (makecontext 传参 + swapcontext 双向切换 + get/set
   往返) 5/5 PASS。docs/features.md §4.6。
-- **已知限制**: 独立栈协程运行后 CRT 正常 return 清理路径(全局函数指针表)崩,
-  协程程序需 `_Exit`; 同栈 getcontext/setcontext 不受影响。
+- **修复 (2026-08-24)**: makecontext 栈顶未预留参数 spill 空间——带参协程把前几个
+  参数 spill 到入口栈顶上方(越界写坏相邻全局), exit 清理经被污染的指针槽间接调用
+  崩溃。已预留 ≥0x40; 带参协程现可正常 `return` 退出 (无需 `_Exit`)。
 
 ## 2026-08-23 — 运算符重载补全 + 脱糖同步 (operator → gcc/clang 产物闭环)
 

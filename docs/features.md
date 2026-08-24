@@ -205,9 +205,10 @@ swapcontext(&main_ctx, &co1);   /* 切到协程; 协程 swapcontext 切回 */
   角色与 nt64 `setjmp.s` 一致；makecontext 参数按 4 个寄存器 `rcx/rdx/r8/r9`。
 - **值语义**: `swapcontext` 保存 old 现场 `RSP=返回地址槽, RIP=返回地址`,
   恢复 new 时 `RSP=存值+8, jmp RIP`, 与 `getcontext(返回后)` 状态等价。
-- **已知限制**: 独立栈协程运行后, tcc/psxscl 的 CRT 正常 `return` 清理路径
-  (间接调用全局函数指针表)在 Windows 下崩溃——协程程序需以 `_Exit` 退出,
-  或仅用同栈 `getcontext/setcontext` (不受影响)。
+- **栈顶预留 (已修复)**: makecontext 在栈缓冲上界下方预留 Windows x64 影子区/
+  参数 spill 空间。曾因带参函数把前几个参数 spill 到入口栈顶上方(如 `[rbp+0x20]`),
+  越界写坏相邻全局——exit 清理时经被污染的全局函数指针槽间接调用近似 null 而崩。
+  现预留 ≥0x40, 带参协程也能正常 `return` 退出 (不再需要 `_Exit`)。
 
 ## 5. 运行时内存治理 (memory/mmap/arena/esc/memtrack)
 
