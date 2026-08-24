@@ -6834,6 +6834,7 @@ static void method_call_sugar(void)
     CType recv, ret_type;
     int nb_args, ret_nregs, ret_align, regsize, variadic, r2, talign;
     int recv_is_ptr = 0;
+    int ms_on_stack = 0;   /* 泛型方法: 实例化后内部函数符号已压栈 (vtop=func) */
     SValue ret;
 
     /* 1. receiver 的结构体类型与形态.
@@ -6849,11 +6850,27 @@ static void method_call_sugar(void)
         tcc_error("'->' method receiver is not a struct or its pointer");
     }
 
-    /* 2. 解析方法函数 (同名全局 f + 首参必须为 A*) */
+    /* 2. 解析方法函数 (同名全局 f + 首参必须为 A*); 亦支持 model 泛型方法
+           m->stl_map_set(int,int)(args): 模板名经 model_function_call 实例化,
+           消费类型实参表 (int,int) 得到内部函数符号, tok 落到调用 '(' 上. */
     ms = method_find_func(tok, &recv);
-    if (!ms)
-        tcc_error("'%s' has no callable method for this struct type",
-                  get_tok_str(tok, NULL));
+    if (!ms) {
+        /* 泛型方法: 模板名 + 类型实参表 (name(int,int)(args)).
+           与正常分派一致: 先 next() 把 tok 推进到 '(' (类型实参表),
+           再由 model_function_call 消费它并把 tok 落到调用 '(' 上. */
+        ModelDef *md = model_find(tok);
+        if (md && md->kind == VT_FUNC) {
+            int t = tok;
+            next();                            /* 方法名 -> '(' (类型实参表) */
+            if (model_function_call(t, md)) {
+                ms = vtop->sym;                /* 实例化后的内部函数符号 */
+                ms_on_stack = 1;               /* func 已压栈(vtop=func) */
+            }
+        }
+        if (!ms)
+            tcc_error("'%s' has no callable method for this struct type",
+                      get_tok_str(tok, NULL));
+    }
     fsig = ms->type.ref;
     sa = fsig ? fsig->next : NULL;   /* 第一可见形参 (receiver) */
 
@@ -6877,12 +6894,15 @@ static void method_call_sugar(void)
         PUT_R_RET(&ret, ret.type.t);
     }
 
-    /* 4. 排列 vstack: [func, receiver]; vtop = receiver */
-    vset(&ms->type, ms->r, ms->c);
-    vtop->sym = ms;
-    if (ms->r & VT_SYM)
-        vtop->c.i = 0;
-    vswap();   /* [func, receiver] */
+    /* 4. 排列 vstack: [func, receiver]; vtop = receiver.
+       泛型路径 func 已在栈上 (model_function_call 压入), 仅需 vswap. */
+    if (!ms_on_stack) {
+        vset(&ms->type, ms->r, ms->c);
+        vtop->sym = ms;
+        if (ms->r & VT_SYM)
+            vtop->c.i = 0;
+    }
+    vswap();   /* [.., receiver, func] -> [.., func, receiver] */
 
     /* 5. receiver 作为实参 0.
        '->' 指针语义: receiver 已是 A* 则直接用; 是 struct 值 → 取址注入. */
@@ -6898,9 +6918,13 @@ static void method_call_sugar(void)
     if (sa)
         sa = sa->next;
 
-    /* 6. 解析 '(' 后实参 */
-    next();   /* 方法名 -> '(' */
-    next();   /* 跳过 '(' */
+    /* 6. 解析 '(' 后实参. 泛型路径 model_function_call 已消 '(类型实参)', tok 在 '('. */
+    if (ms_on_stack) {
+        next();   /* 泛型: 消费调用 '(' (tok 已在 '(' 上) */
+    } else {
+        next();   /* 方法名 -> '(' */
+        next();   /* 跳过 '(' */
+    }
     if (tok != ')') {
         for (;;) {
             expr_eq();
@@ -7648,7 +7672,7 @@ special_math_val:
                         unget_tok(mname);   /* 回退到成员名, tok = mname */
                         if (paren) {
                             method_call_sugar();
-                            break;
+                            continue;   /* 允许方法返回值继续后置 ops (如 ->id/[i]) */
                         }
                     }
                     tcc_error("'%s' is not a member of struct/union",
