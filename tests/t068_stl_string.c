@@ -1,6 +1,6 @@
-/* t068_stl_string: M0e - STL_string 基础版 (纯断言)
- * 覆盖: 构建/append/c_str/length/clear, 拼接 (operator+), 字典序比较
- *       (operator<) 与判等 (operator==), 复用同一 arena 多字符串不串扰。
+/* t068_stl_string: M0e→M1 - STL_string 全功能 (纯断言)
+ * 覆盖: SSO 短串(免分配/mode=0)、长串(转 arena)、size(字节) vs length(UTF-8 字符)、
+ *       cstr/empty/clear、operator+ / operator== / operator<、STL_string_concat。
  * 退出码 0 = 通过.
  */
 #include "lib/stl/string.h"
@@ -11,51 +11,67 @@
 int main(void) {
     STL_Arena *ar = stl_arena_new(0);
 
-    /* 构建 + append + c_str */
+    /* 1. SSO 短串: 免分配, 字节/字符计数 */
     {
-        STL_string s = stl_string_new(ar);
-        CHECK(stl_string_empty(&s));
-        stl_string_append_c(&s, "Hello");
-        stl_string_append_c(&s, ", ");
-        stl_string_append_c(&s, "World!");
-        CHECK(stl_string_length(&s) == 13);
-        CHECK(strcmp(stl_string_cstr(&s), "Hello, World!") == 0);
+        STL_string s = STL_string_new();
+        CHECK(STL_string_empty(&s));
+        STL_string_append_c(&s, "Hello, ", ar);
+        STL_string_append_c(&s, "World!", ar);
+        CHECK(STL_string_size(&s) == 13);            /* 13 字节 */
+        CHECK(!s.mode);                              /* ≤23B → SSO 内联 */
+        CHECK(strcmp(STL_string_cstr(&s), "Hello, World!") == 0);
 
-        stl_string_clear(&s);
-        CHECK(stl_string_empty(&s));
-        stl_string_append_c(&s, "again");
-        CHECK(stl_string_length(&s) == 5);
-        CHECK(strcmp(stl_string_cstr(&s), "again") == 0);
+        STL_string_clear(&s);
+        CHECK(STL_string_empty(&s));
+        STL_string_append_c(&s, "again", ar);
+        CHECK(STL_string_size(&s) == 5);
+        CHECK(strcmp(STL_string_cstr(&s), "again") == 0);
     }
 
-    /* 拼接 operator+ 与 append(STL_string) */
+    /* 2. 长串(>23B): 转 arena,mode=1,size 字节   */
     {
-        STL_string a = stl_string_from_c(ar, "foo");
-        STL_string b = stl_string_from_c(ar, "bar");
-        STL_string ab = a + b;                       /* operator+ : "foobar" */
-        CHECK(strcmp(stl_string_cstr(&ab), "foobar") == 0);
-        CHECK(stl_string_length(&ab) == 6);
-
-        STL_string c = stl_string_new(ar);
-        stl_string_append(&c, &a);                    /* "foo" */
-        stl_string_append_c(&c, "-");
-        stl_string_append(&c, &b);                    /* "foo-bar" */
-        CHECK(strcmp(stl_string_cstr(&c), "foo-bar") == 0);
+        STL_string s = STL_string_from_c("0123456789abcdefghijklmn", ar);  /* 24B */
+        CHECK(STL_string_size(&s) == 24);
+        CHECK(s.mode == 1);                          /* 溢出 SSO → 长串 */
+        CHECK(strcmp(STL_string_cstr(&s), "0123456789abcdefghijklmn") == 0);
     }
 
-    /* operator== / operator< (字典序) */
+    /* 3. UTF-8: size=字节, length=字符数 */
     {
-        STL_string x = stl_string_from_c(ar, "apple");
-        STL_string same = stl_string_from_c(ar, "apple");
-        STL_string y = stl_string_from_c(ar, "banana");
-        STL_string pfx = stl_string_from_c(ar, "app");   /* x 的前缀 */
+        STL_string s = STL_string_from_c("你好 World", ar);   /* 你好=6B(2×3)+空格+5=12B; 8 字符 */
+        int size = STL_string_size(&s), len = STL_string_length(&s);
+        CHECK(size == 12);
+        CHECK(len == 8);
+    }
 
-        CHECK(x == same);                    /* operator== */
-        CHECK(!(x == y));                    /* 不同 */
-        CHECK(x < y);                        /* operator<: 字典序 */
+    /* 4. operator+ (SSO 内拼接) 与 STL_string_concat (长拼接) */
+    {
+        STL_string a = STL_string_from_c("foo", ar);
+        STL_string b = STL_string_from_c("bar", ar);
+        STL_string ab = a + b;                                  /* SSO:"foobar" */
+        CHECK(strcmp(STL_string_cstr(&ab), "foobar") == 0);
+        CHECK(STL_string_size(&ab) == 6);
+
+        /* 长拼接(超 SSO)显式传 arena */
+        STL_string c = STL_string_from_c("The quick brown fox ", ar);
+        STL_string d = STL_string_from_c("jumps over the lazy dog", ar);  /* 总 > 23B */
+        STL_string cd = STL_string_concat(c, d, ar);
+        CHECK(STL_string_size(&cd) == 43);
+        CHECK(memcmp(STL_string_cstr(&cd), "The quick brown fox jumps over the lazy dog", 43) == 0);
+    }
+
+    /* 5. operator== / operator< (字典序) */
+    {
+        STL_string x = STL_string_from_c("apple", ar);
+        STL_string same = STL_string_from_c("apple", ar);
+        STL_string y = STL_string_from_c("banana", ar);
+        STL_string pfx = STL_string_from_c("app", ar);
+        CHECK(x == same);
+        CHECK(!(x == y));
+        CHECK(x < y);
         CHECK(!(y < x));
-        CHECK(pfx < x);                      /* 前缀更短 → 更小 */
-        CHECK(x == x);                       /* 自反 */
+        CHECK(pfx < x);
+        CHECK(x == x);
     }
 
     stl_arena_destroy(ar);
