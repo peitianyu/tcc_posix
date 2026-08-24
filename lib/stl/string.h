@@ -71,6 +71,42 @@ STL_STATIC int STL_string_length(const STL_string *s)
     return n;
 }
 
+/* 解码 p 处一个 UTF-8 码点; 返回码点值, *adv=前进字节数(无效字节按单字节 ASCII). */
+STL_STATIC int STL_string_codepoint(const char *p, int *adv)
+{
+    unsigned char c = (unsigned char)p[0];
+    int cp, n;
+    if (c < 0x80)            { cp = c;      n = 1; }
+    else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 2; }
+    else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }
+    else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 4; }
+    else                      { cp = c;      n = 1; }
+    for (int i = 1; i < n; i++) {
+        if (((unsigned char)p[i] & 0xC0) == 0x80)
+            cp = (cp << 6) | ((unsigned char)p[i] & 0x3F);
+        else { cp = c; n = 1; break; }       /* 续字节无效 → 首字节按原样 */
+    }
+    if (adv) *adv = n;
+    return cp;
+}
+
+/* 取第 char_index 个码点值(0 基); 越界返回 -1. 逐码点前进(可与 length 配合迭代). */
+STL_STATIC int STL_string_codepoint_at(const STL_string *s, int char_index)
+{
+    const char *p;
+    int bytes;
+    if (char_index < 0) return -1;
+    p = STL_string_cstr(s);
+    bytes = s->sz;
+    while (bytes > 0 && char_index > 0) {
+        int adv;
+        STL_string_codepoint(p, &adv);
+        p += adv; bytes -= adv; char_index--;
+    }
+    if (char_index == 0 && bytes > 0) return STL_string_codepoint(p, 0);
+    return -1;
+}
+
 /* ---- 预留与追加 (self-contained, arena 可选) ---- */
 
 /* 确保长串容量 ≥ need+1(NUL), 分配自 arena ar. 返回 0=ok, -1=分配失败 */
@@ -141,31 +177,22 @@ int operator< (STL_string a, STL_string b) {
     return c < 0 || (c == 0 && a.sz < b.sz);
 }
 
-/* 拼接(通用, 长串需 arena 分配): STL_string_concat(a, b, ar) */
+/* 拼接(统一实现): 先放 a 内容再追加 b 内容(SSO 优先, 溢出转长串 arena).
+   ar 可为 0(无 arena 时长串分配失败 → 仅短拼接有效, 返回空串). */
 STL_STATIC STL_string STL_string_concat(STL_string a, STL_string b, STL_Arena *ar)
 {
     STL_string r = a;
-    r.sz = 0;
-    if (r.mode) { r.mode = 0; r.u.long_.len = 0; r.u.long_.cap = 0; r.u.long_.ptr = 0; }
+    r.sz = 0; r.mode = 0;                /* 复位为空 SSO(丢弃上层长串指针, arena 整池回收) */
     r.u.sso[0] = 0;
-    /* 重建: 先放 a 内容, 再追加 b 内容(SSO 优先, 溢出转长串 arena) */
     STL_string_append_c(&r, STL_string_cstr(&a), ar);
     STL_string_append_c(&r, STL_string_cstr(&b), ar);
     return r;
 }
-/* operator+: 仅保证 SSO 内(≤23B)短拼接免分配; 超出 SSO 的拼接请用
-   STL_string_concat(a,b,ar) 显式传 arena(operator 签名无法携带 arena). */
+/* operator+: 委托 STL_string_concat(a,b,0). operator 签名无法携带 arena, 故长串
+   (>23B) 拼接会因分配失败返回空串 —— 需长拼接请用 STL_string_concat(a,b,ar) 显式传 arena. */
 STL_string operator+ (STL_string a, STL_string b)
 {
-    int nsz = a.sz + b.sz;
-    if (nsz <= STL_STR_SSO) {
-        STL_string r = STL_string_new();
-        memcpy(r.u.sso, STL_string_cstr(&a), (size_t)a.sz);
-        memcpy(r.u.sso + a.sz, STL_string_cstr(&b), (size_t)b.sz);
-        r.sz = nsz; r.u.sso[r.sz] = 0;
-        return r;
-    }
-    return STL_string_new();   /* 超出 SSO: 返回空串(长拼接显式用 STL_string_concat) */
+    return STL_string_concat(a, b, (STL_Arena *)0);
 }
 
 #endif /* STL_STRING_H */

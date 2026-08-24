@@ -36,12 +36,24 @@ int main(void) {
         CHECK(strcmp(STL_string_cstr(&s), "0123456789abcdefghijklmn") == 0);
     }
 
-    /* 3. UTF-8: size=字节, length=字符数 */
+    /* 3. UTF-8: size=字节, length=字符数, 逐码点迭代 */
     {
-        STL_string s = STL_string_from_c("你好 World", ar);   /* 你好=6B(2×3)+空格+5=12B; 8 字符 */
+        STL_string s = STL_string_from_c("你好 Aa", ar);  /* 你3+好3+空格1+A1+a1 = 9B; 5 字符 */
         int size = STL_string_size(&s), len = STL_string_length(&s);
-        CHECK(size == 12);
-        CHECK(len == 8);
+        CHECK(size == 9);
+        CHECK(len == 5);
+        /* 码点: 你=U+4F60, 好=U+597D, ' '=0x20, 'A'=0x41, 'a'=0x61 */
+        CHECK(STL_string_codepoint_at(&s, 0) == 0x4F60);
+        CHECK(STL_string_codepoint_at(&s, 1) == 0x597D);
+        CHECK(STL_string_codepoint_at(&s, 2) == 0x20);
+        CHECK(STL_string_codepoint_at(&s, 3) == 0x41);
+        CHECK(STL_string_codepoint_at(&s, 4) == 0x61);
+        CHECK(STL_string_codepoint_at(&s, 5) == -1);      /* 越界 */
+        /* ASCII: 1 字节前进 */
+        {
+            int adv;
+            CHECK(STL_string_codepoint("A", &adv) == 0x41 && adv == 1);
+        }
     }
 
     /* 4. operator+ (SSO 内拼接) 与 STL_string_concat (长拼接) */
