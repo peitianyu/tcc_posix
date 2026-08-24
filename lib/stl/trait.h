@@ -7,12 +7,12 @@
  *   - 用户自定义值类型: 为具体类型手写 `operator_lt` / `operator_eq`, 算法实例化
  *     重放时 `a < b` 自动分发到该 operator(谓词痛免费显式传比较器)。
  *
- * 本头只定义契约说明与显式比较回调类型(供 `slt_sort(..., comp)` 覆盖默认), 无实体约束。
+ * 本头只定义契约说明与显式比较回调类型(供 `stl_sort(..., comp)` 覆盖默认), 无实体约束。
  */
-#ifndef SLT_TRAIT_H
-#define SLT_TRAIT_H
+#ifndef STL_TRAIT_H
+#define STL_TRAIT_H
 
 /* 显式比较回调(可选覆盖默认谓词): 返回 <0 / 0 / >0 */
-typedef int (*slt_less_fn)(const void *a, const void *b);
+typedef int (*stl_less_fn)(const void *a, const void *b);
 
-#endif /* SLT_TRAIT_H */
+#endif /* STL_TRAIT_H */
