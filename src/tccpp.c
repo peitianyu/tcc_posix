@@ -5233,6 +5233,263 @@ static void dg_model_emit(TCCState *s1, const DgModelDef *m, char av[][64])
  * (文件作用域, 全局去重), ref 用 `struct <sn>` tag 形式.
  * 定义在 EOF 处 (dg_fdefs_flush) 发射且物理置于主体之前, 故 main 内调用点在
  * 编译时先见到定义(即可充当原型), 无需在表达式内插入声明. */
+/* ============ 泛型体 operator 改写 (P1) ============
+ * 处理函数泛型展开体里的 `a < b` / `a == b` 等: 当该实例的类型实参
+ * (av[0]) 是已注册 operator 的类型(如 struct Cmp, opbase="Cmp")时,
+ * 泛型体中对 op 类型操作数的比较/判等改写为 operator_X(l,r) 调用;
+ * 否则(如 T=int)原样透传, 不动 int 原生比较.
+ *
+ * 变量类型取自 fparams 形参 与 body 内 `opbase * v` / `opbase v` 声明;
+ * 操作数判定: OP 值变量, 或 OP 指针下标 `v[expr]`(解引用). 局限: 成员
+ * (`self->x`) / 一元解引用(`*p`) / 复杂嵌套暂不覆盖, 见 docs/desugar.md. */
+#define DG_OPTYPN 64
+static char dg_optyp_name[DG_OPTYPN][40];   /* 已注册 operator 的操作数基础类型名 */
+static int dg_optyp_n;
+
+/* 类型文本 -> 基础名 (去 struct/union 前缀; 取首标识符) */
+static const char *dg_typbase(const char *t)
+{
+    static char b[40];
+    int i = 0;
+    if (!t)
+        return "";
+    if (!strncmp(t, "struct", 6) && (t[6] == ' ' || !t[6]))
+        { t += 6; while (*t == ' ') t++; }
+    else if (!strncmp(t, "union", 5) && (t[5] == ' ' || !t[5]))
+        { t += 5; while (*t == ' ') t++; }
+    while (*t && *t != ' ' && *t != '*' && *t != '[' && i < 39)
+        b[i++] = *t++;
+    b[i] = 0;
+    return b;
+}
+static void dg_optyp_add(const char *tn)
+{
+    const char *b = dg_typbase(tn);
+    int i;
+    if (!b || !*b)
+        return;
+    for (i = 0; i < dg_optyp_n; i++)
+        if (!strcmp(dg_optyp_name[i], b))
+            return;
+    if (dg_optyp_n < DG_OPTYPN) {
+        snprintf(dg_optyp_name[dg_optyp_n], 40, "%s", b);
+        dg_optyp_n++;
+    }
+}
+static int dg_optyp_has(const char *tn)
+{
+    const char *b = dg_typbase(tn);
+    int i;
+    if (!b || !*b)
+        return 0;
+    for (i = 0; i < dg_optyp_n; i++)
+        if (!strcmp(dg_optyp_name[i], b))
+            return 1;
+    return 0;
+}
+
+static int dg_gvget(char gv[][40], const int *gvk, int gvc, const char *nm)
+{
+    int q;
+    for (q = 0; q < gvc; q++)
+        if (!strcmp(gv[q], nm))
+            return gvk[q];
+    return 0;
+}
+
+/* 在 operator 定义行收集操作数基础类型名 (供泛型体改写判断) */
+static void dg_optyp_collect_line(void)
+{
+    int i;
+    for (i = 0; i < dg_n; i++) {
+        const char *tx = dg_txt[i] ? dg_txt[i] : "";
+        int isop = (dg_buf[i] == TOK_OPERATOR)
+                || (isid((unsigned char)tx[0]) && !strncmp(tx, "operator_", 9));
+        int j, d = 0;
+        if (!isop)
+            continue;
+        for (j = i + 1; j < dg_n; j++) {
+            if (is_space(dg_buf[j]))
+                continue;
+            if (dg_tokchar(j) == '(') { d = 1; continue; }
+            if (d > 0) {
+                const char *tj;
+                if (dg_tokchar(j) == ')')
+                    break;
+                if (!isid((unsigned char)(dg_tokchar(j) ? dg_tokchar(j) : 0)))
+                    continue;
+                tj = dg_txt[j] ? dg_txt[j] : "";
+                if (!strcmp(tj, "struct") || !strcmp(tj, "union"))
+                    continue;                 /* 跳到类型名本体 */
+                dg_optyp_add(tj);
+                break;
+            }
+        }
+    }
+}
+
+/* 泛型体比较/判等改写: 输出到 out. fp/fbody 为已展开文本; opbase 空则透传. */
+static void dg_gbody_oprewrite(CString *out, const char *fp_txt,
+                               const char *body_txt, const char *opbase)
+{
+    char w[512][128], w2[512][128];
+    char gv[288][40]; int gvk[288]; int gvc = 0;
+    int n, N, k;
+
+    if (!opbase || !*opbase || !dg_optyp_has(opbase)) {
+        cstr_cat(out, body_txt ? body_txt : "", body_txt ? strlen(body_txt) : 0);
+        return;
+    }
+    n = dg_splitw(fp_txt ? fp_txt : "", w, 512);
+    N = dg_splitw(body_txt ? body_txt : "", w2, 512);
+
+#define GV_SET(nm,kd) do { int q,fo=0; for(q=0;q<gvc;q++) if(!strcmp(gv[q],nm)){gvk[q]=kd;fo=1;break;} if(!fo&&gvc<288){snprintf(gv[gvc],40,"%s",nm);gvk[gvc]=kd;gvc++;} } while(0)
+    /* 形参: 每段尾标识 = 参数名; 段内类型基名==opbase → OP 值 */
+    for (k = 0; k < n; k++) {
+        int j, seg_end = -1, name = -1, tb = -1;
+        if (!isid((unsigned char)w[k][0]) || w[k][0] == '*')
+            continue;
+        for (j = k; j < n; j++)
+            if (!strcmp(w[j], ",") || !strcmp(w[j], ")")) { seg_end = j; break; }
+        for (j = (seg_end < 0 ? n - 1 : seg_end - 1); j >= k; j--)
+            if (isid((unsigned char)w[j][0]) && strcmp(w[j], "struct")
+                && strcmp(w[j], "const") && strcmp(w[j], "unsigned")) { name = j; break; }
+        if (name >= k) {
+            for (j = name - 1; j >= 0 && j >= k; j--) {
+                if (!strcmp(w[j], ","))
+                    break;
+                if (isid((unsigned char)w[j][0])) { tb = j; break; }
+            }
+            if (tb >= 0 && !strcmp(dg_typbase(w[tb]), opbase)) {
+                /* 类型到名称间有 '*' → OP 指针(解用下标/一元解引用); 否则 OP 值 */
+                int star = 0, q;
+                for (q = tb + 1; q < name; q++)
+                    if (!strcmp(w[q], "*")) { star = 1; break; }
+                GV_SET(w[name], star ? 2 : 1);
+            }
+        }
+        k = (seg_end < 0) ? n : seg_end;
+    }
+    /* 局部声明: `opbase [*] v` 或 `struct opbase [*] v` → 指针(2)/值(1) */
+    for (k = 0; k < N; k++) {
+        int typeidx = -1, j, star = 0, v = -1;
+        if (isid((unsigned char)w2[k][0]) && !strcmp(dg_typbase(w2[k]), opbase))
+            typeidx = k;
+        else if (!strcmp(w2[k], "struct") && k + 1 < N
+                 && isid((unsigned char)w2[k + 1][0])
+                 && !strcmp(dg_typbase(w2[k + 1]), opbase))
+            typeidx = k + 1;
+        if (typeidx < 0)
+            continue;
+        j = typeidx + 1;
+        while (j < N && !strcmp(w2[j], "*")) { star = 1; j++; }
+        while (j < N && !isid((unsigned char)w2[j][0])) j++;
+        if (j < N && strcmp(w2[j], "struct") && strcmp(w2[j], "const"))
+            { v = j; GV_SET(w2[v], star ? 2 : 1); }
+    }
+#undef GV_SET
+
+    /* P2a: 两遍 — 先标记改写点(左右操作数词 omit), 再输出, 避免左侧重复打出 */
+    {
+        char omit[512], lbt[64][256], rbt[64][256];
+        int opat[64], onp = 0, q;
+        memset(omit, 0, N);
+        for (k = 0; k < N; k++) {
+            const char *wc = w2[k];
+            int iscmp = !strcmp(wc, "<") || !strcmp(wc, ">") || !strcmp(wc, "<=")
+                     || !strcmp(wc, ">=") || !strcmp(wc, "==") || !strcmp(wc, "!=");
+            int lop = 0, rop = 0, ls = k - 1, le = k - 1, rs = -1, re = -1;
+            if (iscmp) {
+                /* 左侧: 尾 ']' → OP 指针下标 [ls..le]; 标识符 OP 值 (单词) */
+                { int a = k - 1; while (a >= 0 && !w2[a][0]) a--;
+                  if (a >= 0) {
+                    if (!strcmp(w2[a], "]")) {
+                        int b, dep = 1;
+                        for (b = a - 1; b >= 0; b--) {
+                            if (!strcmp(w2[b], "]")) dep++;
+                            else if (!strcmp(w2[b], "[")) { dep--; if (!dep) break; }
+                        }
+                        if (b >= 0) {
+                            int nm = b - 1; while (nm >= 0 && !w2[nm][0]) nm--;
+                            if (nm >= 0 && dg_gvget(gv, gvk, gvc, w2[nm]) == 2) {
+                                lop = 1; ls = nm; le = a;
+                            }
+                        }
+                    } else if (isid((unsigned char)w2[a][0]) && a - 1 >= 0
+                        && !strcmp(w2[a - 1], "*") && dg_gvget(gv, gvk, gvc, w2[a]) == 2) {
+                        lop = 1; ls = a - 1; le = a;   /* 一元解引用 `* it` */
+                    } else if (isid((unsigned char)w2[a][0]) && dg_gvget(gv, gvk, gvc, w2[a]) == 1) {
+                        lop = 1; ls = le = a;
+                    }
+                  } }
+                /* 右侧: OP 值变量(单词) 或 OP 指针 `v[..]` [rs..re] 或 `* v` */
+                { int b = k + 1; while (b < N && !w2[b][0]) b++;
+                  if (b < N) {
+                    if (isid((unsigned char)w2[b][0]) && dg_gvget(gv, gvk, gvc, w2[b]) == 1) {
+                        rop = 1; rs = re = b;
+                    } else if (isid((unsigned char)w2[b][0]) && dg_gvget(gv, gvk, gvc, w2[b]) == 2
+                               && b + 1 < N && !strcmp(w2[b + 1], "[")) {
+                        int dep = 1, c;
+                        for (c = b + 2; c < N; c++) {
+                            if (!strcmp(w2[c], "[")) dep++;
+                            else if (!strcmp(w2[c], "]")) { dep--; if (!dep) break; }
+                        }
+                        if (c < N) { rop = 1; rs = b; re = c; }
+                    } else if (!strcmp(w2[b], "*") && b + 1 < N
+                               && isid((unsigned char)w2[b + 1][0])
+                               && dg_gvget(gv, gvk, gvc, w2[b + 1]) == 2) {
+                        rop = 1; rs = b; re = b + 1;   /* 一元解引用 `* v` */
+                    }
+                  } }
+            }
+            if (iscmp && lop && rop && onp < 64) {
+                int jj, r;
+                lbt[onp][0] = 0; r = 0;
+                for (jj = ls; jj <= le; jj++) {
+                    if (r && w2[jj][0]) lbt[onp][r++] = ' ';
+                    if (w2[jj][0]) { int L = strlen(w2[jj]);
+                        if (r + L < 255) { memcpy(lbt[onp] + r, w2[jj], L); r += L; lbt[onp][r] = 0; } }
+                }
+                rbt[onp][0] = 0; r = 0;
+                for (jj = rs; jj <= re; jj++) {
+                    if (r && w2[jj][0]) rbt[onp][r++] = ' ';
+                    if (w2[jj][0]) { int L = strlen(w2[jj]);
+                        if (r + L < 255) { memcpy(rbt[onp] + r, w2[jj], L); r += L; rbt[onp][r] = 0; } }
+                }
+                opat[onp] = k;
+                for (q = ls; q <= le; q++) omit[q] = 1;
+                for (q = rs; q <= re; q++) omit[q] = 1;
+                onp++;
+            }
+        }
+        /* P2b: 输出 */
+        for (q = 0; q < N; q++) {
+            int p, isop = -1;
+            if (omit[q])
+                continue;
+            for (p = 0; p < onp; p++)
+                if (opat[p] == q) { isop = p; break; }
+            if (isop >= 0) {
+                const char *wc = w2[q], *wr = "lt";
+                if (!strcmp(wc, "<")) wr = "lt"; else if (!strcmp(wc, ">")) wr = "gt";
+                else if (!strcmp(wc, "<=")) wr = "le"; else if (!strcmp(wc, ">=")) wr = "ge";
+                else if (!strcmp(wc, "==")) wr = "eq"; else if (!strcmp(wc, "!=")) wr = "ne";
+                if (out->size && out->data[out->size - 1] != ' ') cstr_ccat(out, ' ');
+                cstr_cat(out, "operator_", 9);
+                cstr_cat(out, wr, strlen(wr));
+                cstr_cat(out, "( ", 2);
+                cstr_cat(out, lbt[isop], strlen(lbt[isop]));
+                cstr_cat(out, " , ", 3);
+                cstr_cat(out, rbt[isop], strlen(rbt[isop]));
+                cstr_cat(out, " )", 2);
+            } else {
+                if (out->size && out->data[out->size - 1] != ' ') cstr_ccat(out, ' ');
+                cstr_cat(out, w2[q], strlen(w2[q]));
+            }
+        }
+    }
+}
+
 static void dg_model_f_register(TCCState *s1, const DgModelDef *m, char av[][64])
 {
     char sn[384];
@@ -5255,6 +5512,25 @@ static void dg_model_f_register(TCCState *s1, const DgModelDef *m, char av[][64]
     dg_model_expand_src(s1, m, av, m->ret ? m->ret : "int", &ret, &dg_fout_td);
     dg_model_expand_src(s1, m, av, m->fparams ? m->fparams : "", &fp_, &dg_fout_td);
     dg_model_expand_src(s1, m, av, m->body ? m->body : "", &body, &dg_fout_td);
+    /* P1: 泛型体内 operator 改写 — 类型实参 T(av[0]) 为 op 类型时, 比较/判等
+     * 调 operator_X; 否则(int 等)原样透传. 注意复制 opbase 到局部, 因
+     * dg_typbase 返回 static 缓冲, 持久引用会被后续调用覆盖. */
+    if (m->nparams > 0 && m->pk[0] == 't' && dg_optyp_has(av[0])) {
+        char ob[40], *bdn = NULL, *fpn = NULL;
+        CString b2;
+        snprintf(ob, sizeof ob, "%s", dg_typbase(av[0]));
+        /* expand_src 输出 CString 无 NUL, 而 splitw 依赖 \0 扫描 → 必须补 NUL
+         * 副本, 否则越界读其后的函数内容(乱码). */
+        bdn = tcc_malloc(body.size + 1);
+        memcpy(bdn, body.data, body.size); bdn[body.size] = 0;
+        fpn = tcc_malloc(fp_.size + 1);
+        memcpy(fpn, fp_.data, fp_.size); fpn[fp_.size] = 0;
+        cstr_new(&b2);
+        dg_gbody_oprewrite(&b2, fpn ? fpn : "", bdn ? bdn : "", ob);
+        tcc_free(bdn); tcc_free(fpn);
+        cstr_free(&body);
+        body = b2;   /* 体转交改写结果 */
+    }
     {
         const char *R = ret.size ? ret.data : "int";
         const char *B = body.size ? body.data : ";";
@@ -5730,6 +6006,8 @@ static void dg_flush(TCCState *s1)
     int start = -1, to;
     /* ===== 泛型对象方法糖改写: recv->mname(targs)(args) → mname(targs)(&recv,args) ===== */
     dg_sugar_rewrite(s1);
+    /* P1: 收集 operator 定义行的操作数基础类型名(供泛型体改写判断 T 是否 op 类型) */
+    dg_optyp_collect_line();
     /* ===== model 定义收集 (语句级, 先于 operator/defer) =====
      *  `model struct Eq(T) { ... };` 不落地: 收进 dg_mb 后登记到 dg_model_def,
      *  实例化点 `Eq(int) x` 由 dg_emit_verbatim 改写为合成 typedef. */
