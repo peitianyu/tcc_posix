@@ -43,7 +43,8 @@ run_win() {
     # 仓库根(-I "$BASE")让 STL 测试 (t062/t063) 的 #include "lib/stl/..." 命中
     # lib/stl/.h, 而非被 $BASE/lib 误解析成 lib/lib/stl/...。
     if ! "$TCC" -c "$src" -o "$o" -I "$INC_WIN" -I "$ARCH_WIN" -I "$BASE/include" -I "$BASE/lib" \
-        -I "$BASE" -std=c99 -D_XOPEN_SOURCE=700 2>"$TESTDIR/$name.cerr"; then
+        -I "$BASE" -std=c99 -D_XOPEN_SOURCE=700 -DSLT_CHECKS \
+        2>"$TESTDIR/$name.cerr"; then
         FAIL=$((FAIL+1)); FAILED="$FAILED $name(编译)"; echo "FAIL $name: 编译错误"; head -3 "$TESTDIR/$name.cerr"; return
     fi
     # 个别测试需要额外源文件一并链接 (如 t049_cpu 依赖 lib/cpu-prof.c)

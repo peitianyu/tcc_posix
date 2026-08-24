@@ -36,9 +36,20 @@ model (T) T *Vector_data(Vector(T) *self) { return self->data; }
 model (T) T *Vector_end(Vector(T) *self) {
     return self->data ? self->data + self->len : (T *)0;
 }
-model (T) T Vector_at(Vector(T) *self, int i) { return self->data[i]; }
-model (T) T Vector_front(Vector(T) *self) { return self->data[0]; }
-model (T) T Vector_back(Vector(T) *self) { return self->data[self->len - 1]; }
+/* at/[i]/front/back 在 SLT_CHECKS 下做边界/非空断言(文件:行); 关闭则近 C 语义(UB)。
+ * data[0] 在空容器时为 0 且不参与算术(bcheck/musl 均安全), 断言在断言前先判空自卫。 */
+model (T) T Vector_at(Vector(T) *self, int i) {
+    SLT_ASSERT(self && i >= 0 && i < self->len);
+    return self->data[i];
+}
+model (T) T Vector_front(Vector(T) *self) {
+    SLT_ASSERT(self && self->len > 0);
+    return self->data[0];
+}
+model (T) T Vector_back(Vector(T) *self) {
+    SLT_ASSERT(self && self->len > 0);
+    return self->data[self->len - 1];
+}
 
 /* --- 变更(自包含分配) --- */
 
