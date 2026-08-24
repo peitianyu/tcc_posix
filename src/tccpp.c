@@ -1,4 +1,4 @@
-﻿/*
+/*
  *  TCC - Tiny C Compiler
  * 
  *  Copyright (c) 2001-2004 Fabrice Bellard
@@ -1373,13 +1373,19 @@ static int parse_include(TCCState *s1, int do_next, int test)
     }
 
     if (!test && s1->output_type == TCC_OUTPUT_DESUGAR) {
-        /* 脱糖: 保留 #include 指令本身, 不随 .c 一起展开.
-         * 这样产物交给 clang 时由它用自己的头文件树(如 musl sysroot) 重新解析,
-         * 避免 tcc 解析后的私有类型/绝对路径泄漏进正式产物. */
-        char d = (c == '<') ? '>' : '"';
-        if (!do_next) /* #include_next 顺序敏感, 脱糖不保留 */
-            fprintf(s1->ppfp, "#include %c%s%c\n", c, name, d);
-        return 0;
+        /* 脱糖 include 策略:
+         *  - 系统头 (<...>) 或 #include_next: 保留 #include 指令本身, 不展开 → 产物交
+         *    clang 时用其自身 sysroot 重新解析, 避免 tcc 私有类型/绝对路径泄漏.
+         *  - 项目引号头 ("...", 如 lib/stl/*.h): 递归展开进本 TU —— 这些头用 model/
+         *    operator 等扩展语法, clang 无法直接解析, 必须 inline 其内容让脱糖把
+         *    模板落地为具体类型/函数(其内部对 <...> 系统头仍保留 include). */
+        if (c == '<' || do_next) {
+            char d = (c == '<') ? '>' : '"';
+            if (!do_next) /* #include_next 顺序敏感, 脱糖不保留 */
+                fprintf(s1->ppfp, "#include %c%s%c\n", c, name, d);
+            return 0;
+        }
+        /* c == '"' 且非 #include_next: fall through 到下方常规 tcc_open 展开 */
     }
 
     if (!test)
