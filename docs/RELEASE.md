@@ -3,6 +3,20 @@
 > 里程碑级变更摘要。README 只做概览。按时间序, 最新在上。
 > 完整逐提交历史用 `git log --oneline`。
 
+## 2026-08-24 — ucontext 协程基座移植 (nt64)
+
+musl 头声明但缺失的 4 个协程原语补全到 nt64 (x86_64)：
+
+- **新增实现**: `src/thread/nt64/ucontext.s` (getcontext/setcontext/swapcontext/
+  __uc_finish) + `src/thread/nt64/makecontext.c` (C, 按 Windows x64 寄存器布置参数)。
+- **调用约定**: 关键为 tcc 的 PE x86_64 用 **Windows x64 (首参 `%rcx`)** 而非
+  SysV `%rdi` (同 nt64 setjmp.s) —— 纠正了初期按 rdi 存取的野指针崩溃。
+- 寄存器槽偏移按 `arch/nt64/bits/signal.h` (NT CONTEXT 布局) offsetof 实测。
+- **验证**: t060 协程冒烟 (makecontext 传参 + swapcontext 双向切换 + get/set
+  往返) 5/5 PASS。docs/features.md §4.6。
+- **已知限制**: 独立栈协程运行后 CRT 正常 return 清理路径(全局函数指针表)崩,
+  协程程序需 `_Exit`; 同栈 getcontext/setcontext 不受影响。
+
 ## 2026-08-23 — 运算符重载补全 + 脱糖同步 (operator → gcc/clang 产物闭环)
 
 - **新增运算符类别** (tccgen `operator_name_token`, t059 全面回归):

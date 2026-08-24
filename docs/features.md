@@ -184,6 +184,31 @@ for (int i = 0; i < (int)r->nfield; i++)
 
 支持 struct/union 平铺字段 + 标量/枚举/指针 kind;bitfield/VLA/嵌套递归链为 v2。
 
+### 4.6 ucontext 协程基座 (t060)
+
+`getcontext/setcontext/makecontext/swapcontext` 由 musl 头声明但**实现缺失**，
+现移植补全到 nt64 (x86_64)。协程可在**自管独立栈**上布置入口函数并往返切换:
+
+```c
+static ucontext_t main_ctx, co1;
+static char st[8192] __attribute__((aligned(16)));
+static void co1_fn(int a, int b, int c) { ...; swapcontext(&co1, &main_ctx); ... }
+co1.uc_stack.ss_sp = st; co1.uc_stack.ss_size = sizeof st;
+makecontext(&co1, co1_fn, 3, 10, 20, 30);
+swapcontext(&main_ctx, &co1);   /* 切到协程; 协程 swapcontext 切回 */
+```
+
+- **实现**: [ucontext.s](file:///d:/work/tcc_posix/src/posix/musl-nt64/src/thread/nt64/ucontext.s)
+  (getcontext/setcontext/swapcontext/__uc_finish) + C 版 `makecontext.c`。
+  寄存器槽偏移按 `arch/nt64/bits/signal.h` (Windows NT CONTEXT 布局) 实测。
+- **调用约定**: tcc 的 PE x86_64 用 **Windows x64** (首参 `%rcx`), 非 SysV `%rdi`;
+  角色与 nt64 `setjmp.s` 一致；makecontext 参数按 4 个寄存器 `rcx/rdx/r8/r9`。
+- **值语义**: `swapcontext` 保存 old 现场 `RSP=返回地址槽, RIP=返回地址`,
+  恢复 new 时 `RSP=存值+8, jmp RIP`, 与 `getcontext(返回后)` 状态等价。
+- **已知限制**: 独立栈协程运行后, tcc/psxscl 的 CRT 正常 `return` 清理路径
+  (间接调用全局函数指针表)在 Windows 下崩溃——协程程序需以 `_Exit` 退出,
+  或仅用同栈 `getcontext/setcontext` (不受影响)。
+
 ## 5. 运行时内存治理 (memory/mmap/arena/esc/memtrack)
 
 经 `-b`(bcheck) 在运行时逐类抓取, 细致设计见 docs/memory-governance.md。落到
