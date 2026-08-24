@@ -1,4 +1,4 @@
-﻿/*
+/*
  *  TCC - Tiny C Compiler
  *
  *  Copyright (c) 2001-2004 Fabrice Bellard
@@ -391,8 +391,16 @@ static void ptype(const char *msg, CType *type, int v)
 
 /* ------------------------------------------------------------------------- */
 /* initialize vstack and types.  This must be done also for tcc -E */
+/* tccpp 预处理每 pass 重置 tok_ident(token id 空间), 但 tccgen 的 model_list
+ * 跨 pass 存活且按 token id 存模型名 —— 若不随之清空, 后续 pass(如 -b 注入的
+ * `__bt_init(...)` 合成代码)里新标识符会复用与已登记 model 相同的 token id,
+ * 被 model_find 误判为泛型实例化而报 "too many type arguments for model"。
+ * 故每个编译 pass 起始清空 model_list。 */
+static void model_scope_reset(void);
+
 ST_FUNC void tccgen_init(TCCState *s1)
 {
+    model_scope_reset();
     vtop = vstack - 1;
     memset(vtop, 0, sizeof *vtop);
 
@@ -4702,6 +4710,22 @@ typedef struct ModelDef {
 
 static ModelDef *model_list;   /* 全局模型表 */
 
+/* 释放全部模型模板并清空表(每个编译 pass 起始调用, 见 tccgen_init 注释)。 */
+static void model_scope_reset(void)
+{
+    ModelDef *md = model_list, *nx;
+    while (md) {
+        nx = md->next;
+        tcc_free(md->params);
+        tcc_free(md->param_kind);
+        if (md->body)
+            tok_str_free(md->body);
+        tcc_free(md);
+        md = nx;
+    }
+    model_list = NULL;
+}
+
 /* model 定义已消费标志: parse_btype 返回 0 后 decl() 凭此继续 */
 static int model_decl_seen;
 
@@ -6768,6 +6792,187 @@ static unsigned long refl_emit(CType *t)
     return (unsigned long)tab_off;
 }
 
+/* ------------------------------------------------------------------ */
+/* 对象方法语法糖 a->f(...)  (仅指针注入语义)                           */
+/* 绑定规约: 同名全局函数 f, 无名字拼接.  方法首参必须是 receiver 的     */
+/* 指针 A*; 注入时 receiver 为 A* 直接用, 为 struct 值自动取 &receiver. */
+/* struct 自身不内嵌任何函数, 不改布局/sizeof.  '.' 不触发方法糖, 仅做   */
+/* 字段访问.                                                            */
+/* ------------------------------------------------------------------ */
+
+/* 方法函数解析: 全局同名函数 + 首参类型明确核对.
+   recv 为 receiver 的结构体类型. '->' 指针注入语义: 方法首参必须为 A*,
+   指向 receiver 的 struct. 命中返回该函数符号, 否则 NULL. */
+static Sym *method_find_func(int name, CType *recv)
+{
+    Sym *s = sym_find(name);
+    Sym *fsig, *first;
+    CType *pt;
+    if (!s || (s->type.t & VT_BTYPE) != VT_FUNC)
+        return NULL;
+    fsig = s->type.ref;
+    first = fsig ? fsig->next : NULL;
+    if (!first)
+        return NULL;   /* 无任何参数: 不可能为首参 carry struct 的方法 */
+    /* 指针语义: 首参必须为 A*, 指向 receiver 的 struct */
+    if ((first->type.t & VT_BTYPE) != VT_PTR)
+        return NULL;
+    pt = pointed_type(&first->type);
+    if (!(pt && (pt->t & VT_BTYPE) == (recv->t & VT_BTYPE) &&
+          pt->ref == recv->ref))
+        return NULL;
+    return s;
+}
+
+/* a->f(...) 方法糖调用 (仅指针注入语义).
+   进入时: vtop = receiver (A* 或 struct A 值), tok = 方法名.
+   语义固定: 指针注入 f(&a 或 a, ...), 须匹配 A* 形参.
+   解析 '(' 后实参, 合成 f(receiver, args...) 调用. 返回: vtop = 返回值. */
+static void method_call_sugar(void)
+{
+    Sym *ms, *fsig, *sa;
+    CType recv, ret_type;
+    int nb_args, ret_nregs, ret_align, regsize, variadic, r2, talign;
+    int recv_is_ptr = 0;
+    SValue ret;
+
+    /* 1. receiver 的结构体类型与形态.
+       '->': receiver 可为 A* (直接用) 或 struct 值 (取址注入). */
+    if ((vtop->type.t & VT_BTYPE) == VT_PTR) {
+        recv_is_ptr = 1;
+        recv = *pointed_type(&vtop->type);
+    } else if ((vtop->type.t & VT_BTYPE) == VT_STRUCT ||
+               (vtop->type.t & VT_BTYPE) == VT_UNION) {
+        recv_is_ptr = 0;
+        recv = vtop->type;
+    } else {
+        tcc_error("'->' method receiver is not a struct or its pointer");
+    }
+
+    /* 2. 解析方法函数 (同名全局 f + 首参必须为 A*) */
+    ms = method_find_func(tok, &recv);
+    if (!ms)
+        tcc_error("'%s' has no callable method for this struct type",
+                  get_tok_str(tok, NULL));
+    fsig = ms->type.ref;
+    sa = fsig ? fsig->next : NULL;   /* 第一可见形参 (receiver) */
+
+    /* 3. 返回值槽位 (仅支持非大 struct 返回; 大 struct 下期补) */
+    ret.r2 = VT_CONST;
+    variadic = fsig->f.func_type == FUNC_ELLIPSIS;
+    ret_type = fsig->type;   /* 声明/逻辑返回类型 (struct 或标量) */
+    ret.type = fsig->type;
+    ret_nregs = 1;
+    if ((fsig->type.t & VT_BTYPE) == VT_STRUCT) {
+        /* gfunc_sret 的第三个参数收到"寄存器承载类型" (如 8 字节 struct → LLONG),
+           结构体逻辑类型须另存于 ret_type. */
+        ret_nregs = gfunc_sret(&ret_type, variadic, &ret.type,
+                               &ret_align, &regsize);
+        if (ret_nregs <= 0)
+            tcc_error("method returning a large struct is not yet supported "
+                      "by .method() sugar");
+    }
+    if (ret_nregs > 0) {
+        ret.c.i = 0;
+        PUT_R_RET(&ret, ret.type.t);
+    }
+
+    /* 4. 排列 vstack: [func, receiver]; vtop = receiver */
+    vset(&ms->type, ms->r, ms->c);
+    vtop->sym = ms;
+    if (ms->r & VT_SYM)
+        vtop->c.i = 0;
+    vswap();   /* [func, receiver] */
+
+    /* 5. receiver 作为实参 0.
+       '->' 指针语义: receiver 已是 A* 则直接用; 是 struct 值 → 取址注入. */
+    if (!recv_is_ptr) {
+        test_lvalue();            /* 取址要求 receiver 为左值 */
+        if (vtop->sym)
+            vtop->sym->a.addrtaken = 1;   /* 与 unary '&' 对齐: 固址到栈 */
+        gaddrof();                /* 先取地址 (r 去 LVAL), type 暂保持 struct */
+        mk_pointer(&vtop->type);  /* type 改为 A* */
+    }
+    gfunc_param_typed(fsig, sa);
+    nb_args = 1;
+    if (sa)
+        sa = sa->next;
+
+    /* 6. 解析 '(' 后实参 */
+    next();   /* 方法名 -> '(' */
+    next();   /* 跳过 '(' */
+    if (tok != ')') {
+        for (;;) {
+            expr_eq();
+            gfunc_param_typed(fsig, sa);
+            nb_args++;
+            if (sa)
+                sa = sa->next;
+            if (tok == ')')
+                break;
+            skip(',');
+        }
+    }
+    skip(')');
+
+    /* 7. 调用并得到返回值 (复制常规函数调用的返回处理, 含 packed struct 存回内存) */
+    vcheck_cmp();   /* 生成器不喜 vtop 为 VT_CMP */
+    gfunc_call(nb_args);
+
+    if (ret_nregs < 0) {
+        vsetc(&ret.type, ret.r, &ret.c);
+    } else {
+        int n = ret_nregs;
+        while (n > 1) {
+            int jc = reg_classes[ret.r] & ~(RC_INT | RC_FLOAT);
+            jc <<= --n;
+            for (r2 = 0; r2 < NB_REGS; ++r2)
+                if (reg_classes[r2] & jc)
+                    break;
+            vsetc(&ret.type, r2, &ret.c);
+        }
+        vsetc(&ret.type, ret.r, &ret.c);
+        vtop->r2 = ret.r2;
+        if ((ret.type.t & VT_BTYPE) == VT_PTR)
+            vtop->r |= VT_MAYNULL;
+
+        /* 寄存器返回的小 struct: 存回内存, vtop 置为 local lvalue,
+           与常规调用分支一致 (否则 'struct X c = f();' 声明初始化不接受) */
+        if (((ret_type.t & VT_BTYPE) == VT_STRUCT) && ret_nregs > 0) {
+            int addr, tofs;
+            size_t sz;
+
+            sz = type_size(&ret.type, &talign);
+            sz = (sz + regsize - 1) & -regsize;
+            if (ret_align > talign)
+                talign = ret_align;
+            loc = (loc - sz) & -talign;
+            addr = loc;
+            tofs = 0;
+            for (;;) {
+                vset(&ret.type, VT_LOCAL | VT_LVAL, addr + tofs);
+                vswap();
+                vstore();
+                vtop--;
+                if (--ret_nregs == 0)
+                    break;
+                tofs += regsize;
+            }
+            vset(&ret_type, VT_LOCAL | VT_LVAL, addr);
+        }
+
+        /* 提升 char/short/bool 返回值 */
+        {
+            int bt = ret.type.t & VT_BTYPE;
+            if (bt == VT_BYTE || bt == VT_SHORT || bt == VT_BOOL) {
+#ifndef PROMOTE_RET
+                vtop->type.t = VT_INT;
+#endif
+            }
+        }
+    }
+}
+
 ST_FUNC void unary(void)
 {
     int n, t, align, size, r;
@@ -7405,15 +7610,57 @@ special_math_val:
             inc(1, tok);
             next();
         } else if (tok == '.' || tok == TOK_ARROW) {
-            int qualifiers, cumofs;
-            /* field */ 
-            if (tok == TOK_ARROW) 
-                indir();
-            qualifiers = vtop->type.t & (VT_CONSTANT | VT_VOLATILE);
-            test_lvalue();
+            int is_arrow = (tok == TOK_ARROW);
+            int qualifiers, cumofs, recv_was_ptr = 1;
+            CType sstruct;
+            /* field.  先在"类型层面"做字段查找。
+               '.'   → receiver 即 struct 值 (仅字段访问, 无方法糖).
+               '->'  → receiver 可为 A* (真指针) 或 struct 值 (仅限方法糖
+                       取址注入); 字段访问沿用真指针. */
+            if (is_arrow) {
+                if ((vtop->type.t & VT_BTYPE) == VT_PTR) {
+                    sstruct = *pointed_type(&vtop->type);
+                } else if ((vtop->type.t & VT_BTYPE) == VT_STRUCT ||
+                           (vtop->type.t & VT_BTYPE) == VT_UNION) {
+                    sstruct = vtop->type;   /* 值接收器: 仅方法糖取址 */
+                    recv_was_ptr = 0;
+                } else {
+                    tcc_error("'->' 左侧不是结构体或其指针");
+                }
+            } else {
+                sstruct = vtop->type;
+            }
+            qualifiers = sstruct.t & (VT_CONSTANT | VT_VOLATILE);
             /* expect pointer on structure */
             next();
-	    s = find_field(&vtop->type, tok | SYM_FIELD, &cumofs);
+            {
+                int isstruct = ((sstruct.t & VT_BTYPE) == VT_STRUCT) ||
+                               ((sstruct.t & VT_BTYPE) == VT_UNION);
+                s = find_field(&sstruct, tok | SYM_FIELD, &cumofs);
+                if (!s) {
+                    /* 字段缺失: 仅 '->' 探测方法糖调用 (下一 token 为 '(').
+                       '.' 不触发方法糖, 只做字段访问. */
+                    int mname = tok;
+                    if (is_arrow && isstruct) {
+                        int paren;
+                        next();
+                        paren = (tok == '(');
+                        unget_tok(mname);   /* 回退到成员名, tok = mname */
+                        if (paren) {
+                            method_call_sugar();
+                            break;
+                        }
+                    }
+                    tcc_error("'%s' is not a member of struct/union",
+                              get_tok_str(mname, NULL));
+                }
+                /* '->' 值接收器做纯字段访问 (非方法) 无意义: 需真指针, 报错. */
+                if (is_arrow && !recv_was_ptr && s)
+                    tcc_error("'->' 字段访问需指针接收器, 请改用 '.'");
+            }
+            if (is_arrow && recv_was_ptr)
+                indir();   /* '->': 逐字段路径真正解引用 */
+            test_lvalue();
             /* add field offset to pointer */
             gaddrof();
             vtop->type = char_pointer_type; /* change type to 'char *' */
