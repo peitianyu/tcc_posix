@@ -282,14 +282,17 @@ tests/
 
 | 阶段 | 交付 | 验证 |
 |---|---|---|
-| M0a | allocator + trait + iterator + Pair + Vector | t062_stl_vector |
-| M0b | List + 抽象迭代器 + Stack/Queue | t063_stl_list |
-| M0c | 基础算法(sort/find/copy/for_each/reverse/minmax…) | t064_stl_algorithm |
-| M0d | 全量回归 + -b 越界/泄漏验证 | test.sh 全绿 |
-| M1 | 关联容器(map/set/unordered/红黑树)、deque、迭代器适配算法骨架、深拷贝、快排 | 分批 |
-| string（M1 优先） | String — 设计已定稿（§7.4：SSO/双后端/operator/UTF-8/脱糖/监控），实现可作 M0e | 前置 E/C/B5/D |
+| M0a | allocator + trait + iterator + Pair + Vector | t062_stl_vector ✅ |
+| M0b | List + 抽象迭代器 + Stack/Queue | t063_stl_list / t066 ✅ |
+| M0c | 基础算法(sort/find/copy/for_each/reverse/minmax…) | t066 / t070 ✅ |
+| M0d | 全量回归 + SLT_CHECKS 内在检测(at/front/back 边界断言) | t067 ✅ |
+| M0e | String 基础 → 全功能(SSO/UTF-8/operator/concat) | t068 ✅ |
+| M1 | Map(有序,仅 operator<,getor/at)/Set/Deque/深拷贝/快排/二分 | t069/t071/t073/t072/t070 ✅ |
+| M1-待办 | unordered(哈希)、抽象迭代器算法骨架、heap 后端、--emit-c 脱糖 clang 闭环 | — |
 
-每阶段独立提交，先列 Todo 再实现；跑 `scripts/` 回归 + 对应 `-b` 用例。
+已落地的命名/调用规范（替代 §13 决策4/6，见 §13-10/11）：统一 `STL_`/`stl_` 前缀避免
+与 libc 冲突；容器方法一律用**对象方法糖** `m->stl_map_set(int,int)(k,v)`（编译器已支持
+model 泛型方法糖 + 大 struct sret 返回）。
 
 ## 12. 测试计划
 
@@ -297,7 +300,8 @@ tests/
 - **TCC 原生侧**：`-b` 越界（`at`/`[]`）兜底验证；对每个容器跑边界用例。
 - **clang 发布侧（脱糖验证）**：`tcc --emit-c t0xx.c > t0xx.desug.c` ＋ `clang -O2
   -fsanitize=address -g t0xx.desug.c` → 运行：既验证 `--emit-c` 能忠实脱糖 model/operator，
-  又用 ASan 覆盖越界/泄漏。这是本 STL 的**发行检验**。
+  又用 ASan 覆盖越界/泄漏。这是本 STL 的**发行检验**。（`--emit-c` 对 model/operator/
+  SSO-string 的完整改写仍为 P1，未闭环。）
 - 泛型数与 C++ `Template 督导`：list<int>/list<double>、vector<Pair(int,float)> 等
   model 缓存类型一致性（同参同 sizeof）。
 
@@ -341,7 +345,26 @@ tests/
    故 STL 头用 `SLT_STATIC`（`static __attribute__((unused))`）定义分配等辅助，
    clang/gcc 侧亦可用。
 
+10. **对象方法糖可用于 model 泛型方法**（2026-08-24 升级决策6）：编译器已实现泛型方法糖
+    `m->stl_map_set(int,int)(k,v)` —— 方法糖识别 model 泛型模板名、经 model_function_call
+    实例化（消费类型实参表 `(int,int)`）、自动注入 receiver 为首参；并支持**大 struct
+    (sret) 返回**（`v->stl_vector_copy(int)()` 返回 24B 容器）。容器方法一律用该糖风格，
+    替代早期的显式 `stl_map_set(int,int)(&m,k,v)` 与"放弃方法糖"的决策6注。
+
+11. **operator 一律用 C++ 直觉写法**（`operator<` / `operator==`，弃 `operator_lt/eq`）：
+    编译器把符号拼成内部 `operator_lt/eq/...`，两写法等价；`operator<`（无括号包裹）可直接
+    声明。STL 元素比较契约 = `operator<`（可排序）即可（map/set/sort 用严格弱序，等价由
+    `!(a<b)&&!(b<a)` 推导，不要求 `operator==`）。
+
+12. **model 泛型自包含约束（实测）**：泛型方法体**不得调用另一同泛型方法**（跨泛型互调
+    → `invalid type`/`unresolved`，如曾以 find 辅助被 get/set 调）；须在各方法体内联
+    逻辑（map/set 的二分、deque/list 的扩容/拷贝都内联）。同泛型自递归（stl_qsort）可用。
+    另：model 类型实参不支持**指针类型**（`char*`）与**嵌套泛型实例作值类型实参**（如
+    `STL_Map(Key, STL_Vector(int))`）；值类型用 int/struct/ext等。
+
 后续决策（string 语义拍板）落定后追加到本清单。
 
-→ 下一步：冻结设计，进入 M0a 实现（allocator + trait + iterator + Pair + Vector）。
+→ 现状（2026-08-24）：M0a–M0d、M0e(String 全功能)、M1(有序 Map/Set/Deque/深拷贝/快排/
+   二分/二分查找) 已落地并全绿(73 测试)。待办：unordered(哈希)、抽象迭代器算法骨架、
+   String heap 后端、`--emit-c` 脱糖 clang 闭环（发行检验）。
 ```
