@@ -37,8 +37,13 @@ run_win() {
     local src="tests/$name.c"
     [ -f "$src" ] || { echo "SKIP $name (无源码)"; return; }
     local o="$TESTDIR/$name.o" exe="$TESTDIR/$name.exe"
-    if ! "$TCC" -c "$src" -o "$o" -I "$BASE/include" -I "$BASE/lib" -I "$INC_WIN" -I "$ARCH_WIN" \
-        -std=c99 -D_XOPEN_SOURCE=700 2>"$TESTDIR/$name.cerr"; then
+    # 头文件优先级: nt64 头 > include(Linux 兜底) > lib > 仓库根。nt64 库(链接对象)
+    # 用 nt64 的 ucontext_t/mcontext_t 等 ABI, 若 include/ 先命中会拿到 Linux
+    # 布局导致 ucontext 协程(test t060/t061)结构体错位 → swapcontext 段错误。
+    # 仓库根(-I "$BASE")让 STL 测试 (t062/t063) 的 #include "lib/stl/..." 命中
+    # lib/stl/.h, 而非被 $BASE/lib 误解析成 lib/lib/stl/...。
+    if ! "$TCC" -c "$src" -o "$o" -I "$INC_WIN" -I "$ARCH_WIN" -I "$BASE/include" -I "$BASE/lib" \
+        -I "$BASE" -std=c99 -D_XOPEN_SOURCE=700 2>"$TESTDIR/$name.cerr"; then
         FAIL=$((FAIL+1)); FAILED="$FAILED $name(编译)"; echo "FAIL $name: 编译错误"; head -3 "$TESTDIR/$name.cerr"; return
     fi
     # 个别测试需要额外源文件一并链接 (如 t049_cpu 依赖 lib/cpu-prof.c)
