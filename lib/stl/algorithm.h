@@ -2,8 +2,8 @@
  *
  * 区间算法对连续容器传裸指针区间; 元素比较/判等默认走 T 的原生运算符:
  *   - 内置标量(int/double/指针…): 原生 `<` / `==`;
- *   - 用户自定义值类型: 为其具体类型声明 `operator<`(→ operator_lt) / `operator==`
- *     (→ operator_eq), model 泛型重放时 `a < b`/`a == b` 自动分发(编译期静态分派)。
+ *   - 用户自定义值类型: 为其具体类型声明 `operator<` / `operator==`,
+ *     model 泛型重放时 `a < b`/`a == b` 自动分发(编译期静态分派)。
  *
  * 命名仿 STL 加 `stl_` 前缀避免冲突。方法 `model (T)` 泛型函数、显式实例化调用
  * `stl_sort(int)(arr, n)`; 与容器方法同款(无对象方法糖)。
@@ -62,6 +62,43 @@ model (T) void stl_minmax(T *a, int n, T *lo, T *hi) {
     }
     if (lo) *lo = mn;
     if (hi) *hi = mx;
+}
+
+/* ---- 性能路径: 快排(递归, 原地, operator<) + 有序数组二分 ---- */
+
+/* 快速排序 [a[lo..hi]] 原地; i/j 双指针分治, 元素 operator< 比较。
+ * (model 泛型自递归同一符号, 与"跨泛型互调"不同; 若后端不支持自递归见测试) */
+model (T) void stl_qsort(T *a, int lo, int hi) {
+    if (lo >= hi) return;
+    T p = a[(lo + hi) / 2];
+    int i = lo, j = hi;
+    while (i <= j) {
+        while (a[i] < p) i++;
+        while (p < a[j]) j--;
+        if (i <= j) { T t = a[i]; a[i] = a[j]; a[j] = t; i++; j--; }
+    }
+    stl_qsort(a, lo, j);
+    stl_qsort(a, i, hi);
+}
+
+/* 下界: 返回首个 <key 为假的元素指针(即 >= key 的第一个); 全大于则 a+n */
+model (T) T *stl_lower_bound(T *a, int n, T key) {
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int m = (lo + hi) / 2;
+        if (a[m] < key) lo = m + 1; else hi = m;
+    }
+    return a + lo;
+}
+/* 二分查找: 返回指向 key 的指针, 否则返回 a+n(未找到) */
+model (T) T *stl_binary_search(T *a, int n, T key) {
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int m = (lo + hi) / 2;
+        if (a[m] == key) return a + m;
+        if (a[m] < key) lo = m + 1; else hi = m;
+    }
+    return a + n;
 }
 
 #endif /* STL_ALGORITHM_H */
