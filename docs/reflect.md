@@ -1,6 +1,6 @@
 # 结构体反射 (struct reflection) 设计方案
 
-> 状态: 2026-08-23 设计 → **P0 已实现并回归 (t051, 51/51)**. ABI 以 lib/tcc-reflect.h
+> 状态: 2026-08-23 设计 → **P0 已实现并回归 (t051, 套件 79/79)**. ABI 以 lib/tcc-reflect.h
 >       与 tccgen.c 的 refl_emit 为准.
 > 依据: 「反射器是否契合 TCC 单遍哲学」讨论——结论: 反射是少有的、**天然单遍友好**
 >       的编译器能力, 推荐在通用 comptime 之前立项 (comptime 需解释器, 撞哲学)。

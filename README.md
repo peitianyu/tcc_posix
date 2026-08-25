@@ -32,11 +32,13 @@ build/tcc-win.exe -platform=linux examples/hello.c  # Linux ELF
 ./test.sh -linux       # 追加 Linux (WSL) 测试
 ```
 
-当前 **51/51 通过** (test.sh, Windows tcc 自编译运行)：stdio/malloc/mmap/文件/目录/
+当前 **79/79 通过** (test.sh, Windows tcc 自编译运行)：stdio/malloc/mmap/文件/目录/
 时间/宽字符/信号/tmp 映射、pthread 全套、线程压力、`-run`(真阻塞 futex)、ctype/
 setjmp/regex/search/fenv/multibyte/crypt/prng、语言扩展 defer/model(含常量参)/operator/
-reflect/SIMD、cpu-prof、及系统型回归 t033-t045(socket/process/select/termios/dlfcn/
-timer/mq/ipc/aio…)。完整矩阵见 [docs/system-modules.md](docs/system-modules.md)。
+reflect/SIMD、ucontext 协程 (t060/t061)、STL 容器/算法/迭代器 (vector/list/string/
+map/set/deque/unordered/heap, t062-t079)、cpu-prof、及系统型回归 t033-t045
+(socket/process/select/termios/dlfcn/timer/mq/ipc/aio…)。完整矩阵见
+[docs/system-modules.md](docs/system-modules.md)。
 
 **扩展语法 clang 闭环** (desugar.ps1)：`--emit-c` 脱糖产物交 WSL clang -O3 编译运行,
 与 tcc -run 输出逐字节比对 —— **27 通过 / 0 失败**(t046_simd 已随 SIMD 标准交集化
@@ -71,7 +73,9 @@ reflect 脱糖/STL 容器与抽象迭代器。
 | 系统模块 | socket/process/statfs/pwdgrp/select/termios/dlfcn/timer/mq/ipc/aio | system-modules.md |
 | CPU 周期插桩 | `rdtsc` 插桩,总周期/次数/avg 归因到函数 | cpu-prof.md |
 | 语言扩展 | defer / model 泛型 / operator / `__builtin_reflect` | features §4, reflect.md |
-| SIMD | `__m128` 家族 + `_mm_*` SSE 标准 intrinsic 交集(x86_64-simd 模块) | features §4.3 |
+| 泛型方法糖 | `obj.method(args)` → 静态分派 (struct 方法/迭代器) | method-call.md |
+| STL | vector/list/string/map/set/deque/unordered/heap + 算法/迭代器 | stl.md |
+| SIMD | `__m128` 家族 + `_mm_*` SSE 标准 intrinsic 交集(x86_64-simd 模块) | features §4.3, simd-standard.md |
 | 脱糖输出 | `--emit-c` 标准 C → clang/LLVM 正式产物(≈37×) | desugar.md, desugar-perf.md |
 | `@listfile` | `tcc @build.txt` 包管理 + glob + `%if` 编译选择 | listfile.md |
 
@@ -108,6 +112,9 @@ const struct __refl *r = __builtin_reflect(struct Vec3);
 | [memory-governance.md](docs/memory-governance.md) | 内存 5 层治理 / `-b -bt` 捕获清单 / 编程规约 |
 | [desugar.md](docs/desugar.md) | `--emit-c` 脱糖管线设计 + 规则表 + Roadmap |
 | [desugar-perf.md](docs/desugar-perf.md) | tcc vs clang -O3 性能对照 (≈37×) |
+| [simd-standard.md](docs/simd-standard.md) | SIMD 标准 intrinsic 单模型方案 + M2 收敛记录 |
+| [stl.md](docs/stl.md) | STL 容器/算法/迭代器实现与决策 |
+| [method-call.md](docs/method-call.md) | 泛型方法糖 (`obj.method(args)`) 设计 |
 | [reflect.md](docs/reflect.md) | `__builtin_reflect` 设计 |
 | [cpu-prof.md](docs/cpu-prof.md) | rdtsc 周期插桩设计 |
 | [listfile.md](docs/listfile.md) | `@build.txt` 编译描述 |
