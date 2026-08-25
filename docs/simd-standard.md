@@ -117,6 +117,45 @@ typedef __m128i v4i, v8h, v16b;
 ## 7. 里程碑
 
 - M0：simd.h 迁 lib + 入 git + desugar.ps1 INC 指向（1 次 commit，可先行）。
-- M1：内核 `VT_VECTOR` + `__m128` 家族类型 + `type_size`/对齐（tcc 可编译 `__m128`）。
+- M1：内核 `VT_VECTOR` + `__m128` 家族类型 + `type_size`/对齐（tcc 可编译 `__m128`）。✅ 已落地。
 - M2：`simd_vtype`/`simd_vector_kind`/`gen_op` 改认 + 内建改名 + t046 迁标准交集。
 - M3：t046 clang 闭环 PASS + 全量回归通过 + 文档更新（simd-standard / desugar §4.6）。
+
+## 8. M2 实证与 "VT_VECTOR 聚合值路径"并入点清单 (2026-08-25)
+
+**实证**：tcc 值模型用 `bt == VT_STRUCT` 判定"聚合/内存型"，VT_VECTOR 未纳入任何一处，
+导致把 VECTOR 值当标量 `gv()` 压寄存器 → `src/x86_64-gen.c load():558` 断言
+（仅认 INT/LLONG/PTR/FUNC）。类型识别层（parse_btype / simd_vtype / simd_vector_kind）
+已通；**卡点在 tcc 聚合值路径的一致性贯穿**。
+
+**核心判断**：tcc 对聚合值（struct）本就走"按 `type_size` memcpy / 地址"而非寄存器；
+VECTOR 的 `type_size` 已返回 16，故**让 VT_VECTOR 复用 struct 聚合路径**（扩展
+`bt==VT_STRUCT` → `bt==VT_STRUCT || bt==VT_VECTOR`）即可绕开 load 寄存器化，指令发射
+（simd_emit_*）可整体复用不动。
+
+**关键约束 / 风险**：VECTOR 的 `ref` 是 `g_simd_tag` 伪指针（非真 struct 布局符号），
+凡"结构布局解引用 / 成员访问 / 数组元素步进 / offsetof-field"路径**绝不能**含 VECTOR，
+只能落入"纯 size 搬运 / 地址化 / 整体拷贝"路径。
+
+### 需扩展 `bt==VT_STRUCT`（并入 VT_VECTOR）的聚合路径点（tccgen.c 为主）
+
+| 文件:行(近似) | 上下文 | 处理方式 |
+|---|---|---|
+| tccgen.c:1912,7220,7457 等 `is_float(...)` 前 | 值类型分流 | 新增 `IS_AGGREGATE(t)=STRUCT\|VECTOR`，VECTOR 走地址/搬运 |
+| tccgen.c `gen_assign` / 聚合赋值 | 大类型赋值 → `memcpy` | 并入 VECTOR（按 size=16） |
+| tccgen.c 函数实参 by-value `push` | 结构按值压栈 | VECTOR 同样 16B 压栈 |
+| tccgen.c `ret_nregs` / 返回值 | 结构返回 | VECTOR 走聚合返回路径 |
+| tccgen.c 初始化器 / 声明 `has_init` | 结构初始化 | VECTOR 16B 搬运 |
+| x86_64-gen.c `load()`:522-533 | VT_STRUCT 转小标量 | **勿并入**；VECTOR 大类型不得进寄存器，走地址 |
+| x86_64-gen.c `store`/`move` 聚合 | 16B 搬运 | 并入 VECTOR |
+
+**前提验证**：任意改动前先确认 `type_size(VECTOR)==16` 且搬运路径只按 size（不查 ref
+布局）；用 `simd_t.c`（`_mm_load_ps` + `a*b` + `_mm_store_ps`）作最小回归；通过后再扩 t046。
+
+### 已完成的 M2 前半（工作区已 stash，专项可 restore 续用）
+- `x86_64-simd.c`：`simd_vtype` 改构造 `VT_VECTOR`(ref=g_simd_tag[kind])；`simd_vector_kind`
+  按 `VT_VECTOR+ref` 识别；新增 `simd_kind_ref()`。
+- `tccgen.c parse_btype`：`__m128/__m128d/__m128i` 设 `ref=simd_kind_ref(f/d/i)`。
+- `lib/simd.h`：单模式（tcc 免 immintrin，clang include immintrin；`v4f/v2d/v4i/v8h/v16b`
+  = `__m128` 别名）。
+- `tcc.h`：声明 `simd_kind_ref`。
