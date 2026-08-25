@@ -49,8 +49,8 @@ foreach ($s in $Files) {
     $ccout  = Join-Path $OUT "$b.tcc.out"
     $exe    = Join-Path $OUT "$b.clang"
 
-    # 1) host tcc emit-c
-    & $EMITT --emit-c $src -o $desc @INC 2>$cerr
+    # 1) host tcc emit-c (脱糖专用宏: simd.h 走 clang 侧 __m128, 产物=标准C+immintrin)
+    & $EMITT --emit-c $src -o $desc @INC -D__TCC_DESUGAR__ 2>$cerr
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $desc)) {
         $FAIL++; Write-Output "EMIT-FAIL $b"; Get-Content $cerr -ErrorAction SilentlyContinue | Select-Object -First 10; continue
     }

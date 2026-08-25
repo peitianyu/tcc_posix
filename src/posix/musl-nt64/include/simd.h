@@ -12,7 +12,10 @@
 #ifndef TCC_POSIX_SIMD_H
 #define TCC_POSIX_SIMD_H
 
-#if defined(__GNUC__) && !defined(__TINYC__)
+/* __TCC_DESUGAR__: --emit-c 脱糖 (只出产物, 不运行) 时走 clang 侧 __m128 家族,
+ * 使产物是标准 C + immintrin.h 原生 intrinsic, gcc/clang 可直接编译运行;
+ * TCC -run 走下方 struct 分支(内建 _mm_* 打包 SSE)。 */
+#if defined(__TCC_DESUGAR__) || (defined(__GNUC__) && !defined(__TINYC__))
 #include <immintrin.h>
 typedef __m128  v4f;
 typedef __m128d v2d;
