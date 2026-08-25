@@ -38,8 +38,11 @@ rm -rf "$BASE/include" && mkdir -p "$BASE/include"
 cp -r "$BASE/src/posix/musl-1.1.11/include/"* "$BASE/include/"
 cp -r "$BASE/build/linux-musl-inc/bits" "$BASE/include/"
 cp "$BASE/build/linux-musl-inc/version.h" "$BASE/include/"
-# Windows musl libc (install.sh 消费; 后端/内核库已在 build_musl.sh 并入 libc.a,
-# Linux libc 由 build_musl_linux.sh 直用 build/linux-musl-obj/libc.a, 均无需再固化)
+# Windows musl libc (install.sh 消费): 固化 build_musl.sh 产物 → lib/libc-win.a
+# (2026-08-25 补: 此前 build.sh 注释误称"无需固化", 改 musl 源后 install.sh 仍
+# 链接旧 libc-win.a — 断点)。Linux libc 由 build_musl_linux.sh 直用
+# build/linux-musl-obj/libc.a, 无需固化。
+cp "$BASE/build/win-musl-obj/libc.a" "$BASE/lib/libc-win.a"
 
 echo "=== 完成 ==="
 ls -la "$BASE/lib/"*.a | awk '{print "  ", $5, $9}'

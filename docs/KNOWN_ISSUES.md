@@ -20,16 +20,11 @@
 - **`__builtin_ia32_rdtsc` 不受支持** → cpu-prof 退化为内联汇编 `rdtsc`/`lfence`。
   **归属**: docs/cpu-prof.md。
 
-- **`abort()` / `assert` 不终止进程 (Windows nt64 musl)**: nt64 `abort.c` 用
-  `raise(SIGABRT)`, 但本端口的 raise 对 SIGABRT 不派发, 落到 `for(;;)` **死循环挂死**
-  (不返回, 不产生 SIGABRT 信号)。故 `assert(false)` 只打印 "Assertion failed: ..."
-  到 stderr 后挂死, 无法用 `waitpid`/`WIFSIGNALED` 判信号。
-  **影响**: STL 内在检测层的 `SLT_ASSERT` 在越界时打印但**不终止**; 依赖信号
-  (如 tcc -b bcheck 的越界上报路径) 在此环境不可据此判定进程终止。
-  **规避**: 越界判据改用 `__assert_fail` 的 stderr 输出, 或在产品代码提供自收敛
-  的 `SIGABRT` 处理器; STL 用例 (t067) 以 allocator 自检 (epoch/outstanding) 作
-  确定性判据, 不依赖 abort。
-  **归属**: docs/stl.md §4.5-①, src/posix/musl-nt64/src/exit/abort.c。
+- **`abort()` / `assert` 不终止进程 (已修复 2026-08-25)**: nt64 `abort.c` 原用
+  `raise(SIGABRT)` 后 `for(;;)` 挂死 (本端口 raise 不派发默认动作)。已改为
+  `_Exit(134)` (128+SIGABRT): 有处理器则先调用 (longjmp 可拦截), 否则以
+  SIGABRT 语义终止, `waitpid`/退出码可判定。assert 同样受益 (rc=134)。
+  **归属**: src/posix/musl-nt64/src/exit/abort.c。
 
 ## 2. POSIX 子系统缺失 / 存根
 

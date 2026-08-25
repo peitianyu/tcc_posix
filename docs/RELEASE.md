@@ -3,6 +3,18 @@
 > 里程碑级变更摘要。README 只做概览。按时间序, 最新在上。
 > 完整逐提交历史用 `git log --oneline`。
 
+## 2026-08-25 — abort/assert 修复 + 构建链路断点修复
+
+- **abort()/assert 挂死 → 正确终止** (KNOWN_ISSUES §1): nt64 abort.c 原
+  `raise(SIGABRT)` 后 `for(;;)` (端口 raise 不派发默认动作) — 断言失败挂死无法
+  判退出。改为 `_Exit(134)` (128+SIGABRT): 有处理器先调 (longjmp 可拦截),
+  否则按 SIGABRT 语义终止。abort/assert 退出码现为 134 (实测)。
+- **构建链路断点修复**: build_musl.sh 只产出 build/win-musl-obj/libc.a, 但
+  install.sh 消费 lib/libc-win.a — build.sh [4/4] 注释误称"无需固化", 改 musl
+  源后 install 仍链接旧库 (abort 修复一度不生效即因此)。补 `cp
+  win-musl-obj/libc.a → lib/libc-win.a`。
+- 回归: test.sh **79/79** (win), **158/158** (linux)。
+
 ## 2026-08-25 — 脱糖 clang 全量闭环 32/32 (WSL clang 实测)
 
 - **desugar.ps1 全量扩展集 (32 测试) 交 WSL clang 10 -O3 编译运行, 与 tcc -run
