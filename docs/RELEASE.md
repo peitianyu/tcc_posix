@@ -3,6 +3,34 @@
 > 里程碑级变更摘要。README 只做概览。按时间序, 最新在上。
 > 完整逐提交历史用 `git log --oneline`。
 
+## 2026-08-25 — 反射 v2 + emit-c 独立库导出 (TODO P1 两项关闭)
+
+- **反射 v2** (`__builtin_reflect`, t051): `__refl_field` ABI 40B→48B
+  (`bit_off`/`bit_size` 插于 align 与 sub 之间)。命名 bitfield 入表 (存储单元偏移
+  + 位宽), 匿名成员跳过; FAM/VLA (`T a[]`) size=0/count=0; **嵌套递归链**
+  (指针→struct 字段链 sub, 父表先分配 + 提前缓存破环, 自引用 L.next→L / 互引用
+  A↔B 均验证)。脱糖侧同步 (位域跳过 + __TCC_DESUGAR__ 保护, FAM/递归链支持,
+  前向声明破互引用, used 传播仅发被引用链)。
+- **emit-c 正式产物质量门禁**: desugar.ps1 加 `-Wall -Werror`; 新增
+  script/lib-export.sh 独立库导出验收 (clang `-O2 -flto -fvisibility=hidden`
+  编库 → nm 断言导出符号集 = 用户 API + operator 定义, model 实例/反射表全
+  static → 消费端 -flto 直链运行数字一致)。修复: STL_STATIC 无条件
+  `__attribute__((unused))` (tcc 不定义 __GNUC__ 曾致脱糖产物缺保护); 无 main 库
+  EOF 回放顺序 (反射表须在用户 struct 定义后 + 前向声明)。
+- **编译器自举修正**: build.sh 的 `[ -f ]` 短路使 build/tcc-win.exe 长期为陈旧
+  二进制; 按 BOOT_TCC 配方重建 (非 MUSL 形态, -run 正常; MUSL 形态 -run 坏已确认)。
+- 套件: win **81/81**, linux **161/161**, -run **158/158**, desugar **32/32**
+  (-Wall -Werror), lib-export **3/3**。
+
+## 2026-08-25 — cpu-prof 报告 `-bt` 符号渲染双路径覆盖 (t049)
+
+- t049 内置双形态自断言: `-bt` (编译+链接均带) → 报告渲染 `func@file:line`;
+  独立构建 → 回退裸地址 @0x。test.sh 增 `-bt` 变体 (win 走 tcc 自带 bt-exe.o;
+  linux 手动链接补 bt-exe/bt-log/btstub-lnx.o, 链接带 -bt 才保留 .stab 调试节)。
+- 纠正 3 处过期注释 (cpu-prof.c/h、tcc-own.h): "PE 后端无弱符号绑定" 不成立
+  (中间对象是 ELF, 弱引用可被强定义覆盖)。
+- 套件: win **81/81** (含 t049 -bt), linux **161/161**, -run **158/158**。
+
 ## 2026-08-25 — `-b` 边界检查修复 (bcheck.o 入主构建链)
 
 - **断点**: script/build_bt.sh 编译 bcheck.o/bt-exe.o/bt-log.o 但不在主构建链

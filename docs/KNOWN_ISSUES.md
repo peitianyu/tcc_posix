@@ -96,8 +96,11 @@
   必须是类型 (非类型模板参数不支持)。
   **归属**: docs/features.md §4.2。
 
-- **反射 `__builtin_reflect`**: 仅 struct/union 平铺字段 + 标量/枚举/指针 kind;
-  bitfield/VLA/嵌套递归链为 v2。
+- **反射 `__builtin_reflect` (v2 已完成)**: struct/union 平铺字段 + 标量/枚举/指针
+  kind + **bitfield** (bit_off/bit_size) + **FAM/VLA** (size=0/count=0) + **嵌套递归链**
+  (指针→struct sub, 自/互引用破环)。剩余边界: 匿名成员跳过 (无名不入表); 函数指针
+  字段 kind=RE_OTHER; **脱糖产物不含位域字段** (标准 C 禁止 offsetof 位域, t051
+  位域断言经 __TCC_DESUGAR__ 保护)。
   **归属**: docs/reflect.md。
 
 - **脱糖 `--emit-c`**: `#include_next` 顺序敏感不保留; 需 `-DCONFIG_TCC_PREDEFS=1`
