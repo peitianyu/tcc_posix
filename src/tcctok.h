@@ -176,6 +176,10 @@
      DEF(TOK_builtin_expect, "__builtin_expect")
      DEF(TOK_builtin_unreachable, "__builtin_unreachable")
      DEF(TOK_builtin_reflect, "__builtin_reflect")
+     /* 标准 SIMD 向量类型 (M1: 单模型 __m128 家族, 见 docs/simd-standard.md) */
+     DEF(TOK___m128, "__m128")
+     DEF(TOK___m128d, "__m128d")
+     DEF(TOK___m128i, "__m128i")
      /* SIMD (B1: 内建函数发射打包 SSE 指令) */
      DEF(TOK_mm_setzero_ps, "_mm_setzero_ps")
      DEF(TOK_mm_load_ps, "_mm_load_ps")

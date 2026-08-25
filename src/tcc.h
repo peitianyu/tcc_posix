@@ -1072,6 +1072,8 @@ struct filespec {
 #define VT_BOOL            11  /* ISOC99 boolean type */
 #define VT_QLONG           13  /* 128-bit integer. Only used for x86-64 ABI */
 #define VT_QFLOAT          14  /* 128-bit float. Only used for x86-64 ABI */
+#define VT_VECTOR          12  /* SIMD 向量类型 (__m128/__m128d/__m128i, 16B 对齐16);
+                                    与 clang 标准 intrinsic 单模型, 见 docs/simd-standard.md */
 
 #define VT_UNSIGNED    0x0010  /* unsigned type */
 #define VT_DEFSIGN     0x0020  /* explicitly signed or unsigned */

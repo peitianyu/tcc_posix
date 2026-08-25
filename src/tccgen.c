@@ -3777,6 +3777,9 @@ ST_FUNC int type_size(CType *type, int *a)
     } else if (bt == VT_SHORT) {
         *a = 2;
         return 2;
+    } else if (bt == VT_VECTOR) {
+        *a = 16;
+        return 16;
     } else if (bt == VT_QLONG || bt == VT_QFLOAT) {
         *a = 8;
         return 16;
@@ -5774,6 +5777,17 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
                 u = VT_DOUBLE;
                 goto basic_type;
             }
+            next();
+            break;
+        case TOK___m128:
+        case TOK___m128d:
+        case TOK___m128i:
+            /* 标准 SIMD 向量: VT_VECTOR, 16B/align16 (M1, docs/simd-standard.md);
+             * M2 再以 ref 内建符号细分 f/d/i. */
+            u = VT_VECTOR;
+            t = (t & ~(VT_BTYPE|VT_LONG)) | u;
+            type->ref = NULL;
+            typespec_found = 1;
             next();
             break;
         case TOK_ENUM:
