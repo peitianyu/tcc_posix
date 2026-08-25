@@ -4948,16 +4948,23 @@ static void model_decl(void)
                 toks = tcc_realloc(toks, (n + 1) * sizeof(int));
                 toks[n++] = t;
             }
-            for (i = 0; i < n - 1; i++) {
-                int j;
-                if (toks[i + 1] != ';' && toks[i + 1] != ',' &&
-                    toks[i + 1] != ':' && toks[i + 1] != '[' &&
-                    toks[i + 1] != '=')
-                    continue;
-                for (j = 0; j < md->nparams; j++) {
-                    if (toks[i] == md->params[j])
-                        tcc_error("type parameter '%s' conflicts with member name",
-                                  get_tok_str(md->params[j], NULL));
+            {
+                int depth = 0;
+                for (i = 0; i < n - 1; i++) {
+                    int j;
+                    if (toks[i] == '(') { depth++; continue; }
+                    if (toks[i] == ')' && depth) { depth--; continue; }
+                    if (depth > 0)
+                        continue;   /* 括号内 = 嵌套实例化实参 (逗号不判冲突) */
+                    if (toks[i + 1] != ';' && toks[i + 1] != ',' &&
+                        toks[i + 1] != ':' && toks[i + 1] != '[' &&
+                        toks[i + 1] != '=')
+                        continue;
+                    for (j = 0; j < md->nparams; j++) {
+                        if (toks[i] == md->params[j])
+                            tcc_error("type parameter '%s' conflicts with member name",
+                                      get_tok_str(md->params[j], NULL));
+                    }
                 }
             }
             tcc_free(toks);
@@ -5118,10 +5125,13 @@ static void model_instantiate(CType *type, ModelDef *md)
                   get_tok_str(md->name, NULL));
     /* 常量参数归一化求值 (2+2 -> 3, 等价写法共享缓存) */
     model_normalize_const_args(md, args);
-    /* 缓存查重: 合成名已定义过 → 直接复用 */
+    /* 缓存查重: 合成名已定义过 → 直接复用。c!=-1 是完整定义; c==-1 是
+     * 实例化中的占位 (泛型递归 `struct Node(T) { T v; struct Node(T) *next; }`
+     * 自引用字段触发递归实例化时命中占位, 直接取符号即可, 外层 struct_decl
+     * 完成后占位被填充 — 2026-08-25 泛型递归修复). */
     synth = model_synth_name(md, args);
     s = struct_find(synth);
-    if (s && (s->type.t & ~VT_BTYPE) == (md->kind & ~VT_BTYPE) && s->c != -1) {
+    if (s && (s->type.t & ~VT_BTYPE) == (md->kind & ~VT_BTYPE)) {
         type->t = s->type.t;
         type->ref = s;
         tcc_free(args);
@@ -5801,10 +5811,31 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
             type->ref = type1.ref;
             goto basic_type1;
         case TOK_STRUCT:
-            struct_decl(&type1, VT_STRUCT);
-            goto basic_type2;
         case TOK_UNION:
-            struct_decl(&type1, VT_UNION);
+            {
+                int kw = tok;
+                int n2 = 0;
+                next();   /* 跳过 struct/union */
+                if (tok >= TOK_IDENT && model_find(tok)
+                    && model_find(tok)->kind != VT_FUNC) {
+                    n2 = tok;
+                    next();
+                    if (tok == '(') {
+                        /* `struct Node(T)` 模板自引用 (2026-08-25 泛型递归):
+                         * 实例化产物本身就是 struct/union, 关键字可忽略;
+                         * 走与裸 `Node(T)` 相同的实例化路径. */
+                        model_instantiate(&type1, model_find(n2));
+                        u = type1.t;
+                        type->ref = type1.ref;
+                        goto basic_type2;
+                    }
+                }
+                /* 常规 struct/union: 退回已消费 token, 走 struct_decl */
+                if (n2)
+                    unget_tok(n2);
+                unget_tok(kw);
+            }
+            struct_decl(&type1, (tok == TOK_STRUCT) ? VT_STRUCT : VT_UNION);
             goto basic_type2;
 
             /* type modifiers */

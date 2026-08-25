@@ -5220,7 +5220,10 @@ static int dg_model_av_from_words(TCCState *s1, char (*w)[128], int n,
 static void dg_model_expand_src(TCCState *s1, const DgModelDef *m, char av[][64],
                                 int bl, int el, CString *out)
 {
-    char w[DG_TOKENCAP_N][128], w2[DG_TOKENCAP_N][128];
+    /* w/w2 走堆分配: 2048×128×2 = 512KB 栈帧, 嵌套实例化 (Grid→Mat) 两层即击穿
+     * 1MB 默认栈 (t032b 单层未触发; 2026-08-25 嵌套实例化脱糖栈溢出修复). */
+    char (*w)[128] = tcc_malloc((size_t)DG_TOKENCAP_N * 128);
+    char (*w2)[128] = tcc_malloc((size_t)DG_TOKENCAP_N * 128);
     int n = 0, k, i, n2 = 0, pi;
     /* 直接迭代本定义持久 token 序列 dt[bl,el), 免 dg_tok_join 压串 + dg_splitw 回切 */
     for (k = bl; k < el && n < DG_TOKENCAP_N; k++) {
@@ -5253,6 +5256,17 @@ static void dg_model_expand_src(TCCState *s1, const DgModelDef *m, char av[][64]
     }
     /* phase2: 嵌套模型实例 -> tag/合成名 + 发射其 typedef */
     for (i = 0; i < n2;) {
+        /* `struct Node(T)` / `union Val(T)` 自引用: struct/union 关键字后紧跟
+         * 嵌套模型实例时吞掉关键字 —— 实例展开自带 `struct <synth>` 前缀,
+         * 否则输出 `struct struct Node_int` (2026-08-25 泛型递归脱糖). */
+        if ((!strcmp(w2[i], "struct") || !strcmp(w2[i], "union")) &&
+            i + 2 < n2) {
+            DgModelDef *kn = dg_model_find(w2[i + 1]);
+            if (kn && kn->kind != 'F' && !strcmp(w2[i + 2], "(")) {
+                i++;
+                continue;
+            }
+        }
         /* 泛型体自递归: 当前函数泛型自身名后跟 '(' → 裸调用绑定到本实例合成名.
          * (如 `stl_qsort(a,lo,j)` → `stl_qsort_<T>(a,lo,j)` 以匹配已落地定义) */
         if (dg_fdef_name && !strcmp(w2[i], dg_fdef_name) &&
@@ -5290,6 +5304,8 @@ static void dg_model_expand_src(TCCState *s1, const DgModelDef *m, char av[][64]
         cstr_cat(out, w2[i], strlen(w2[i]));
         i++;
     }
+    tcc_free(w);
+    tcc_free(w2);
 }
 
 static void dg_model_expand(TCCState *s1, const DgModelDef *m,

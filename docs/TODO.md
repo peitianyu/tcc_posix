@@ -39,8 +39,20 @@
         `__start_stab/__stop_stab`)。
       - **纠正 3 处过期注释** (cpu-prof.c/h、tcc-own.h): "PE 后端无弱符号绑定"
         不成立 —— 中间对象是 ELF, PE/ELF 链接共用 tccelf.c 解析, 弱引用可被强定义覆盖。
-- [ ] **function/model 泛型脱糖稳定性收敛** — 多类型参数 + 嵌套实例化 + 常量参数
-      组合用例扩充，确保实例化点展开与标准 C 编译在所有边界下一致。
+- [x] **function/model 泛型脱糖稳定性收敛** — 2026-08-25 完成: 新增
+      tests/t032c_model_edge.c 覆盖多类型参数 (Pair2/Tri + 嵌套实参)、嵌套实例化
+      2/3 层 (Array(Box(int))/Wrap(Array(Box(int))))、泛型递归 (struct 关键字/裸名/
+      双自引用字段)、常量参数组合 (Grid→Mat 常量传嵌套、2+2 归一化)、函数泛型嵌套
+      实例类型、缓存一致性。期间修复 4 处边界缺陷 (tcc 编译期 + 脱糖):
+      - **泛型递归自引用**: `struct Node(T) { T v; struct Node(T) *next; }` 实例化时
+        字段里的 `Node(int)` 无限重实例化 → 缓存查重放宽到实例化中占位 (c==-1
+        亦命中); TOK_STRUCT/UNION 分支识别 `struct Node(` 走 model_instantiate。
+      - **嵌套实例化实参逗号误判**: 定义期"类型参数与成员名冲突"检查无括号深度,
+        Grid 的 `Mat(T, N, 2) row` 里 T 后逗号被当成员分隔 → 括号内跳过检查。
+      - **脱糖双 struct 关键字**: `struct Node(T)` 展开为 `struct struct Node_int`
+        → phase2 展开遇 struct/union 后跟嵌套实例时吞掉关键字。
+      - **脱糖嵌套实例化栈溢出**: expand_src 的 w/w2 各 256KB 栈数组 ×2 层嵌套
+        (Grid→Mat) 击穿 1MB 栈 → 改堆分配 (基线即崩, 非本次引入)。
 - [x] **反射 v2** — bitfield / VLA / 嵌套递归链字段 kind — 2026-08-25 完成:
       __refl_field 扩到 48B (bit_off/bit_size 插于 align 与 sub 间); 命名 bitfield
       入表 (存储单元偏移 + 位宽), 匿名成员跳过; FAM/VLA (`T a[]`) size=0/count=0;
