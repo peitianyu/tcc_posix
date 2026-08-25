@@ -20,12 +20,12 @@
 #include <stdio.h>
 
 /* 函数用 `static`（非 inline）: tcc 会生成符号, model 泛型函数体重放调用时可解析
- * (static inline 在 tcc 泛型重放下会 unresolved); clang/gcc 用 unused 抑制告警。 */
-#if defined(__GNUC__) || defined(__clang__)
-# define STL_STATIC static __attribute__((unused))
-#else
-# define STL_STATIC static
-#endif
+ * (static inline 在 tcc 泛型重放下会 unresolved); 附 __attribute__((unused)) 抑制
+ * clang/gcc 对未用函数的告警。tcc 亦支持该 attribute (tcctok.h TOK_ATTRIBUTE2),
+ * 故不再按 __GNUC__ 分支 —— 脱糖产物交 clang -Wall -Werror 编正式库时必须保真
+ * (2026-08-25: tcc 不定义 __GNUC__ 曾致 STL_STATIC 退化为裸 static, 产物缺 unused
+ * 保护, -Wunused-function 告警)。 */
+#define STL_STATIC static __attribute__((unused))
 
 /* 内存检测开关: 默认调试期开(STL_CHECKS)。发布版 -DSTL_CHECKS=0 或 NDEBUG 关闭 →
  * 全走 assert 裁剪, 零额外开销。断言经标准 <assert.h>: TCC 原生与 clang 脱糖产物通用。 */

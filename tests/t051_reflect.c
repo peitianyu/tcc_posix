@@ -17,6 +17,14 @@ enum Kind { K_A = 1, K_B = 2 };
 struct Ptr { int *p; int n; };
 struct En { enum Kind k; int x; };
 
+/* v2: bitfield / FAM / 递归链 */
+struct Bf { unsigned a : 3; unsigned b : 5; unsigned c : 24; int d; };
+struct Flex { int n; char data[]; };
+struct FlexS { int n; struct Vec3 arr[]; };
+struct L { int v; struct L *next; };
+struct A { struct B *b; int x; };
+struct B { struct A *a; int y; };
+
 /* P2: 通用按反射递归深拷贝 (嵌套经 sub; 数组元素为 struct 时逐元素递归) */
 static void refl_copy(char *dst, const char *src, const struct __refl *r)
 {
@@ -138,6 +146,64 @@ int main(void)
         if (fp->kind != RE_PTR || fp->size != 8 || fp->align != 8 || fp->sub != NULL) { puts("FAIL: Ptr.p kind"); fail = 1; }
         if (fe->kind != RE_ENUM || fe->size != 4 || fe->sub != NULL) { puts("FAIL: En.k enum"); fail = 1; }
         if (((const struct __refl *)__builtin_reflect(enum Kind))->kind != RE_ENUM) { puts("FAIL: Kind enum kind"); fail = 1; }
+    }
+
+    /* v2: bitfield 字段入表 (bit_off/bit_size) — 编译器侧; 脱糖产物 token 级
+     * 拿不到存储单元偏移 (标准 C 禁止 offsetof 位域), 位域字段跳过 (见
+     * docs/reflect.md §6), 故此处经 __TCC_DESUGAR__ 保护. */
+#ifndef __TCC_DESUGAR__
+    {
+        const struct __refl *bf = (const struct __refl *)__builtin_reflect(struct Bf);
+        const struct __refl_field *f = bf->fields;
+        if (bf->nfield != 4) { printf("FAIL: Bf nfield=%u\n", bf->nfield); fail = 1; }
+        /* a: 3 位 @0 */
+        if (strcmp(f[0].name, "a") || f[0].kind != RE_INT || f[0].bit_size != 3
+            || f[0].bit_off != 0 || f[0].size != 4
+            || f[0].offset != offsetof(struct Bf, a)) { puts("FAIL: Bf.a bitfield"); fail = 1; }
+        /* b: 5 位 @3 (同一存储单元) */
+        if (strcmp(f[1].name, "b") || f[1].bit_size != 5 || f[1].bit_off != 3
+            || f[1].offset != offsetof(struct Bf, b)) { puts("FAIL: Bf.b bitfield"); fail = 1; }
+        /* c: 24 位 @8 (跨存储单元, 下一 unsigned) */
+        if (strcmp(f[2].name, "c") || f[2].bit_size != 24 || f[2].bit_off != 8
+            || f[2].offset != offsetof(struct Bf, c)) { puts("FAIL: Bf.c bitfield"); fail = 1; }
+        /* d: 非位域 → bit_size 0 */
+        if (strcmp(f[3].name, "d") || f[3].bit_size != 0 || f[3].bit_off != 0
+            || f[3].offset != offsetof(struct Bf, d)) { puts("FAIL: Bf.d plain"); fail = 1; }
+    }
+#endif
+
+    /* v2: FAM/VLA (不完整数组): size=0, count=0, offset=struct 大小 */
+    {
+        const struct __refl *fx = (const struct __refl *)__builtin_reflect(struct Flex);
+        const struct __refl_field *fd = &fx->fields[1];
+        if (fx->nfield != 2) { puts("FAIL: Flex nfield"); fail = 1; }
+        if (strcmp(fd->name, "data") || fd->kind != RE_ARRAY || fd->size != 0
+            || fd->count != 0 || fd->offset != sizeof(struct Flex)) { puts("FAIL: Flex.data FAM"); fail = 1; }
+        /* FAM 元素是 struct: sub 仍链接元素子表 */
+        {
+            const struct __refl *fs = (const struct __refl *)__builtin_reflect(struct FlexS);
+            const struct __refl_field *fa2 = &fs->fields[1];
+            if (fa2->size != 0 || fa2->count != 0 || !fa2->sub || fa2->sub != v3) { puts("FAIL: FlexS.arr FAM-sub"); fail = 1; }
+        }
+    }
+
+    /* v2: 嵌套递归链 — 自引用 (L.next → L 自身表) */
+    {
+        const struct __refl *l = (const struct __refl *)__builtin_reflect(struct L);
+        const struct __refl_field *fn = &l->fields[1];
+        if (strcmp(fn->name, "next") || fn->kind != RE_PTR || !fn->sub) { puts("FAIL: L.next sub"); fail = 1; }
+        if (fn->sub != l) { puts("FAIL: L.next 自引用未指向自身表"); fail = 1; }
+    }
+
+    /* v2: 互引用环 (A.b → B 表, B.a → A 表, 同一地址复用) */
+    {
+        const struct __refl *a = (const struct __refl *)__builtin_reflect(struct A);
+        const struct __refl *b = (const struct __refl *)__builtin_reflect(struct B);
+        const struct __refl_field *ab = &a->fields[0];
+        const struct __refl_field *ba = &b->fields[0];
+        if (!ab->sub || !ba->sub || ab->sub != b || ba->sub != a) { puts("FAIL: A/B 互引用 sub"); fail = 1; }
+        if ((const struct __refl *)__builtin_reflect(struct A) != a
+            || (const struct __refl *)__builtin_reflect(struct B) != b) { puts("FAIL: A/B 缓存复用"); fail = 1; }
     }
 
     if (fail) { puts("FAIL: t051_reflect"); return 1; }

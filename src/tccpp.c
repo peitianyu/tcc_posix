@@ -4828,6 +4828,8 @@ static void dg_model_expand_src(TCCState *s1, const DgModelDef *m, char av[][64]
 static void dg_fdefs_typedefs(TCCState *s1);
 static void dg_fdefs_funcs(TCCState *s1);
 static void dg_reflect_emit(TCCState *s1);
+static void dg_reflect_forward(TCCState *s1);
+static void dg_reflect_mark_used(const char *tag, char kw);
 
 static DgModelDef *dg_model_find(const char *nm)
 {
@@ -6000,6 +6002,7 @@ static void dg_emit_verbatim(TCCState *s1, int from, int to)
                     close = c;
             }
             if (tag[0] && close >= 0) {
+                dg_reflect_mark_used(tag, (char)kw);   /* 标记被引用: 仅发被引用链 */
                 dg_used_reflect = 1;
                 fputs("(&", s1->ppfp);
                 fputs(tag, s1->ppfp);
@@ -6522,7 +6525,8 @@ typedef struct {
 typedef struct {
     char tag[128]; char kw;    /* kw: 'S'/'U'/'E' */
     DgReflectField f[DG_REFLECT_MAXF]; int nf;
-    int emitted;
+    int emitted;    /* 表体已发射 */
+    int used;       /* 被 __builtin_reflect 实际引用 (v2: 仅发被引用链) */
 } DgReflect;
 static DgReflect dg_refl[DG_REFLECT_MAXT];
 
@@ -6533,6 +6537,31 @@ static DgReflect *dg_reflect_find(const char *tag, char kw)
         if (dg_refl[i].kw == kw && !strcmp(dg_refl[i].tag, tag))
             return &dg_refl[i];
     return NULL;
+}
+
+/* __builtin_reflect(T) 改写处回调: 标记 T 被引用 (v2, 仅发被引用链) */
+static void dg_reflect_mark_used(const char *tag, char kw)
+{
+    DgReflect *R = dg_reflect_find(tag, kw);
+    if (R)
+        R->used = 1;
+}
+
+/* used 沿 sub 链传播 (v2): 顶层被 __builtin_reflect 引用的类型, 其 sub 引用
+ * (嵌套值/数组元素/指针所指) 也须发射 (前向声明 + 定义), 否则 A_f 引用未声明的
+ * &B_refl. used==2 表示已传播 (防环). */
+static void dg_reflect_used_prop(DgReflect *R)
+{
+    int i;
+    if (!R || R->used == 2)
+        return;
+    R->used = 2;   /* 已传播 (防环); 2 亦为真, emit 照发 */
+    for (i = 0; i < R->nf; i++)
+        if (R->f[i].sub[0]) {
+            DgReflect *S = dg_reflect_find(R->f[i].sub, 'S');
+            if (S)
+                dg_reflect_used_prop(S);
+        }
 }
 
 /* 类型关键字判断 (struct 定义里区分类型与声明符名) */
@@ -6656,6 +6685,11 @@ static void dg_reflect_collect_line(void)
                         if (k >= sem || dg_buf[k] < TOK_IDENT) break;
                         snprintf(nm, sizeof nm, "%s", dg_txt[k] ? dg_txt[k] : "");
                         k++;
+                        /* 位域 `name : N`: token 级拿不到存储单元偏移 (标准 C 禁止
+                         * offsetof 位域), 整字段组跳过 (与编译器侧含位域的差异,
+                         * t051 位域断言经 __TCC_DESUGAR__ 保护, docs/reflect.md §6). */
+                        while (k < sem && is_space(dg_buf[k])) k++;
+                        if (k < sem && dg_tokchar(k) == ':') { gs = sem + 1; break; }
                         /* 数组 [N] */
                         while (k < sem && is_space(dg_buf[k])) k++;
                         if (k < sem && dg_tokchar(k) == '[') {
@@ -6674,9 +6708,12 @@ static void dg_reflect_collect_line(void)
                                 char esz[192];
                                 F->kind = DGR_ARRAY; F->isarr = 1; F->cnt = cnt;
                                 if (sbt == 1) { snprintf(F->sub, sizeof F->sub, "%s", subtag); }
-                                /* base 为元素类型 */
+                                /* base 为元素类型; FAM (cnt==0, 不完整数组): size=0 */
                                 snprintf(F->ft, sizeof F->ft, "%s", base);
-                                snprintf(esz, sizeof esz, "sizeof(%s)*%du", base, cnt > 0 ? cnt : 1);
+                                if (cnt > 0)
+                                    snprintf(esz, sizeof esz, "sizeof(%s)*%du", base, cnt);
+                                else
+                                    snprintf(esz, sizeof esz, "0u");   /* FAM/VLA: 未知 */
                                 snprintf(F->sz, sizeof F->sz, "%s", esz);
                             } else if (isptr) {
                                 F->kind = DGR_PTR;
@@ -6688,6 +6725,8 @@ static void dg_reflect_collect_line(void)
                                         snprintf(F->ft, sizeof F->ft, "%s*", base);
                                 }
                                 snprintf(F->sz, sizeof F->sz, "sizeof(%s)", F->ft);
+                                if (sbt == 1)   /* 指针→struct: 链接所指 struct 子表 (v2) */
+                                    snprintf(F->sub, sizeof F->sub, "%s", subtag);
                             } else {
                                 F->kind = (sbt == 1) ? DGR_STRUCT :
                                           (sbt == 2) ? DGR_ENUM : dg_refl_kind_tok(base);
@@ -6738,7 +6777,7 @@ static void dg_reflect_emit_one(TCCState *s1, const char *tag, char kw)
                 else
                     strcpy(subx, "0");
                 fprintf(s1->ppfp,
-                        "  { \"%s\", %du, offsetof(%s %s, %s), %s, _Alignof(%s), %s, %du },\n",
+                        "  { \"%s\", %du, offsetof(%s %s, %s), %s, _Alignof(%s), 0u, 0u, %s, %du },\n",
                         F->nm, (unsigned)F->kind, lkw, R->tag, F->nm,
                         F->sz, F->ft, subx, (unsigned)F->cnt);
             }
@@ -6757,10 +6796,37 @@ static void dg_reflect_emit(TCCState *s1)
     int i;
     if (!dg_used_reflect)
         return;
+    /* v2: 先发全部前向声明 (tentative definition) —— 递归链/互引用 (A↔B,
+     * 自引用 L.next→L) 的表体互相引用 &<tag>_refl, 定义须在全部表体之后;
+     * 前向声明对无环情形亦无害 (随后即定义). 仅发被引用链 (used),
+     * 未引用类型 (如位域断言被 __TCC_DESUGAR__ 保护的 Bf) 不落地. */
+    for (i = 0; i < dg_refln; i++)
+        if (dg_refl[i].used)
+            dg_reflect_used_prop(&dg_refl[i]);
+    dg_reflect_forward(s1);
     for (i = 0; i < dg_refln; i++)
         dg_refl[i].emitted = 0;
     for (i = 0; i < dg_refln; i++)
-        dg_reflect_emit_one(s1, dg_refl[i].tag, dg_refl[i].kw);
+        if (dg_refl[i].used)
+            dg_reflect_emit_one(s1, dg_refl[i].tag, dg_refl[i].kw);
+}
+
+/* 反射表前向声明 (独立库/无 main 场景, 2026-08-25): 表定义须在全部用户 struct
+ * 定义之后发射 (offsetof/sizeof 需完整类型), 但用户顶层函数体可能引用 <tag>_refl
+ * —— 在用户内容之前发前向声明 (tentative definition + 末尾定义, C11 合法). */
+static void dg_reflect_forward(TCCState *s1)
+{
+    int i;
+    if (!dg_used_reflect)
+        return;
+    for (i = 0; i < dg_refln; i++) {
+        DgReflect *R = &dg_refl[i];
+        if (!R->used)   /* 仅被引用链 (v2); 未引用类型不发, 防 unused-const */
+            continue;
+        if (R->nf > 0)
+            fprintf(s1->ppfp, "static const __refl_field %s_f[%d];\n", R->tag, R->nf);
+        fprintf(s1->ppfp, "static const struct __refl %s_refl;\n", R->tag);
+    }
 }
 
 /* 一次前向扫描产出语句形状 (DgStmt), 取代 dg_flush 里散落的多个状态机 pass.
@@ -7288,22 +7354,34 @@ static int preprocess_loop(TCCState *s1, int desugar)
          * 依赖的库类型(stl_iter_ops/STL_Arena)已展开可见, 且早于所有用户顶层代码
          * (t076 顶层 i_incr 用合成类型即由此先见定义). 函数泛型定义仍插 int main 前. */
         {
-            int hdr = 0;
+            int hdr = 0, nomain;
             for (i = body.size; i >= 4; i--)
                 if (body.data[i - 4] == '"' && body.data[i - 3] == ' '
                     && body.data[i - 2] == '2' && body.data[i - 1] == '\n') {
                     hdr = (int)i; break;
                 }
+            nomain = (ins < 0);
             if (ins < 0)
-                ins = hdr;              /* 无 main: 函数定义紧随 typedef 段 */
+                ins = hdr;              /* 无 main: 用户顶层全部内容视为 C 区 */
             if (hdr > ins)
                 hdr = ins;
             fwrite(body.data, 1, hdr, dg_saved_ppfp);              /* A: header+回主文件标记 */
             dg_fdefs_typedefs(s1);                                 /* 结构/nested typedef */
             fwrite(body.data + hdr, 1, ins - hdr, dg_saved_ppfp);  /* B: 用户顶层(main 前) */
-            dg_reflect_emit(s1);                                   /* 反射表(用户 struct 定义后) */
-            dg_fdefs_funcs(s1);                                    /* 函数泛型定义 */
-            fwrite(body.data + ins, 1, body.size - ins, dg_saved_ppfp); /* C: main 及后 */
+            if (nomain) {
+                /* 无 main (独立库导出场景, 2026-08-25): 函数泛型定义先落地 (用户
+                 * 内容引用其合成名), 反射表前向声明 (用户函数体引用 _refl 表), 然后
+                 * 用户全部内容 (struct 定义/函数), 反射表定义最后 —— 原顺序把反射表
+                 * 发在用户 struct 定义之前, clang 报 "offsetof of incomplete type". */
+                dg_fdefs_funcs(s1);
+                dg_reflect_forward(s1);
+                fwrite(body.data + ins, 1, body.size - ins, dg_saved_ppfp); /* 用户全部内容 */
+                dg_reflect_emit(s1);                                   /* 反射表(末尾) */
+            } else {
+                dg_reflect_emit(s1);                                   /* 反射表(用户 struct 定义后) */
+                dg_fdefs_funcs(s1);                                    /* 函数泛型定义 */
+                fwrite(body.data + ins, 1, body.size - ins, dg_saved_ppfp); /* C: main 及后 */
+            }
         }
         cstr_free(&body);
     }

@@ -10,6 +10,7 @@
  * 退出码 0 = 通过.
  */
 #include <stdio.h>
+#include <string.h>
 
 static char buf[8];
 static int  n = 0;

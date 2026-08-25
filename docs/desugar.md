@@ -203,6 +203,21 @@ t053/054/058/076/t052/t064 为既有问题), 无新增回归。
 - verbatim 遇 `__builtin_reflect(struct T)` 改写为 `(&T_refl)`; `dg_region_rewrite`
   遇该 builtin 直接回退 verbatim(不识别)。仅当文件确实用到 reflect 才发射表,
   避免普通 struct(t076 的 inode)误连 `__refl_field`。
+- **v2 (2026-08-25)**: 位域字段跳过 (标准 C 禁 offsetof 位域, t051 位域断言经
+  `__TCC_DESUGAR__` 保护); FAM size=0 (cnt==0); 指针→struct 字段链接 sub;
+  发射前对全部被引用类型发前向声明 (`static const __refl X_refl;`) 破自/互引用;
+  `used` 沿 sub 链传播, 仅发被引用链 (未引用类型如被 ifdef 的 Bf 不落地,
+  防 -Wunused-const-variable)。
+
+**5) LTO/符号可见性清理 (2026-08-25, 正式产物质量门禁)** — 见 script/lib-export.sh
+- desugar.ps1 编译段加 `-Wall -Werror` (合成机制若丢 unused 保护/顺序错位即失败)。
+- 独立库导出验收: 无 main 库模块脱糖 → clang `-O2 -flto -fvisibility=hidden` 编库 →
+  nm 断言导出符号集 = 用户 API + operator 定义 (model 实例/反射表全 static) →
+  消费端 -flto 直链运行数字一致。
+- 修复: (a) STL_STATIC 无条件 `static __attribute__((unused))` (tcc 不定义 __GNUC__
+  曾致脱糖产物缺 unused 保护); (b) 无 main 库的 EOF 回放: 函数泛型先落地 → 用户
+  内容 → 反射表末尾 (原顺序把反射表发在用户 struct 定义前, clang 报 offsetof of
+  incomplete type), 用户函数体引用 _refl 表靠前向声明。
 
 **4) t046_simd — 已闭环 (2026-08-25 M2, 见 docs/simd-standard.md §9)**
 旧判定"语法边界不进 clang 闭环"基于双模式 struct v4f + `.x` 字段访问。M2 单模型化后

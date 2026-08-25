@@ -36,7 +36,7 @@ int main(void) {
         CHECK(s->stl_set_contains(int)(3));
         CHECK(!s->stl_set_contains(int)(9));
         /* 有序迭代 */
-        int expect = 0; int keys[2] = {3,7};
+        int keys[2] = {3,7};
         for (int i = 0; i < 2; i++) CHECK(*s->stl_set_key_at(int)(i) == keys[i]);
         /* 删除 */
         CHECK(s->stl_set_erase(int)(3) == 1);

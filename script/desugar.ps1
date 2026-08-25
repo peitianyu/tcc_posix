@@ -63,7 +63,9 @@ foreach ($s in $Files) {
     $wbase  = To-WslPath $BASE
     $sysarg = ""
     if ($Sysroot) { $sysarg = "--sysroot $Sysroot" }
-    $cmd = "cd $wbase; $CC -O3 -mavx2 -mfma -I `"$winc`" $sysarg `"$wsrc`" -o `"$wexe`" 2>`"$wccerr`" && `"$wexe`" > `"$wcld`" 2>&1"
+    # 正式产物质量门禁 (2026-08-25): -Wall -Werror —— 独立库导出时合成机制 (static
+    # 实例/反射表/operator 改名) 若丢 unused 保护或顺序错位, 编正式产物即失败.
+    $cmd = "cd $wbase; $CC -O3 -mavx2 -mfma -Wall -Werror -I `"$winc`" $sysarg `"$wsrc`" -o `"$wexe`" 2>`"$wccerr`" && `"$wexe`" > `"$wcld`" 2>&1"
     $env:MSYS_NO_PATHCONV = "1"
     wsl -e bash -lc $cmd
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exe)) {

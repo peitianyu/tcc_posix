@@ -183,7 +183,14 @@ for (int i = 0; i < (int)r->nfield; i++)
            r->fields[i].offset, r->fields[i].size, r->fields[i].align);
 ```
 
-支持 struct/union 平铺字段 + 标量/枚举/指针 kind;bitfield/VLA/嵌套递归链为 v2。
+支持 struct/union 平铺字段 + 标量/枚举/指针 kind。**v2 (2026-08-25)**:
+- **bitfield 字段入表**: `bit_off`/`bit_size` 记录位域 (offset/size = 存储单元);
+- **FAM/VLA** (`T a[]`): kind=RE_ARRAY, size=0, count=0;
+- **嵌套递归链**: 指针→struct 字段链接 sub (自引用/互引用经缓存破环);
+- 匿名成员 (匿名 bitfield / 匿名 struct/union) 跳过;
+- 脱糖产物: 位域字段跳过 (标准 C 禁止 offsetof 位域, t051 位域断言经
+  `__TCC_DESUGAR__` 保护); FAM/递归链脱糖侧同步支持。
+字段记录 ABI 扩到 48B (bit_off/bit_size 插于 align 与 sub 之间)。
 
 ### 4.6 ucontext 协程基座 (t060)
 

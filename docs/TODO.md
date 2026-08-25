@@ -41,8 +41,22 @@
         不成立 —— 中间对象是 ELF, PE/ELF 链接共用 tccelf.c 解析, 弱引用可被强定义覆盖。
 - [ ] **function/model 泛型脱糖稳定性收敛** — 多类型参数 + 嵌套实例化 + 常量参数
       组合用例扩充，确保实例化点展开与标准 C 编译在所有边界下一致。
-- [ ] **反射 v2** — bitfield / VLA / 嵌套递归链字段 kind。
-- [ ] **`emit-c` 产物 LTO/符号可见性清理** — 正式产物面向独立库导出时的符号控制。
+- [x] **反射 v2** — bitfield / VLA / 嵌套递归链字段 kind — 2026-08-25 完成:
+      __refl_field 扩到 48B (bit_off/bit_size 插于 align 与 sub 间); 命名 bitfield
+      入表 (存储单元偏移 + 位宽), 匿名成员跳过; FAM/VLA (`T a[]`) size=0/count=0;
+      指针→struct 字段链接 sub (父表先分配 + 提前缓存破环, 自引用/互引用可用);
+      脱糖侧同步: 位域跳过 (标准 C 禁 offsetof 位域, t051 断言 __TCC_DESUGAR__ 保护),
+      FAM size=0、指针 sub、前向声明破互引用、仅发被引用链 (used 传播防 unused-const)。
+- [x] **`emit-c` 产物 LTO/符号可见性清理** — 2026-08-25 完成: 正式产物质量门禁
+      -Wall -Werror 纳入 desugar.ps1; 独立库导出验收 script/lib-export.sh (clang
+      -flto -fvisibility=hidden 编库 + nm 导出符号集断言 + 消费端链接运行)。期间修:
+      - **STL_STATIC 丢 unused**: tcc 不定义 __GNUC__ → 宏退化为裸 static, 脱糖产物
+        交 clang -Wall 报 -Wunused-function; 改无条件 `static __attribute__((unused))`
+        (tcc 亦支持该 attribute, 见 tcctok.h TOK_ATTRIBUTE2)。
+      - **无 main 库反射表顺序**: EOF 回放 ins==hdr → 反射表发在用户 struct 定义前,
+        clang 报 "offsetof of incomplete type"; 改 nomain 分支: 函数泛型先落地 →
+        用户内容 → 反射表末尾 (含前向声明, 用户函数体引用 _refl 表)。
+      - 测试源 hygiene: t054 死变量、t056 缺 string.h、t071 死变量 (门禁暴露)。
 
 ## P2 / 探索
 

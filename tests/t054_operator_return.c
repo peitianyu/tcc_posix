@@ -39,6 +39,7 @@ int main(void) {
     struct Vec3 a = { 1, 2, 3 };
     struct Vec3 b = { 4, 5, 6 };
     struct Vec3 c = { 2, 2, 2 };
+    (void)c;                     /* 保持声明的 operator 类型变量登记, 避免 -Wunused */
 
     struct Vec3 r1 = add(a, b);            /* {5,7,9} */
     struct Vec3 r2 = mix(a, b);            /* b*c={8,10,12}, a+ = {9,12,15} */

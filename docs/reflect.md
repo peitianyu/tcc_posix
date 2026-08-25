@@ -1,7 +1,8 @@
 # 结构体反射 (struct reflection) 设计方案
 
-> 状态: 2026-08-23 设计 → **P0 已实现并回归 (t051, 套件 79/79)**. ABI 以 lib/tcc-reflect.h
->       与 tccgen.c 的 refl_emit 为准.
+> 状态: 2026-08-23 设计 → **P0/P1/P2 已实现并回归 (t051)** → **v2 完成 2026-08-25**
+>       (bitfield/FAM/递归链, 编译器侧 + 脱糖侧, win/linux/-run/desugar 全绿).
+>       ABI 以 lib/tcc-reflect.h 与 tccgen.c 的 refl_emit 为准.
 > 依据: 「反射器是否契合 TCC 单遍哲学」讨论——结论: 反射是少有的、**天然单遍友好**
 >       的编译器能力, 推荐在通用 comptime 之前立项 (comptime 需解释器, 撞哲学)。
 > 目标: 让任意 struct/union/类型能在编译期得到「字段名/类型/偏移/大小/对齐」元数据,
@@ -46,7 +47,10 @@ typedef struct __refl_field {
     const char *name;    /* 字段名 */
     unsigned kind;       /* 字段的 __refl_kind */
     unsigned offset, size, align;
-    const void *sub;     /* v2: 指向嵌套 struct 的 __refl*, 平铺期填 NULL */
+    unsigned bit_off;    /* v2: bitfield 存储单元内位偏移; 非位域 0 */
+    unsigned bit_size;   /* v2: bitfield 位宽; 非位域 0 */
+    const void *sub;     /* v2: 嵌套 struct / 数组元素 struct / 指针所指 struct 的 __refl* */
+    unsigned count;      /* v2: 数组元素个数; 非数组/FAM 0 */
 } __refl_field;
 
 typedef struct __refl {
@@ -55,6 +59,10 @@ typedef struct __refl {
     const __refl_field *fields;   /* 平铺字段数组 (仅 struct/union 有意义) */
 } __refl;
 ```
+
+> v2 (2026-08-25) 记录扩到 48B: `bit_off`/`bit_size` 插在 `align` 与 `sub` 之间
+> (sub 从 +24 移到 +32, count 移到 +40)。ABI 以 lib/tcc-reflect.h 与 tccgen.c
+> 的 refl_emit 为准。
 
 ## 4. 编译器内实现
 
@@ -98,13 +106,18 @@ cpu-prof 骨架)。
 | `new_section`+`section_ptr_add`+`anon_sym`+`put_extern_sym` | tccelf | 写 `.rdata` 常量表 |
 | `VT_BTYPE` 位集 | tcc.h | kind 编码 |
 
-## 6. 支持范围与诚实边界 (MVP)
+## 6. 支持范围与诚实边界 (v2 2026-08-25 更新)
 
-- **支持**: struct/union 平铺字段; 标量/指针/enum 字段给 kind+size/align; 类型总
-  size/align; 类型名。
-- **暂不做 (v2)**: bitfield、VLA、函数指针字段; 嵌套 struct 递归链 (`sub` 预留,
-  平铺期先置 NULL, v2 再链接, 避免循环引用); 匿名 union/匿名成员。
-- **语法面**: 仅 `__reflect(T)`, 不做 `for field` 遍历语法糖 (用户自己 while 遍历)。
+- **支持 (v2)**: struct/union 平铺字段; 标量/指针/enum 字段 kind+size/align;
+  类型总 size/align; 类型名; **bitfield** (bit_off/bit_size); **FAM/VLA**
+  (`T a[]`, size=0/count=0); **嵌套递归链** (指针→struct 的 sub, 自引用/互引用
+  经缓存破环); 匿名成员跳过。
+- **脱糖产物差异**: 位域字段跳过 (标准 C 禁止 offsetof 位域, token 级拿不到
+  存储单元偏移) —— t051 位域断言经 `__TCC_DESUGAR__` 保护; FAM/递归链在脱糖侧
+  同步支持 (FAM size=0、指针 sub 链接、前向声明破互引用)。
+- **暂不做**: 匿名成员入表 (有名字才反射); 函数指针字段 kind (RE_OTHER);
+  位域在脱糖产物中的偏移 (无法编译期表达)。
+- **语法面**: 仅 `__builtin_reflect(T)`, 不做 `for field` 遍历语法糖 (用户自己 while 遍历)。
 
 ## 7. 测试计划
 
@@ -122,6 +135,7 @@ cpu-prof 骨架)。
 | P0 | 内建 `__builtin_reflect` + struct/union/scalar 平铺元数据落 `.rdata` | ✅ 已实现; t051 PASS (字段名/offset/size/align/kind) |
 | P1 | 嵌套 struct 链接 (sub), 递归/多级; array 字段 | ✅ 已实现: __refl_field 扩到 32B(+sub), refl_emit 返回段偏移递归生成子表(深优先), 表起点 8 对齐, -1 哨兵表示"无子表"; t051 断言 Node.v->Vec3 |
 | P2 | 序列化 demo; 与 C.6 脱糖输出端 / 调试器配合 | ✅ 序列化 demo: t051 的 refl_copy 按反射递归深拷贝(嵌套经 sub) |
+| v2 | bitfield / FAM(VLA) / 嵌套递归链字段 kind | ✅ 2026-08-25: __refl_field 扩到 48B (bit_off/bit_size); 位域入表(存储单元偏移+位宽); FAM size=0/count=0; 指针→struct sub (父先分配+提前缓存破环); 匿名成员跳过; 脱糖侧同步 (位域跳过+ifdef 保护, FAM/递归链支持, 前向声明破互引用) |
 
 ---
 

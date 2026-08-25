@@ -6600,9 +6600,10 @@ static void parse_atomic(int atok)
 /* ============ 结构体反射 (__builtin_reflect, docs/reflect.md) ============
  * 生成 struct/union/标量的只读元数据表到 .rdata, 并把 vtop 覆盖为指向它的
  * `const void*`(调用方 cast 到 lib/tcc-reflect.h 的 __refl)。单遍完成, 无 AST。
- * 反射表 ABI(PTR=8,int=4, 与 lib/tcc-reflect.h 一致):
+ * 反射表 ABI(PTR=8,int=4, 与 lib/tcc-reflect.h 一致, v2 2026-08-25):
  *   __refl   : +0 name(8) +8 kind +12 size +16 align +20 nfield +24 fields(8) = 32B
- *   __refl_field: +0 name(8) +8 kind +12 offset +16 size +20 align = 24B
+ *   __refl_field: +0 name(8) +8 kind +12 offset +16 size +20 align
+ *                 +24 bit_off +28 bit_size +32 sub(8) +40 count = 48B
  * kind 编码见 lib/tcc-reflect.h 的 __refl_kind。 */
 enum { RE_STRUCT=1, RE_UNION, RE_PTR, RE_INT, RE_FLOAT, RE_LLONG, RE_BYTE,
        RE_BOOL, RE_ENUM, RE_ARRAY, RE_VOID, RE_SHORT, RE_DOUBLE, RE_LDOUBLE, RE_OTHER };
@@ -6637,9 +6638,9 @@ static void refl_put32(unsigned char *p, int v)
     p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
 }
 
-/* __refl_field 记录 = 40B: name(8) kind/offset/size/align(4*4) sub(8) count(4) pad(4);
-   超字段/t超元素数截断上限 */
-#define REFL_FLDSZ 40
+/* __refl_field 记录 = 48B: name(8) kind/offset/size/align/bit_off/bit_size(6*4)
+   sub(8) count(4) pad(4); 超字段/t超元素数截断上限 */
+#define REFL_FLDSZ 48
 #define REFL_MAXF  128
 
 /* 把 vtop 覆盖为指向 (rodata_section 中 off 处) 的 const void* */
@@ -6677,8 +6678,18 @@ static void refl_cache_add(Sym *s, unsigned long off)
     }
 }
 
+/* 字段是否匿名 (匿名 bitfield / C11 匿名 struct/union 成员): 无名字, 反射跳过 */
+static int refl_field_anon(Sym *f)
+{
+    return (f->v & ~SYM_FIELD) >= SYM_FIRST_ANOM;
+}
+
 /* 生成/复用类型 t 的反射表, 返回其 .rdata 段内绝对偏移 (不碰 vtop)。
- * 嵌套 struct/union 值字段递归生成子表(深优先: 子表先 append, 父表最后分配)。 */
+ * v2 (2026-08-25):
+ *   - 命名 bitfield 入表 (bit_off/bit_size 记录位域); 匿名成员跳过;
+ *   - FAM/VLA (不完整数组 `T a[]`) 入表: size=0, count=0 (未知);
+ *   - 指针→struct 字段链接 sub (嵌套递归链, 自引用/互引用经缓存破环);
+ *   - 父表先分配 + 提前登记缓存: 递归链中子表引用父表地址时已可知。 */
 static unsigned long refl_emit(CType *t)
 {
     Section *sec;
@@ -6689,7 +6700,7 @@ static unsigned long refl_emit(CType *t)
     const char *tp = NULL, *fn;
     unsigned long sub[REFL_MAXF], off;
 
-    /* 缓存命中: 同 struct/union 复用已有表 */
+    /* 缓存命中: 同 struct/union 复用已有表 (含递归链中的环) */
     if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref) {
         off = refl_cache_lookup(t->ref);
         if (off != (unsigned long)-1)
@@ -6703,7 +6714,7 @@ static unsigned long refl_emit(CType *t)
     nfield = 0;
     if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref)
         for (f = t->ref->next; f; f = f->next)
-            if (!(f->type.t & VT_BITFIELD))
+            if (!refl_field_anon(f))
                 nfield++;
     fields_off = hdr;                       /* 32, 8 对齐 */
     /* 类型名串长度 */
@@ -6718,33 +6729,39 @@ static unsigned long refl_emit(CType *t)
     rec_len = str_off + tlen + 1;
     if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref)
         for (f = t->ref->next; f; f = f->next)
-            if (!(f->type.t & VT_BITFIELD))
+            if (!refl_field_anon(f))
                 rec_len += (int)strlen(get_tok_str(f->v & ~SYM_FIELD, NULL)) + 1;
 
-    /* 深优先: 先递归生成嵌套 struct/union 值字段的子表, 父表最后分配 (base 稳定) */
-    i = 0;
-    if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref)
-        for (f = t->ref->next; f; f = f->next) {
-            if (f->type.t & VT_BITFIELD)
-                continue;
-            sub[i] = (unsigned long)-1;  /* -1 = 无子表; 0 可能是合法表起点, 不能用 0 */
-            if ((f->type.t & VT_BTYPE) == VT_STRUCT && !(f->type.t & VT_ARRAY))
-                sub[i] = refl_emit(&f->type);
-            else if (f->type.t & VT_ARRAY) {
-                CType *pt = pointed_type(&f->type);   /* 数组元素类型 */
-                if (pt && (pt->t & VT_BTYPE) == VT_STRUCT)
-                    sub[i] = refl_emit(pt);
-            }
-            i++;
-        }
-
-    /* --- 一次性分配, 避免 section_ptr_add realloc 悬垂 --- */
+    /* --- 父表先分配 (v2: 递归链需要本表地址先于子表可知) --- */
     sec = rodata_section;                       /* 复用只读段, 不重复建 __start/__stop */
     while (sec->data_offset & (PTR_SIZE - 1))   /* 表起点对齐到 8, 保证指针字段对齐 */
         section_ptr_add(sec, 1);
     tab_off = sec->data_offset;                 /* 本表在段内的绝对起点 */
     base = section_ptr_add(sec, rec_len);
     memset(base, 0, (size_t)rec_len);
+    if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref)
+        refl_cache_add(t->ref, (unsigned long)tab_off);   /* 提前: 环 (自/互引用) 命中 */
+
+    /* 子表: 值 struct / 数组元素 struct / 指针→struct (嵌套递归链) */
+    i = 0;
+    if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref)
+        for (f = t->ref->next; f; f = f->next) {
+            if (refl_field_anon(f))
+                continue;
+            sub[i] = (unsigned long)-1;  /* -1 = 无子表; 0 可能是合法表起点, 不能用 0 */
+            if ((f->type.t & VT_BTYPE) == VT_STRUCT && !(f->type.t & VT_ARRAY)) {
+                sub[i] = refl_emit(&f->type);
+            } else if (f->type.t & VT_ARRAY) {
+                CType *pt = pointed_type(&f->type);   /* 数组元素类型 (FAM 亦有效) */
+                if (pt && (pt->t & VT_BTYPE) == VT_STRUCT)
+                    sub[i] = refl_emit(pt);
+            } else if ((f->type.t & VT_BTYPE) == VT_PTR) {
+                CType *pt = pointed_type(&f->type);   /* 指针→struct: 递归链 */
+                if (pt && (pt->t & VT_BTYPE) == VT_STRUCT)
+                    sub[i] = refl_emit(pt);
+            }
+            i++;
+        }
 
     /* header 数值 */
     refl_put32(base + 8,  kind);
@@ -6768,8 +6785,8 @@ static unsigned long refl_emit(CType *t)
     i = 0;
     if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref)
         for (f = t->ref->next; f; f = f->next) {
-            int rec;
-            if (f->type.t & VT_BITFIELD)
+            int rec, isbf, isfam;
+            if (refl_field_anon(f))
                 continue;
             fn = get_tok_str(f->v & ~SYM_FIELD, NULL);
             memcpy(base + cur, fn, (size_t)strlen(fn) + 1);
@@ -6778,35 +6795,38 @@ static unsigned long refl_emit(CType *t)
             sym = get_sym_ref(&char_pointer_type, sec, (unsigned long)cur + tab_off,
                               (unsigned long)strlen(fn) + 1);
             greloca(sec, sym, (unsigned long)(rec + tab_off), R_X86_64_64, 0);
-            /* kind/offset/size/align */
+            /* kind/offset/size/align; 位域/不完整数组(FAH) 特判 */
+            isbf = (f->type.t & VT_BITFIELD) != 0;
             fsz = type_size(&f->type, &fa);
+            isfam = (f->type.t & VT_ARRAY) && fsz < 0;   /* 不完整数组: FAM/VLA */
+            if (isfam)
+                fsz = 0;                                  /* FAM 占 0 字节, count 未知 */
             refl_put32(base + rec + 8,  refl_kind(&f->type));
-            refl_put32(base + rec + 12, (int)f->c);   /* 字段偏移 (struct_layout 写入) */
+            refl_put32(base + rec + 12, (int)f->c);   /* 字段偏移 (bitfield: 存储单元) */
             refl_put32(base + rec + 16, fsz);
             refl_put32(base + rec + 20, fa);
-            /* count: 数组字段 = 元素个数; 非数组 0 */
-            if (f->type.t & VT_ARRAY) {
+            refl_put32(base + rec + 24, isbf ? BIT_POS(f->type.t) : 0);   /* bit_off */
+            refl_put32(base + rec + 28, isbf ? BIT_SIZE(f->type.t) : 0);  /* bit_size */
+            /* count: 数组字段 = 元素个数; 非数组 0; FAM 0 (未知) */
+            if ((f->type.t & VT_ARRAY) && !isfam) {
                 CType *pt = pointed_type(&f->type);
                 if (pt) {
                     int ea;
                     unsigned long esz = type_size(pt, &ea);
-                    refl_put32(base + rec + 32, esz ? (int)(fsz / esz) : 0);
+                    refl_put32(base + rec + 40, esz ? (int)(fsz / esz) : 0);
                 }
             } else {
-                refl_put32(base + rec + 32, 0);
+                refl_put32(base + rec + 40, 0);
             }
-            /* sub: 嵌套 struct 值字段 / 数组元素结构 -> 其子表 */
+            /* sub: 嵌套 struct 值字段 / 数组元素结构 / 指针→struct -> 其子表 */
             if (sub[i] != (unsigned long)-1) {
                 sym = get_sym_ref(&char_pointer_type, sec, sub[i], 32);
-                greloca(sec, sym, (unsigned long)(rec + 24 + tab_off), R_X86_64_64, 0);
+                greloca(sec, sym, (unsigned long)(rec + 32 + tab_off), R_X86_64_64, 0);
             }
             cur += (int)strlen(fn) + 1;
             i++;
         }
 
-    /* --- 返回 const void* 指向 header 起点, 并登记缓存 --- */
-    if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref)
-        refl_cache_add(t->ref, (unsigned long)tab_off);
     return (unsigned long)tab_off;
 }
 
