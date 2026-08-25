@@ -190,9 +190,21 @@ VECTOR 的 `type_size` 已返回 16，故**让 VT_VECTOR 复用 struct 聚合路
 - 脱糖产物纯透传: `__m128` 类型 + 标准 `_mm_*` 名 + `#include <immintrin.h>`(simd.h
   `__TCC_DESUGAR__` 分支恢复用于产物透传)。
 
-### 基础设施教训 (bin/tcc.exe 形态)
+### 基础设施教训 (bin/tcc.exe 形态与编译选项逐一验证, 2026-08-25)
 - bin/tcc.exe 必须是 `CONFIG_TCC_POSIX=1` 构建(默认链 ELF libc.a 而非 msvcrt);
   a813951 后 install.sh 的 musl 自编译因 environ(weak 符号 alacarte) 失败 fallback 到
-  原生 build → 链接 musl 测试报 `unresolved stdout`/dllimport。正确构建命令(老 install
-  逻辑): `BOOT_TCC -DCONFIG_TCC_POSIX=1 -DCONFIG_TCC_PREDEFS=1 -o build/tcc-win.exe
-  src/tcc.c -I src -DONE_SOURCE=1`, 且 build/lib/libc.a 就位。
+  原生 build → 链接 musl 测试报 `unresolved stdout`/dllimport。
+- **编译选项最终必要集 (逐一实验验证)**:
+  - `CONFIG_TCC_POSIX=1` 必要 (tccpe.c:2089 唯一使用点: 默认链 libc.a)。
+  - `CONFIG_TCC_PREDEFS=1` 必要 (编译期嵌入 tccdefs_.h; 缺它产物引用 tccdefs.h,
+    desugar 产物被 clang 编译失败, bin/ 无法自足)。
+  - `CONFIG_TCC_MUSL=1` + 配套(SEMLOCK=0/TCCDIR/MUSL_STDIO) **不必要且有害**:
+    musl 线路 tccrun 内存模式在 psxscl mmap(强制 reserve ≥1GB, musl realloc 依赖)
+    下映射落 2GB 上沿 0x7fff0000, 布局符号越过 0x80000000 → R_X86_64_32S 重定位
+    溢出 (tcc -run 报 relocation out of range); psxscl 无 clone/posix_spawn 实现,
+    临时 exe fallback 不可用。无 MUSL 形态 -run/链接/测试全部正常。
+  - `ONE_SOURCE=1` 冗余 (tcc.c:21 默认已是 1)。
+  - `TCC_TARGET_X86_64` 冗余但防御性保留 (宿主自动定义, 交叉构建保险)。
+- install.sh [3/3] 已改为直接部署 [1/3] 产物 (无 MUSL 形态); build.sh [1/4] 的
+  tcc-win 构建命令为 `BOOT_TCC -DCONFIG_TCC_POSIX=1 -DCONFIG_TCC_PREDEFS=1
+  -o build/tcc-win.exe src/tcc.c -I src`, build/lib/libc.a 就位。
