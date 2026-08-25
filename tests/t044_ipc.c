@@ -19,6 +19,7 @@
 #include <sys/msg.h>
 #include <sys/sem.h>
 #include <sys/shm.h>
+#include "wsl1.h"
 
 static int fail = 0;
 #define CHECK(cond, msg) do { \
@@ -37,6 +38,9 @@ struct test_msg { long mtype; char mtext[64]; };
 
 int main(void)
 {
+#ifdef __linux__
+    if (tcc_is_wsl1()) { printf("SKIP (WSL1: SysV IPC 挂起)\n"); return 0; }
+#endif
     int r, id, id2, i;
     struct test_msg m;
     struct msqid_ds msqds;

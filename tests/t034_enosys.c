@@ -9,10 +9,17 @@
 #include <string.h>
 int main(void) {
 	long r;
+#ifdef __linux__
+	/* psxscl 专有: __syscall_vtbl[318]==NULL → -ENOSYS. 真实 Linux 内核
+	 * 已实现 getrandom, 无 vtbl 概念 — 本测试在 linux 目标跳过. */
+	printf("SKIP (linux: 无 psxscl vtbl, getrandom 已实现)\n");
+	return 0;
+#else
 	errno = 0;
 	r = syscall(SYS_getrandom, 0, 0, 0);
 	if (r != -1) { printf("expected -1, got %ld\n", r); return 1; }
 	if (errno != ENOSYS) { printf("expected ENOSYS, got %s\n", strerror(errno)); return 2; }
 	printf("ENOSYS ok\n");
 	return 0;
+#endif
 }

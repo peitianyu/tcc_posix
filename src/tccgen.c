@@ -3254,7 +3254,11 @@ static int gen_incdec_operator(int post, int c)
         /* 后缀: 先把旧 struct 值复制到临时本地, 再 operator(a) 存回 a,
          * 结果 = 旧值. struct 不能装入寄存器, 故用 vstore 走 memcpy.
          * 栈编排: [a_tgt, a_src, a_src2, old] -> vstore -> [a_tgt, old]
-         *   operator_call -> [a_tgt, new]; vstore 存 new->a_tgt, 留 old. */
+         *   operator_call -> [a_tgt, new]; vstore 存 new->a_tgt, 留 old.
+         * 注意: old 槽必须带 VT_LVAL (lvalue) —— SysV gfunc_call 对 struct
+         * 实参转 LLONG 后 gv(RC_INT) load: lvalue → load 值; 非 lvalue 的
+         * VT_LOCAL 是"指针值"语义 → 生成 lea 取址 → 实参传成地址 (t059
+         * linux 后缀 ++ 失败根因). */
         int size, align, addr;
         size = type_size(&vtop->type, &align);
         loc = (loc - size) & -align;
@@ -3262,7 +3266,7 @@ static int gen_incdec_operator(int post, int c)
         vdup();                /* [a_tgt, a_src]        */
         vdup();                /* [a_tgt, a_src, a_src2] */
         vswap();               /* [a_tgt, a_src2, a_src] */
-        vset(&vtop->type, VT_LOCAL, addr); /* [a_tgt, a_src2, old] */
+        vset(&vtop->type, VT_LOCAL | VT_LVAL, addr); /* [a_tgt, a_src2, old] */
         vswap();               /* [a_tgt, old, a_src2]   */
         vstore();              /* old = a 的旧值; vtop=old [a_tgt, old] */
         operator_call(s, &ft, &rt, 1);   /* [a_tgt, new] */

@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mqueue.h>
+#include "wsl1.h"
 
 static int fail = 0;
 #define CHECK(cond, msg) do { \
@@ -25,6 +26,9 @@ static int fail = 0;
 
 int main(void)
 {
+#ifdef __linux__
+    if (tcc_is_wsl1()) { printf("SKIP (WSL1: mq_* 不可用)\n"); return 0; }
+#endif
     mqd_t mq;
     struct mq_attr attr, attr2;
     char buf[64];

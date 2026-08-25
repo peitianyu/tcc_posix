@@ -21,6 +21,12 @@ static int chk(const char *name, long r, int want) {
 int main(void) {
     int fail = 0;
 
+#ifdef __linux__
+    /* 真实 Linux 内核已实现 getrandom (318)/fanotify (300)/bpf (321) 或其
+     * 支持度随内核版本变化 — ENOSYS 断言是 psxscl vtbl 语义, linux 目标跳过. */
+    printf("SKIP (linux: 无 psxscl vtbl)\n");
+    return 0;
+#else
     /* R1: 未注册 syscall 槽 → -ENOSYS (不崩溃) */
     printf("[R1] unregistered syscall\n");
     errno = 0; fail += chk("getrandom(318)", syscall(SYS_getrandom, 0, 0, 0), ENOSYS);
@@ -30,4 +36,5 @@ int main(void) {
     if (fail) { printf("FAIL %d\n", fail); return 1; }
     printf("all unsupported -> ENOSYS ok\n");
     return 0;
+#endif
 }

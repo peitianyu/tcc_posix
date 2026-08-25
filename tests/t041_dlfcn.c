@@ -14,6 +14,12 @@
 #include <dlfcn.h>
 
 int main(void) {
+#ifdef __linux__
+    /* dlopen("ws2_32.dll")/dlsym 是 Windows DLL 模块语义 (psxscl 实现);
+     * linux 静态 ELF 无动态加载器 (dlfcn stub), 本测试在 linux 目标跳过. */
+    printf("SKIP (linux: 静态 ELF 无动态加载器)\n");
+    return 0;
+#else
     int fail = 0;
     void *h, *sym, *m;
 
@@ -63,4 +69,5 @@ int main(void) {
     if (fail) { printf("FAIL %d\n", fail); return 1; }
     printf("dlfcn ok\n");
     return 0;
+#endif
 }

@@ -3,6 +3,29 @@
 > 里程碑级变更摘要。README 只做概览。按时间序, 最新在上。
 > 完整逐提交历史用 `git log --oneline`。
 
+## 2026-08-25 — linux 目标测试 12 项既有失败全部修复 (test.sh -linux 158/158)
+
+- **编译器 bug (t059)**: operator 后缀 `++/--` 在 SysV 寄存器返回路径下实参传成
+  地址 — gen_incdec_operator 的 old 槽用 `vset(..., VT_LOCAL, addr)` (非 lvalue
+  的 VT_LOCAL 是"指针值"语义), SysV gfunc_call 对 struct 实参转 LLONG 后 gv 生成
+  `lea` 而非 load → operator++ 收到垃圾参数 (反汇编对比: 前缀 `mov -0xc(%rbp),%rax`
+  传值 vs 后缀 `lea -0x34(%rbp),%rax` 传址)。改 `VT_LOCAL|VT_LVAL`。win (PE struct
+  参数走栈 memcpy) 不受影响 — 故此前仅 linux 挂。
+- **ucontext 基座 (t060/t061)**: musl 1.1.11 只有头无实现, 新增 linux x86_64 SysV
+  版 src/posix/musl-1.1.11/src/thread/x86_64/ucontext.s + makecontext.c (参数
+  rdi/rsi/rdx/rcx/r8/r9; mcontext 偏移 0x28 = flags8+link8+stack_t24 — 曾误算 0x20,
+  实测修正)。自动入 linux libc.a。
+- **emutls (t047)**: linux 版运行时 (同 nt64 语义, 单线程懒分配) 入 libc.a。
+- **dlfcn (t041)**: 静态 ELF 无动态加载器 — src/posix/musl-1.1.11/src/dlfcn/dlfcn.c
+  stub (dlopen 返回 NULL, 同 musl 静态语义), 测试 linux SKIP。
+- **t049_cpu**: run_linux 补 extra 源 (lib/cpu-prof.c 先编译再入链); 教训: extra
+  .o 须在 libc.a **前** (tcc 单遍 alacarte 提取, 库后文件引用不到库符号)。
+- **平台语义适配**: t034/t039 (psxscl vtbl 专有, linux SKIP — 真实内核已实现
+  getrandom), t040 (select 非法 fd: linux 立即 -1 EBADF vs psxscl 返回 0), t042/
+  t043/t044 (WSL1 限制: timer_create 失败/mq ENOSYS/msgget 挂起, 均经
+  tests/wsl1.h uname 检测 SKIP, 真实 Linux/WSL2 仍全量断言)。
+- 双平台全绿: test.sh **79/79** (win), **158/158** (linux)。
+
 ## 2026-08-25 — 自举与测试改用 @listfile (参数集中, 脚本精简)
 
 - **新增 build/selfhost-win.list / selfhost-linux.list**: 自举参数集中 (BOOT 发行 TCC

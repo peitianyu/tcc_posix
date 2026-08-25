@@ -55,14 +55,19 @@
   原样保留/忽略, 与 docs/listfile.md §2/§4 的 P2 验收标注存在分裂。
   **规避**: 脚本侧 glob (bash `tests/t*.c`) + 显式路径; 仓库内用法见 docs/listfile.md §9。
 
-- **linux 目标测试 (test.sh -linux) 12 项既有失败** (2026-08-25 实测 146/12):
-  - 链接失败 (5): t041_dlfcn、t047_tls、t060/t061 ucontext (src/thread/nt64/ 为 Windows
-    专有实现, linux 目标无 ucontext 基座)、t049_cpu (run_linux 无 extra 源逻辑,
-    cpu-prof.c 未入链 — run_win 有)。
-  - 运行时失败 (7): t034_enosys/t039_unsupported/t040_select_poll/t042_timer/t043_mq/
-    t044_ipc/t059_operator_more — WSL 环境系统调用/等待语义差异, 与编译参数无关。
-  **注意**: 编译层已修复 (build/tests-common.list 补 -I lib/-I . 后 STL/simd/reflect
-  t046/t049/t051/t062-t079 全部可编, 净增 18 通过)。
+- **linux 目标测试 12 项既有失败已全部修复** (2026-08-25, 现 test.sh -linux 158/158):
+  - 编译器 bug: operator 后缀 ++/-- 在 SysV (linux) 寄存器返回路径下实参传成地址
+    (gen_incdec_operator 的 old 槽用非 lvalue VT_LOCAL → gfunc_call 生成 lea 而非
+    load) — 改 VT_LOCAL|VT_LVAL。
+  - ucontext 基座: musl 1.1.11 无实现, 新增 linux x86_64 SysV 版
+    (src/posix/musl-1.1.11/src/thread/x86_64/ucontext.s + makecontext.c;
+    mcontext 偏移 0x28 = flags8+link8+stack_t24)。
+  - emutls 运行时 (linux 版, t047); dlfcn stub (静态 ELF 无动态加载器, t041
+    linux SKIP); run_linux 补 t049_cpu extra 源 (且 extra 须在 libc.a 前,
+    tcc 单遍 alacarte 提取)。
+  - 平台语义适配: t034/t039 (psxscl vtbl 专有, linux SKIP), t040 (select 非法
+    fd: linux -1 EBADF vs psxscl 0), t042/t043/t044 (WSL1 限制: timer_create/
+    mq/msgget, 经 tests/wsl1.h 检测 SKIP)。
 
 - **纯 musl 编译器 (CONFIG_TCC_MUSL)** 走 POSIX 接口, 不含任何 winapi 依赖:
   PE 导入表为空, 系统调用经 psxscl→ntdll 直通。

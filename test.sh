@@ -94,9 +94,20 @@ run_linux() {
         2>"$TESTDIR/$name.lcerr"; then
         FAIL=$((FAIL+1)); FAILED="$FAILED $name(lnx编译)"; echo "FAIL $name (lnx编译)"; head -3 "$TESTDIR/$name.lcerr"; return
     fi
+    # 个别测试需要额外源文件一并链接 (如 t049_cpu 依赖 lib/cpu-prof.c)
+    local extra_obj=""
+    case "$name" in
+        t049_cpu)
+            extra_obj="$TESTDIR/${name}_extra.o"
+            if ! "$lnx" -c "$BASE/lib/cpu-prof.c" -o "$extra_obj" @build/tests-common.list \
+                2>"$TESTDIR/$name.lcerr"; then
+                FAIL=$((FAIL+1)); FAILED="$FAILED $name(lnx编译-extra)"; echo "FAIL $name (lnx编译-extra)"; head -3 "$TESTDIR/$name.lcerr"; return
+            fi
+            ;;
+    esac
     if ! ( cd "$BASE/build/linux-musl-obj" && "$lnx" -nostdlib -static \
         asm_crt1.o "$o" init_array.o init_fini.o \
-        libtcc1.o va_list.o libc.a -o "$exe" ) 2>"$TESTDIR/$name.llerr"; then
+        libtcc1.o va_list.o ${extra_obj:+$extra_obj} libc.a -o "$exe" ) 2>"$TESTDIR/$name.llerr"; then
         FAIL=$((FAIL+1)); FAILED="$FAILED $name(lnx链接)"; echo "FAIL $name (lnx链接)"; head -3 "$TESTDIR/$name.llerr"; return
     fi
     # WSL 运行: D:/work/tcc_posix/build/tests/x_linux → /mnt/d/work/tcc_posix/build/tests/x_linux

@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <signal.h>
+#include "wsl1.h"
 
 static int is_eq(const struct itimerspec *a, const struct itimerspec *b)
 {
@@ -24,6 +25,9 @@ static int is_eq(const struct itimerspec *a, const struct itimerspec *b)
 }
 
 int main(void) {
+#ifdef __linux__
+    if (tcc_is_wsl1()) { printf("SKIP (WSL1: timer_create 不可用)\n"); return 0; }
+#endif
     int fail = 0;
     timer_t tid = (timer_t)(intptr_t)-1;
     struct sigevent sev;
