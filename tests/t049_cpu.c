@@ -13,6 +13,11 @@
 #include <string.h>
 #include "cpu-prof.h"
 
+/* 可选符号渲染钩子: -bt 链接时 bt-exe.o 提供强定义 → 弱引用绑定;
+ * 独立构建未定义 → 归零 (见下方双路径形态断言). */
+__attribute__((weak))
+int __bt_resolve_addr(unsigned long long pc, char *buf, unsigned long len);
+
 /* 递归: 验证深度栈配平 (inclusive 累加), 且调用次数正确 */
 static int fib(int n) {
     int r;
@@ -90,6 +95,22 @@ int main(void) {
     if (caplen == 0 || strstr(cap, "[cpuprof]") == NULL) {
         fputs("FAIL: sink got no report rows\n", stderr);
         ok = 0;
+    }
+
+    /* 双路径形态断言 (2026-08-25 覆盖确认):
+     *   -bt (编译+链接均带) → 弱钩子绑定, 报告渲染 func@file:line (含 '@');
+     *   独立构建 (无 -bt)   → 弱钩子归零, 报告回退裸地址 (含 '@0x').
+     * 任一形态不符即回归 (如链接丢调试节导致解析失败). */
+    if (__bt_resolve_addr) {
+        if (strstr(cap, "@") == NULL) {
+            fputs("FAIL: -bt 下未见 func@file:line 符号渲染\n", stderr);
+            ok = 0;
+        }
+    } else {
+        if (strstr(cap, "@0x") == NULL) {
+            fputs("FAIL: 独立构建未见裸地址回退 (@0x)\n", stderr);
+            ok = 0;
+        }
     }
 
     CPU_REPORT();   /* 走默认 stderr sink, 可见报告 */

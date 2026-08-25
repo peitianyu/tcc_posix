@@ -247,4 +247,7 @@ int main(void) { ... cpu_prof_report(); }
 
 三份数归因: **总周期 / 调用次数 / avg cycle**。site 以返回地址为键自动登记。
 递归用深度栈配平。`__builtin_ia32_rdtsc` tcc 不支持 → 退化为内联汇编 `rdtsc`。
+报告符号渲染双路径: `-bt` (编译+链接均带) → `func@file:line` (弱钩子
+`__bt_resolve_addr` 绑定 bt-exe.o); 独立构建 → 裸地址回退。t049 内置双形态断言,
+test.sh 增 -bt 变体 (win 自带链接, linux 手动链接补 btstub-lnx.o)。
 测试: `tests/t049_cpu.c`。

@@ -29,7 +29,16 @@
 
 - [ ] **termios console E2E 确认** — R6 已实现 (t040 通过)，需在真交互终端跑一次
       t040 确认 tcgetattr/TIOCGWINSZ/TCSETS 实际数值。
-- [ ] **cpu-prof 报告接入 `-bt` 符号渲染 vs 独立构建双路径覆盖确认**。
+- [x] **cpu-prof 报告接入 `-bt` 符号渲染 vs 独立构建双路径覆盖确认** — 2026-08-25 完成:
+      双平台 `-bt` (编译+链接均带) 报告渲染 `func@file:line`, 独立构建回退裸地址;
+      t049 自断言两形态 + test.sh 增 `-bt` 变体 (win 走 tcc 自带 bt-exe.o/bt-log.o;
+      linux 手动链接补 bt-exe/bt-log/btstub-lnx.o)。期间发现并修:
+      - **linux 手动链接丢 .stab**: tccelf.c 仅 `do_debug` 时合并输入 .o 的调试节,
+        `-nostdlib` 链接必须带 `-bt` 才能保留; 且 `-nostdlib` 跳过 tcc_add_btstub,
+        新增 tests/btstub-lnx.c 复刻 (rt_info + 构造函数, 用 tcc 自动生成的
+        `__start_stab/__stop_stab`)。
+      - **纠正 3 处过期注释** (cpu-prof.c/h、tcc-own.h): "PE 后端无弱符号绑定"
+        不成立 —— 中间对象是 ELF, PE/ELF 链接共用 tccelf.c 解析, 弱引用可被强定义覆盖。
 - [ ] **function/model 泛型脱糖稳定性收敛** — 多类型参数 + 嵌套实例化 + 常量参数
       组合用例扩充，确保实例化点展开与标准 C 编译在所有边界下一致。
 - [ ] **反射 v2** — bitfield / VLA / 嵌套递归链字段 kind。

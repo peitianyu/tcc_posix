@@ -9,7 +9,10 @@
  *
  * 符号渲染 (可选): 弱引用 __bt_resolve_addr (bt-exe.c 提供), 把 caller 返回
  * 地址渲染成 func@file:line; 未 link -bt 时衰减为裸地址 + 用户标签 name.
- * 说明: 用可赋值/可传参的 sink, 不用弱函数 —— 本工具链 PE 后端无弱符号绑定.
+ * 说明: 报告 sink 用可赋值/可传参的指针 (运行时改道, 用户可接管); 符号渲染
+ * 钩子用弱函数 —— 2026-08-25 探针实测: tcc 的 .o 中间对象是 ELF, PE/ELF 链接
+ * 共用 tccelf.c 符号解析, 弱引用可被 bt-exe.o 的强定义覆盖, 未定义时归零
+ * (此前的 "PE 后端无弱符号绑定" 注释已过期, 见 t049 双路径覆盖).
  */
 #include <stdio.h>
 #include <string.h>

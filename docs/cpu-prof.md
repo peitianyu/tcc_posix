@@ -1,6 +1,9 @@
 # 用户端 CPU 周期插桩方案 (cpu-prof)
 
 > 状态: 2026-08-23 设计 → 已落地 (include/cpu-prof.h + lib/cpu-prof.c + tests/t049_cpu.c, PASS)
+>       → 2026-08-25 双路径覆盖确认: `-bt` 符号渲染 (func@file:line) 与独立构建裸地址
+>       回退在 win + linux 均验证, test.sh 增 -bt 变体; linux 手动链接补 btstub
+>       (tests/btstub-lnx.c, 复刻 tcc_add_btstub)。
 > 范围: 一块运行在 tcc_posix 之上的用户端 C 库, 用 rdtsc 插桩计算**精确周期数**,
 >       把 CPU 时间归因到具体代码段 (函数). 纯 POSIX, 零 winapi, 零编译器改动.
 > 依据: 「CPU 使用监测 / 采样 vs 周期插桩 / 用户端 v.s. 编译器」讨论结论.
@@ -142,6 +145,11 @@ typedef struct cpu_site {
   不打印、只取数据的人也可用 `cpu_site` 数组直接遍历 (report 前先快照).
 - 符号渲染: 复用弱钩子 `__bt_resolve_addr` (bt-exe.c), 输出 `func@file:line`;
   未 link -bt 时衰减为裸地址. 与 memtrack 对待该钩子完全一致.
+  **双路径覆盖 (2026-08-25)**: `-bt` 编译+链接均带时弱引用绑定 bt-exe.o 强定义,
+  报告渲染 `main@tests/t049_cpu.c:57` 形; 独立构建弱引用归零, 回退 `@0x...`.
+  win 走 tcc 自带链接; linux 手动链接 (-nostdlib) 需自补 bt-exe/bt-log 对象 +
+  btstub (tests/btstub-lnx.c), 且链接须带 `-bt` 才保留 .stab 调试节 (tccelf.c
+  仅 do_debug 时合并输入 .o 的调试节). t049 内置双形态断言, test.sh 增 -bt 变体。
 - 这也顺带修正 memtrack 的坏味道: bcheck.c 的报告是直接 `fprintf(stderr)` (L1645,
   L1653~1700), 后续可抽成同一个可插拔 hook 复用, 属可选重构 (见 §11).
 - dlfcn 已补齐 (t041 通过), dladdr 可得函数名; 但**源码行 `func@file:line` 仍走

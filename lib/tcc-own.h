@@ -52,8 +52,11 @@ TCC_OWN_WEAK_DECL int __bt_resolve_addr(unsigned long long pc, char *buf, unsign
  * 全局函数指针. 用户赋值(如写文件/日志/单测捕获)后报告即改道; 默认 NULL
  * 回落 stderr, 与既有行为一致.
  *
- * 注意: 不用弱函数而用可赋值指针 —— TCC 的 PE/COFF 后端不支持弱符号绑定
- * (tccelf.c 才有 STB_WEAK), 弱引用在 Windows 下不会被用户强定义覆盖.
+ * 注意: 不用弱函数而用可赋值指针 —— 弱引用只能回答"链接期是否提供",
+ * 无法在运行期改道; 可赋值指针让用户可在运行时切换/恢复 sink. (早期注释称
+ * "PE/COFF 后端不支持弱符号绑定, 弱引用恒为 NULL" 已过期: 2026-08-25 探针
+ * 实测 tcc 的 .o 为 ELF 中间对象, PE/ELF 链接共用 tccelf.c 解析, 弱引用可被
+ * bt-exe.o 强定义覆盖; bcheck.c/cpu-prof.c 的 __bt_resolve_addr 即走弱函数.)
  *
  *   __tccmem_writer = my_writer;      // 接管
  *   __tccmem_writer = 0;              // 恢复 stderr

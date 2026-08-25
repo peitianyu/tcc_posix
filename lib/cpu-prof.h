@@ -30,7 +30,9 @@
  *    单独跑实例, 或只用单线程再对比. v1 不据此严格归位.
  *  - sink 可插拔: 报告"一行"交给用户回调 (out, ctx), 不硬编码 stderr;
  *    cpu_prof_report() 只是内置一个 stderr sink 的便捷入口.
- *  - 均是可赋值/可传参的勾子, 不用弱函数 —— 本工具链 PE 后端无弱符号绑定.
+ *  - sink 是可赋值/可传参的指针 (运行时改道); 符号渲染钩子 __bt_resolve_addr
+ *    是弱函数, 实测 PE/ELF 链接均支持弱引用绑定 (bt-exe.o 强定义覆盖),
+ *    未链接 -bt 时归零回退裸地址 (t049 双路径覆盖确认).
  */
 #ifndef CPU_PROF_H
 #define CPU_PROF_H

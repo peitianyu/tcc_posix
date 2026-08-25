@@ -127,9 +127,76 @@ run_linux() {
     fi
 }
 
+# t049_cpu 双路径覆盖 (TODO.md P1): -bt 符号渲染 vs 独立构建裸地址回退。
+# win: tcc 自带链接流程 (-bt 自动链 bin/lib 的 bt-exe.o/bt-log.o + btstub)。
+win_bt_variant() {
+    local name="$1" src="tests/$1.c" tdir="$TESTDIR/run_$1"
+    local o="$TESTDIR/${name}_bt.o" exe="$TESTDIR/${name}_bt.exe"
+    if ! "$TCC" -c "$src" -o "$o" @build/tests-common.list -bt \
+        2>"$TESTDIR/$name.btcerr" \
+       || ! "$TCC" "$o" "$BASE/lib/cpu-prof.c" -I "$BASE/lib" -bt -o "$exe" \
+        2>"$TESTDIR/$name.btlerr"; then
+        FAIL=$((FAIL+1)); FAILED="$FAILED $name(-bt构建)"; echo "FAIL $name: -bt 编译/链接失败"
+        head -3 "$TESTDIR/$name.btcerr" "$TESTDIR/$name.btlerr"
+        return
+    fi
+    local out rc
+    out=$(cd "$tdir" && "../${name}_bt.exe" 2>&1); rc=$?
+    if [ "$rc" = "0" ] && echo "$out" | grep -q "@main@"; then
+        PASS=$((PASS+1)); echo "PASS $name (win, -bt 符号渲染 func@file:line)"
+    else
+        FAIL=$((FAIL+1)); FAILED="$FAILED $name(-bt rc=$rc)"; echo "FAIL $name (-bt): rc=$rc"
+        echo "$out" | head -5
+    fi
+}
+
+# linux: 手动链接 (-nostdlib) 不带 tcc 的 btstub 生成, 需自补三块:
+#   bt-exe.o/bt-log.o (linux 目标编译 lib/bt-exe.c, bt-log.c)
+#   btstub-lnx.o     (复刻 tccelf.c:tcc_add_btstub 的 rt_info + 构造函数)
+# 且链接必须带 -bt: tccelf.c 仅 do_debug 时合并输入 .o 的 .stab 调试节。
+linux_bt_variant() {
+    local name="$1" src="tests/$1.c" tdir="$TESTDIR/run_$1"
+    local lnx="$BASE/build/tcc-linux.exe"
+    [ -x "$lnx" ] || { echo "SKIP $name (-bt linux: 无 tcc-linux.exe)"; return; }
+    local o="$TESTDIR/${name}_bt_lnx.o" cpu="$TESTDIR/${name}_bt_cpu_lnx.o"
+    local exe="$TESTDIR/${name}_bt_linux"
+    local btinc="-I $BASE/src -I $BASE/include -I $BASE/src/posix/musl-1.1.11/arch/x86_64"
+    if [ ! -f "$TESTDIR/bt-exe-lnx.o" ]; then
+        if ! "$lnx" -c "$BASE/lib/bt-exe.c" -o "$TESTDIR/bt-exe-lnx.o" $btinc 2>"$TESTDIR/bt-exe.lerr" \
+           || ! "$lnx" -c "$BASE/lib/bt-log.c" -o "$TESTDIR/bt-log-lnx.o" $btinc 2>>"$TESTDIR/bt-exe.lerr" \
+           || ! "$lnx" -c "$BASE/tests/btstub-lnx.c" -o "$TESTDIR/btstub-lnx.o" $btinc 2>>"$TESTDIR/bt-exe.lerr"; then
+            FAIL=$((FAIL+1)); FAILED="$FAILED $name(-bt运行时构建)"; echo "FAIL $name: linux -bt 运行时对象构建失败"
+            head -3 "$TESTDIR/bt-exe.lerr"
+            return
+        fi
+    fi
+    if ! "$lnx" -c "$src" -o "$o" @build/tests-common.list -bt 2>"$TESTDIR/$name.btlcerr" \
+       || ! "$lnx" -c "$BASE/lib/cpu-prof.c" -o "$cpu" @build/tests-common.list -bt 2>>"$TESTDIR/$name.btlcerr" \
+       || ! ( cd "$BASE/build/linux-musl-obj" && "$lnx" -nostdlib -static -bt \
+            asm_crt1.o "$o" init_array.o init_fini.o libtcc1.o va_list.o \
+            "$cpu" "$TESTDIR/bt-exe-lnx.o" "$TESTDIR/bt-log-lnx.o" \
+            "$TESTDIR/btstub-lnx.o" libc.a -o "$exe" ) 2>>"$TESTDIR/$name.btlcerr"; then
+        FAIL=$((FAIL+1)); FAILED="$FAILED $name(-bt linux构建)"; echo "FAIL $name: linux -bt 编译/链接失败"
+        head -3 "$TESTDIR/$name.btlcerr"
+        return
+    fi
+    local wslpath
+    wslpath=$(echo "$exe" | sed -E 's|^/([a-z])/|\1/|; s|^|/mnt/|')
+    local out rc
+    out=$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' timeout 15 wsl -e bash -lc "'$wslpath'" 2>&1); rc=$?
+    if [ "$rc" = "0" ] && echo "$out" | grep -q "@main@"; then
+        PASS=$((PASS+1)); echo "PASS $name (linux, -bt 符号渲染 func@file:line)"
+    else
+        FAIL=$((FAIL+1)); FAILED="$FAILED $name(-bt lnx rc=$rc)"; echo "FAIL $name (linux -bt): rc=$rc"
+        echo "$out" | head -5
+    fi
+}
+
 echo "--- Windows 编译+运行 ---"
 for src in tests/t*.c; do
-    run_win "$(basename "$src" .c)"
+    n="$(basename "$src" .c)"
+    run_win "$n"
+    [ "$n" = "t049_cpu" ] && win_bt_variant "$n"
 done
 
 # -b 边界检查冒烟 (bcheck.o 部署回归; 2026-08-25 集成 install.sh 前 -b 报 not found)
@@ -154,7 +221,9 @@ fi
 if [ "$MODE_LINUX" = "1" ]; then
     echo "--- Linux (WSL) ---"
     for src in tests/t*.c; do
-        run_linux "$(basename "$src" .c)"
+        n="$(basename "$src" .c)"
+        run_linux "$n"
+        [ "$n" = "t049_cpu" ] && linux_bt_variant "$n"
     done
 fi
 
