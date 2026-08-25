@@ -3,6 +3,26 @@
 > 里程碑级变更摘要。README 只做概览。按时间序, 最新在上。
 > 完整逐提交历史用 `git log --oneline`。
 
+## 2026-08-25 — SIMD 标准交集化 (M2) + 编译选项瘦身
+
+**SIMD 收敛到 immintrin 标准交集** (docs/simd-standard.md §9):
+
+- 内核新增 `__m128/__m128d/__m128i` 内建向量类型 (VT_VECTOR), 打通聚合值路径
+  (gv/vstore/返回/初始化/函数实参), 值模型与 struct 一致 (16B 内存语义)。
+- 内建名收敛到标准: `_mm_load/storeu_si128`(movdqu)、`_mm_load/store_si128`、
+  `_mm_mullo_epi32/16`、`_mm_setzero_si128` 等; lib/simd.h 单模式 (`v4f/v2d/v4i/
+  v8h/v16b` = `__m128` 别名)。
+- **删除 tcc 独有扩展**: `__m128` 原生运算符 (+ - * /)、整型除法 `_mm_div_epi*`/
+  `_mm_div_epu*`、`_mm_mul_epi8`、全部私有名别名。`a+b` 现报 invalid operand
+  types (与 clang/gcc 一致)。
+- **t046 进 clang 闭环**: `desugar.ps1 tests/t046_simd.c` PASS (脱糖产物纯透传:
+  标准 C + immintrin.h), 全量 clang 闭环 26 通过/1 失败 → **27 通过/0 失败**。
+- **编译选项瘦身**: 逐一实验验证, 必要集 = `CONFIG_TCC_POSIX=1` +
+  `CONFIG_TCC_PREDEFS=1`。删除 `CONFIG_TCC_MUSL=1` 及配套 (SEMLOCK=0/TCCDIR/
+  MUSL_STDIO, musl 线路 tccrun 内存模式在 psxscl mmap ≥1GB reserve 下重定位
+  溢出, -run 不可用) 与冗余的 ONE_SOURCE。install.sh 直接部署 [1/3] 产物。
+- 全量回归: test.sh **77/77**, desugar 10/10 (含 t046)。
+
 ## 2026-08-24 — ucontext 协程基座移植 (nt64)
 
 musl 头声明但缺失的 4 个协程原语补全到 nt64 (x86_64)：

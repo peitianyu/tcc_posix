@@ -71,17 +71,15 @@
   **归属**: docs/reflect.md。
 
 - **脱糖 `--emit-c`**: `#include_next` 顺序敏感不保留; 需 `-DCONFIG_TCC_PREDEFS=1`
-  否则产物残留 `#include <tccdefs.h>` (clang 无此文件); SIMD 的 TCC 私有内建
-  (`_mm_load_epi16/_mm_div_epi32`) 不是 immintrin.h 标准内建, 涉及其用例无法直接
-  交 gcc/clang 脱糖(只能用标准内建交集)。
+  否则产物残留 `#include <tccdefs.h>` (clang 无此文件)。SIMD 已收敛到 immintrin
+  标准交集 (t046_simd desugar 闭环 PASS, 见 docs/simd-standard.md §9)。
   **归属**: docs/desugar.md。
 
-- **SIMD 语法边界 (t046_simd, 不进 clang 闭环)**: tcc 特制 SIMD 语法 —— `v4f`
-  (16 字节 struct) + `.x` 字段访问 + `_mm_load_ps` 内建透传, 标准 C 下
-  `v4f x = _mm_load_ps(a)`(返回 `__m128` 直接赋 struct) 与 `dacc.x` 字段访问
-  存在固有矛盾, 无法等价复现。属 TCC 语言扩展; 脱糖产物仅支持 stdintrinc 交集
-  (纯 `_mm_*` + `__m128`, 无 `.x`)。
-  **归属**: docs/desugar.md §4.5。
+- **SIMD 标准交集局限 (t046_simd, 已闭环)**: `__m128` 无原生运算符/无 `.x` 字段
+  访问 (与 clang/gcc 一致); 无整型除法/8 位乘法 intrinsic (无标准等价, 已删除)。
+  取低字用 `((float*)&v)[0]` 或 `_mm_cvtss_f32`。脱糖产物纯透传 (标准 C +
+  immintrin.h), clang 编译运行与 tcc -run 数值一致。
+  **归属**: docs/simd-standard.md §9 / docs/desugar.md §4.5。
 
 - **TLS 相关**: emutls 为单线程懒分配器; 函数内 `__thread` 局部变量按普通自动变量
   处理 (天然 per-thread, 不拦截不报错)。

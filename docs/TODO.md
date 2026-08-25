@@ -10,7 +10,7 @@
 - [x] TLS via emutls (t047)
 - [x] 内存治理 5 层 (t-own/epoch/esc/refcnt, memtrack)
 - [x] 语言扩展: defer (t029)、model (t031-t032b)、operator (t050/t058/t059)、reflect (t051)、
-      SIMD 原生运算符 (t046 + x86_64-simd, simd_demo)
+      SIMD 标准 intrinsic 交集 (t046 + x86_64-simd; 2026-08-25 M2 收敛, 原生运算符/私有名已删)
 - [x] operator 补全: 比较 (== != < <= > >=)、一元 (! ~)、自增自减 (++ --)、
       复合赋值 (+= -= *= /= %=) — t059; 已同步 `--emit-c` 脱糖
 - [x] 脱糖闭环: `--emit-c` + operator/defer/model + clang 驱动 + 性能对照 (≈37×)

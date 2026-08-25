@@ -1,6 +1,6 @@
 # 脱糖性能对照: tcc (验证前端) vs clang -O3 (正式产物)
 
-> 2026-08-23 实测于 `build/simd_bench.c`.
+> 2026-08-23 实测于 `build/simd_bench.c` (该基准文件为临时产物, 未入 git)。
 > 目的: 验证"脱 sugar→标准C→clang -O3"管线在计算密集场景下的性能优势,
 > 即文档 desugar.md 中的核心卖点(补 TCC 无 AVX/FMA 短板, 正式产物吃满硬件)。
 
@@ -10,7 +10,8 @@
 
 - `N = 1<<22`(每轮 4M float, 16MB 双缓冲), `ITER = 200` 轮
 - 每次内聚处理 4 个 `float`, 4 个独立累加器(ILP), 只输出最终校验和 `s`
-- 原生运算符 `acc = acc + x0*y0`(TCC 侧 → addps; clang 侧 `__m128` 原生 → vmulps/vaddps/vfmadd)
+- 用标准 intrinsic 累加 `acc = _mm_add_ps(acc, _mm_mul_ps(x, y))`(2026-08-25
+  M2 后 tcc 已删除 `__m128` 原生运算符, 写法与 clang 侧完全一致)
 - 64 字节对齐数组 + `_mm_load_ps/_mm_store_ps`, 全 16 字节对齐无崩访
 
 ## 测量方法
@@ -37,8 +38,9 @@
 
 1. **性能优势证实**: clang -O3 + AVX2/FMA 天然吃满向量硬件,
    相对 tcc 标量 SSE 提速 ~37× —— 这就是 desugar.md 立项要拿的收益。
-2. **脱糖零成本**: `v4f a+b` 原样透传, 不改写为 `_mm_add_ps`; clang 侧 `__m128`
-   原生运算符直接编成 `vaddps/vfmadd`, 无中间抽象开销。
+2. **脱糖零成本**: `_mm_add_ps/_mm_mul_ps` 等 intrinsic 原样透传, 不改写;
+   clang 侧 `-O3` 把 intrinsic 直接编成 `vaddps/vfmadd`, 无中间抽象开销。
+   (tcc 侧 M2 后无 `__m128` 原生运算符, 写法与 clang 统一为 intrinsic。)
 3. **验证分工成立**: tcc 用于秒级语义/内存治理迭代, clang 用于最终高性能产物;
    同一份源码、两条编译链、数字一致。
 

@@ -29,8 +29,7 @@ TCC 扩展(operator/model/defer)是上部抽象, 脱糖 = 把扩展"降级"回�
 
 | 扩展 | 源码 | 脱糖落点 | 需要编译器动作 | 难度 |
 |---|---|---|---|---|
-| SIMD 原生运算符 | `v4f a=b+c` | **原样透传**(`a=b+c`) | 双模式 `simd.h`: gcc 侧 `v4f=__m128`, 运算符原生编成 addps | 无(已落地) |
-| `_mm_*` 内建 | `_mm_add_ps(a,b)` | 原样(已是标准C) | 透传 | 无 |
+| SIMD intrinsic | `_mm_add_ps(a,b)` 等 | **原样透传**(已是标准C) | 单模式 `simd.h`: tcc 与 clang 同用 `__m128` 家族 | 无 |
 | operator | `a+b`(struct) | `operator+(a,b)` 函数调用 | gen_op 判 struct+存在 operator→改写 | 低 |
 | model 泛型 | `model struct Vec(T)` | 实例化后具体 struct/函数 | 实例化点展开出标准C | 中 |
 | defer | `defer cleanup(x)` | `__attribute__((cleanup))` / goto 展开 | defer 注册点展开 | 中 |
@@ -60,11 +59,12 @@ tcc --emit-c -o out.desugared.c in.c
   `#include <tccdefs.h>`(tcc 私有头, clang 无此文件)。
 - 产物为标准 C + 行标记(`# 1 "file"`), clang 可直接编译。
 
-### 4.2 扩展点改写钩子 (SIMD 已落地; operator/defer/model 待 P1)
+### 4.2 扩展点改写钩子 (SIMD 已闭环; operator/defer/model 已落地)
 
-SIMD 原生运算**不需要改写**: 通过双模式 `include/simd.h` 把 `v4f` 在 gcc/clang 侧映射为
-`__m128` 原生向量类型, 脱糖时 `a+b` 原样透传, 由 clang/gcc 原生编成 `addps`(VEX/AXV 编码),
-无需改写成 `_mm_add_ps`。`_mm_*` 内建本就透传(命名/语义与 `immintrin.h` 一一对应)。
+SIMD intrinsic **不需要改写**: 单模式 `lib/simd.h` 让 tcc 与 clang/gcc 共用 `__m128`
+家族类型与 immintrin 标准名, 脱糖时 `_mm_add_ps` 等原样透传, clang/gcc 原生编成
+`addps`(VEX/AVX 编码)。`__m128` 原生运算符(tcc 侧曾支持)已于 2026-08-25 M2 删除,
+写法与 clang 交集一致。
 其余扩展落地处仍需在 codegen 之外**追加发射标准 C 文本**:
 
 - operator 命中 → 发射 `operator+(a, b)` 调用文本。
@@ -77,9 +77,10 @@ SIMD 原生运算**不需要改写**: 通过双模式 `include/simd.h` 把 `v4f`
 - 数字一致终验需在 **Linux/musl**(装有 clang)执行:
   `clang -O3 -mavx2 -mfma --sysroot=<musl> t052.desugared.c -o t052_release`,
   其输出与 TCC `-run` 输出逐项一致。
-- SIMD 运算已闭环 `build/simd_demo.c`: 原生运算符 + 标准 `_mm_*` 内建交集; TCC 编译运行 PASS,
-  `--emit-c` 脱糖(`#include "simd.h"` 保留、`a+b` 透传)交 `gcc -O3 -mavx2` 编译运行 PASS,
-  且 `objdump` 确认生成 `vaddps/vmulps/vsubps/vdivps`(AVX 矢量指令, 非标量降级)。
+- SIMD 已闭环 `tests/t046_simd.c`(2026-08-25 M2 标准交集化): 标准 `_mm_*` 内建
+  交集 + `__m128` 家族类型; TCC 编译运行 PASS, `--emit-c` 脱糖(产物纯透传: 标准 C +
+  immintrin.h)交 clang/gcc 编译运行 PASS 且数字一致。`__m128` 原生运算符/私有名
+  已删除(见 docs/simd-standard.md §9)。
 - operator、defer 两条扩展用例待 keyword 级改写(P1)后补入。
 - **operator 脱糖已闭环** `tests/t050_operator.c` + `tests/t053_operator_expr.c`(已生效):
   `--emit-c` 在 `tccpp` 的语句级缓冲(`dg_*` 模块)做 token 级改写; 两类验证均 PASS。
@@ -115,7 +116,7 @@ SIMD 原生运算**不需要改写**: 通过双模式 `include/simd.h` 把 `v4f`
 | 阶段 | 内容 | 交付 | 状态 |
 |---|---|---|---|
 | P0 | `--emit-c` 开关 + 标准C 透传 + 保留 include + 预定义头不落地 | t052 标准C基准 | 已落地 |
-| P0 | SIMD 原生运算符透传(双模式 simd.h: v4f→gcc __m128, a+b 原生 addps) | build/simd_demo.c 闭环 | ✅ 已落地 |
+| P0 | SIMD 标准 intrinsic 透传(单模式 simd.h: `__m128` 家族 + immintrin 交集) | tests/t046_simd.c 闭环 | ✅ 已落地 |
 | P0 | operator 脱糖: 定义改名 + 赋值右值忠实改写(类型上推 + 优先级爬升) | t050 + t053 闭环 | ✅ 已落地 |
 | P1 | operator 泛化(嵌套/混合优先级完整表达式改写) | t053 + t058 闭环 | ✅ 已落地 |
 | P1 | defer 脱糖(作用域逆序重放 + return 早退) | t055 + t056 闭环 | ✅ 已落地 |
@@ -177,7 +178,7 @@ t053/054/058/076/t052/t064 为既有问题), 无新增回归。
 
 ## 4.5 闭环补齐: defer 早退 / vptr 保真 / reflect 脱糖 / SIMD 边界 (2026-08-25)
 
-**现状**: 全量 clang 闭环 **26 通过 / 1 失败** (t046_simd 为语法边界, 见下)。
+**现状**: 全量 clang 闭环 **27 通过 / 0 失败** (t046_simd 已于 M2 闭环, 见下)。
 
 **1) defer 早退补齐 (t029_defer 闭环)** — `src/tccpp.c`
 - 原 `dg_is_defer_line` 只认"行首 defer"。换为行内任意位置 (`dg_has_defer`),

@@ -39,8 +39,8 @@ reflect/SIMD、cpu-prof、及系统型回归 t033-t045(socket/process/select/ter
 timer/mq/ipc/aio…)。完整矩阵见 [docs/system-modules.md](docs/system-modules.md)。
 
 **扩展语法 clang 闭环** (desugar.ps1)：`--emit-c` 脱糖产物交 WSL clang -O3 编译运行,
-与 tcc -run 输出逐字节比对 —— **26 通过 / 1 失败**(t046 为 tcc 特制 SIMD 语法边界,
-见 [docs/desugar.md](docs/desugar.md) §4.5)；本例覆盖 defer 早退/model 泛型/operator/
+与 tcc -run 输出逐字节比对 —— **27 通过 / 0 失败**(t046_simd 已随 SIMD 标准交集化
+闭环, 见 [docs/desugar.md](docs/desugar.md) §4.5)；本例覆盖 defer 早退/model 泛型/operator/
 reflect 脱糖/STL 容器与抽象迭代器。
 
 ---
@@ -71,7 +71,7 @@ reflect 脱糖/STL 容器与抽象迭代器。
 | 系统模块 | socket/process/statfs/pwdgrp/select/termios/dlfcn/timer/mq/ipc/aio | system-modules.md |
 | CPU 周期插桩 | `rdtsc` 插桩,总周期/次数/avg 归因到函数 | cpu-prof.md |
 | 语言扩展 | defer / model 泛型 / operator / `__builtin_reflect` | features §4, reflect.md |
-| SIMD | `v4f` 原生运算符 + `_mm_*` SSE 内建(x86_64-simd 模块) | features §4.3 |
+| SIMD | `__m128` 家族 + `_mm_*` SSE 标准 intrinsic 交集(x86_64-simd 模块) | features §4.3 |
 | 脱糖输出 | `--emit-c` 标准 C → clang/LLVM 正式产物(≈37×) | desugar.md, desugar-perf.md |
 | `@listfile` | `tcc @build.txt` 包管理 + glob + `%if` 编译选择 | listfile.md |
 
@@ -90,8 +90,8 @@ Array(float) a = { buf, 3 };   if (max2(int)(3, 7) != 7) ...
 struct Vec3 operator+ (struct Vec3 a, struct Vec3 b) { ... }
 struct Vec3 c = a + b;   struct Vec3 e = a + b*b;
 
-/* SIMD 原生运算符 */
-v4f c = a + b;                    /* addps */
+/* SIMD 标准 intrinsic (__m128 家族, 与 clang/gcc 交集一致) */
+__m128 c = _mm_add_ps(a, b);         /* addps */
 
 /* 结构体反射 */
 const struct __refl *r = __builtin_reflect(struct Vec3);

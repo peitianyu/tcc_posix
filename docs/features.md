@@ -121,22 +121,23 @@ if (max2(int)(3, 7) != 7) ...       /* 实例化调用: 生成内部函数 max2_
 内部名按数值而非文本签名确定。**已知限制**: 模板名与成员/参数名不得重复 (实例化
 替换会冲突); 函数模板实参必须是类型 (非类型模板参数不支持)。
 
-### 4.3 SIMD 打包内建 + 原生运算符 (t046 + x86_64-simd)
+### 4.3 SIMD 标准 intrinsic 交集 (t046 + x86_64-simd)
 
-128-bit 向量类型 + 对应 SSE 内建(`_mm_*`),值直接落内存槽,内建发射原生打包 SSE
-指令。双模式 `include/simd.h`: TCC 侧定义 16B 对齐 struct 由 `simd_vector_kind()`
-识别、`simd_gen_op()` 钩子在 gen_op 直接发射 addps/addpd; gcc/clang 侧映射为
-`__m128/__m128i` 原生向量类型。处理独立成 `src/x86_64-simd.c` 模块 (`simd_gen_op` /
-`simd_builtin_dispatch` 两个钩子)。
+128-bit 向量类型 `__m128/__m128d/__m128i`(内核内建类型 VT_VECTOR, 16B/align16,
+lib/simd.h 另给 `v4f/v2d/v4i/v8h/v16b` 兼容别名) + immintrin 标准 intrinsic
+(`_mm_*`), 值落 16 字节对齐内存槽, 内建发射原生打包 SSE 指令。处理独立成
+`src/x86_64-simd.c` 模块 (`simd_builtin_dispatch` 钩子)。
 
 ```c
-v4f a = { 1,2,3,4 }, b = { 5,6,7,8 };
-v4f c = a + b;                    /* addps (float 无需 66 前缀) */
-v4i r;  _mm_store_ps((float*)&r, _mm_cvttps_epi32(c));  /* 截断 f→i */
+__m128 a = _mm_load_ps(pa), b = _mm_load_ps(pb);
+__m128 c = _mm_add_ps(a, b);               /* addps */
+__m128i r; _mm_store_ps((float*)&r, _mm_cvttps_epi32(c));  /* 截断 f→i */
 ```
 
-类型族 `v4f/v2d/v4i/v8h/v16b`。整型/double 前缀细节与除法符号差异见 README 历史
-或 docs/matrix-library.md 附录。
+**标准交集边界** (与 clang/gcc 一致): 无 `__m128` 原生运算符 (`a+b` 报
+invalid operand types, 用 `_mm_add_ps`); 无字段访问 `.x`(用 `((float*)&v)[0]`);
+无整型除法/8 位乘法 intrinsic (无标准等价, 已删除)。脱糖 `--emit-c` 产物纯透传
+(标准 C + immintrin.h), 可交 clang/gcc 编译运行。详见 docs/simd-standard.md。
 
 ### 4.4 运算符重载 `operator` 语法 (t050 / t058 / t059)
 

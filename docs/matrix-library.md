@@ -103,20 +103,21 @@ v4f c0 = _mm_load_ps(&C[d][jj]);         /* 各列累加器 */
     ...
 for (k = 0; k < KC; k++) {
     v4f b = /* B 当前行的 4 列打包 */;
-    c0 += a_row * ...;                   /* 逐列乘累加 */
+    c0 = _mm_add_ps(c0, _mm_mul_ps(a_row, b));   /* 逐列乘累加 (intrinsic 写法) */
 }
 _mm_store_ps(&C[d][jj], c0);
 ```
 
-- 打包整型除法属技术例外: add/sub/mul 符号无关; 除法走标量兜底
-  (见 README SIMD 节的 66 前缀 / 除数寄存器加载规则).
+- 2026-08-25 M2 后 tcc 删除 `__m128` 原生运算符 (与 clang/gcc 交集一致),
+  一律用 `_mm_add_ps/_mm_mul_ps` 等标准 intrinsic; 无整型除法 intrinsic。
 - 本方案浮点透传处理器 FMA 指令 (`vfmadd`), 编译器已能经内建发射.
 
 ### 5.3 已有 SIMD 原语即积木
 
 微内核不发明指令, 复用 `src/x86_64-simd.c` 已支持的打包操作:
-`_mm_load/_store/_setzero/_add/_mul/_fma`(v4f). 由编译器内建直接发射成
-movaps/addps/mulps/vfmadd — 与手写汇编平铺具备同构描述力.
+`_mm_load/_store/_setzero/_add/_sub/_mul`(v4f, 标准 intrinsic). 由编译器内建直接
+发射成 movaps/addps/mulps — 与手写汇编平铺具备同构描述力. (tcc 无 `_mm_fma*`
+内建; FMA 由脱糖产物在 clang -O3 侧编出, 见 desugar-perf.md.)
 
 ---
 
