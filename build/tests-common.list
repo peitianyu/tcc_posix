@@ -1,0 +1,20 @@
+# tests 公共编译选项 — test.sh 消费; 相对仓库根 (test.sh 已 cd "$BASE")。
+# tcc-win.exe (@os=win) 与 tcc-linux.exe (@os=linux) 共用, %if 分支选头文件。
+# win: nt64 头优先 (include/ 兜底) + lib/ 与仓库根供 STL (t062+) 的
+#   #include "lib/stl/..." 命中; -DSTL_CHECKS 开断言。
+# linux: 固化 include/ (Linux musl 头) + x86_64 arch/bits。
+%if @os == win
+-I src/posix/musl-nt64/include
+-I src/posix/musl-nt64/arch/nt64
+-I include
+-I lib
+-I .
+-DSTL_CHECKS
+%else
+-I include
+-I src/posix/musl-1.1.11/arch/x86_64
+-I lib
+-I .
+%end
+-std=c99
+-D_XOPEN_SOURCE=700

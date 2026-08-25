@@ -1,0 +1,5 @@
+-DTCC_TARGET_X86_64
+-DCONFIG_TCC_PREDEFS=1
+-o build/tcc-linux.exe
+src/tcc.c
+-I src

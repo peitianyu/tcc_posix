@@ -1,0 +1,5 @@
+-DCONFIG_TCC_POSIX=1
+-DCONFIG_TCC_PREDEFS=1
+-o build/tcc-win.exe
+src/tcc.c
+-I src
