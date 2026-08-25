@@ -196,33 +196,22 @@
      DEF(TOK_mm_sub_pd, "_mm_sub_pd")
      DEF(TOK_mm_mul_pd, "_mm_mul_pd")
      DEF(TOK_mm_div_pd, "_mm_div_pd")
-     /* SIMD int32: v4i (paddd/psubd/pmulld + 标量 idiv 兜底) */
-     DEF(TOK_mm_setzero_epi32, "_mm_setzero_epi32")
-     DEF(TOK_mm_load_epi32, "_mm_load_epi32")
-     DEF(TOK_mm_store_epi32, "_mm_store_epi32")
+     /* SIMD int32: v4i (paddd/psubd + pmulld) — 标准 intrinsic 名 (immintrin 交集) */
+     DEF(TOK_mm_setzero_si128, "_mm_setzero_si128")
+     DEF(TOK_mm_loadu_si128, "_mm_loadu_si128")
+     DEF(TOK_mm_storeu_si128, "_mm_storeu_si128")
+     DEF(TOK_mm_load_si128, "_mm_load_si128")
+     DEF(TOK_mm_store_si128, "_mm_store_si128")
      DEF(TOK_mm_add_epi32, "_mm_add_epi32")
      DEF(TOK_mm_sub_epi32, "_mm_sub_epi32")
-     DEF(TOK_mm_mul_epi32, "_mm_mul_epi32")
-     DEF(TOK_mm_div_epi32, "_mm_div_epi32")
-     DEF(TOK_mm_div_epu32, "_mm_div_epu32")
-     /* SIMD int16: v8h (paddw/psubw/pmullw + 标量数除法) */
-     DEF(TOK_mm_setzero_epi16, "_mm_setzero_epi16")
-     DEF(TOK_mm_load_epi16, "_mm_load_epi16")
-     DEF(TOK_mm_store_epi16, "_mm_store_epi16")
+     DEF(TOK_mm_mullo_epi32, "_mm_mullo_epi32")
+     /* SIMD int16: v8h (paddw/psubw + pmullw) */
      DEF(TOK_mm_add_epi16, "_mm_add_epi16")
      DEF(TOK_mm_sub_epi16, "_mm_sub_epi16")
-     DEF(TOK_mm_mul_epi16, "_mm_mul_epi16")
-     DEF(TOK_mm_div_epi16, "_mm_div_epi16")
-     DEF(TOK_mm_div_epu16, "_mm_div_epu16")
-     /* SIMD int8: v16b (paddb/psubb + 标量乘法/除法) */
-     DEF(TOK_mm_setzero_epi8, "_mm_setzero_epi8")
-     DEF(TOK_mm_load_epi8, "_mm_load_epi8")
-     DEF(TOK_mm_store_epi8, "_mm_store_epi8")
+     DEF(TOK_mm_mullo_epi16, "_mm_mullo_epi16")
+     /* SIMD int8: v16b (paddb/psubb) */
      DEF(TOK_mm_add_epi8, "_mm_add_epi8")
      DEF(TOK_mm_sub_epi8, "_mm_sub_epi8")
-     DEF(TOK_mm_mul_epi8, "_mm_mul_epi8")
-    DEF(TOK_mm_div_epi8, "_mm_div_epi8")
-    DEF(TOK_mm_div_epu8, "_mm_div_epu8")
     /* ---- SIMD 常用扩展: 位运算 / min/max / sqrt / 比较 / 移位 / 类型转换 ---- */
     /* float32: 位运算 (andps/orps/xorps/andnps) */
     DEF(TOK_mm_and_ps, "_mm_and_ps")

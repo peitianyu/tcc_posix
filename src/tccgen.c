@@ -1743,6 +1743,7 @@ static void add_local_bounds(Sym *s, Sym *e)
         /* Add arrays/structs/unions because we always take address */
         if ((s->type.t & VT_ARRAY)
             || (s->type.t & VT_BTYPE) == VT_STRUCT
+            || (s->type.t & VT_BTYPE) == VT_VECTOR
             || s->a.addrtaken) {
             /* add local bound info */
             int align, size = type_size(&s->type, &align);
@@ -1930,7 +1931,7 @@ ST_FUNC int gv(int rc)
 #endif
 
         bt = vtop->type.t & VT_BTYPE;
-        if (bt == VT_VOID || bt == VT_STRUCT) /* should not happen */
+        if (bt == VT_VOID || bt == VT_STRUCT || bt == VT_VECTOR) /* should not happen */
             return vtop->r;
 
 #ifdef TCC_TARGET_RISCV64
@@ -2921,7 +2922,7 @@ static int compare_types(CType *type1, CType *type2, int unqualified)
         type1 = pointed_type(type1);
         type2 = pointed_type(type2);
         return is_compatible_types(type1, type2);
-    } else if (bt1 == VT_STRUCT) {
+    } else if (bt1 == VT_STRUCT || bt1 == VT_VECTOR) {
         return (type1->ref == type2->ref);
     } else if (bt1 == VT_FUNC) {
         return is_compatible_func(type1, type2);
@@ -3027,7 +3028,8 @@ static int combine_types(CType *dest, SValue *op1, SValue *op2, int op)
         }
         if (op == CMP_OP)
           type.t = VT_SIZE_T;
-    } else if (bt1 == VT_STRUCT || bt2 == VT_STRUCT) {
+    } else if (bt1 == VT_STRUCT || bt2 == VT_STRUCT
+               || bt1 == VT_VECTOR || bt2 == VT_VECTOR) {
         if (op != '?' || !compare_types(type1, type2, 1))
           ret = 0;
         type = *type1;
@@ -3304,12 +3306,7 @@ redo:
 	    vswap();
 	}
 	goto redo;
-#ifdef TCC_TARGET_X86_64
-    } else if (simd_gen_op(op)) {
-        return;   /* SIMD 原生运算符 (v4f+v4f 等) 已由后端模块发射 */
-    } else
-#endif
-    if (gen_op_operator(op)) {
+    } else if (gen_op_operator(op)) {
         return;   /* C 运算符重载: operator<op> 改写为函数调用 */
     } else if (!combine_types(&combtype, vtop - 1, vtop, op_class)) {
 op_err:
@@ -3916,6 +3913,7 @@ static void verify_assign_cast(CType *dt)
         }
         /* XXX: more tests */
         break;
+    case VT_VECTOR:
     case VT_STRUCT:
     case_VT_STRUCT:
         if (!is_compatible_unqualified_types(dt, st)) {
@@ -3942,7 +3940,7 @@ ST_FUNC void vstore(void)
     dbt = ft & VT_BTYPE;
     verify_assign_cast(&vtop[-1].type);
 
-    if (sbt == VT_STRUCT) {
+    if (sbt == VT_STRUCT || sbt == VT_VECTOR) {
         /* if structure, only generate pointer */
         /* structure assignment : generate memcpy */
         size = type_size(&vtop->type, &align);
@@ -5782,13 +5780,15 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
         case TOK___m128:
         case TOK___m128d:
         case TOK___m128i:
-            /* 标准 SIMD 向量: VT_VECTOR, 16B/align16 (M1, docs/simd-standard.md);
-             * M2 再以 ref 内建符号细分 f/d/i. */
-            u = VT_VECTOR;
-            t = (t & ~(VT_BTYPE|VT_LONG)) | u;
-            type->ref = NULL;
-            typespec_found = 1;
-            next();
+            /* 标准 SIMD 向量: VT_VECTOR, 16B/align16, ref 区分 f/d/i (M2). */
+            {
+                int vk = (tok == TOK___m128) ? 0 : (tok == TOK___m128d) ? 1 : 2;
+                u = VT_VECTOR;
+                t = (t & ~(VT_BTYPE|VT_LONG)) | u;
+                type->ref = simd_kind_ref(vk);
+                typespec_found = 1;
+                next();
+            }
             break;
         case TOK_ENUM:
             struct_decl(&type1, VT_ENUM);
@@ -7766,7 +7766,8 @@ special_math_val:
             nb_args = regsize = 0;
             ret.r2 = VT_CONST;
             /* compute first implicit argument if a structure is returned */
-            if ((s->type.t & VT_BTYPE) == VT_STRUCT) {
+            if ((s->type.t & VT_BTYPE) == VT_STRUCT
+                || (s->type.t & VT_BTYPE) == VT_VECTOR) {
                 variadic = (s->f.func_type == FUNC_ELLIPSIS);
                 ret_nregs = gfunc_sret(&s->type, variadic, &ret.type,
                                        &ret_align, &regsize);
@@ -8220,7 +8221,7 @@ static void expr_cond(void)
 
         /* keep structs lvalue by transforming `(expr ? a : b)` to `*(expr ? &a : &b)` so
            that `(expr ? a : b).mem` does not error  with "lvalue expected" */
-        islv = VT_STRUCT == (type.t & VT_BTYPE);
+        islv = (type.t & VT_BTYPE) == VT_STRUCT || (type.t & VT_BTYPE) == VT_VECTOR;
 
         /* now we convert second operand */
         if (c != 1) {
@@ -8349,7 +8350,8 @@ ST_FUNC int expr_const(void)
 #ifndef TCC_TARGET_ARM64
 static void gfunc_return(CType *func_type)
 {
-    if ((func_type->t & VT_BTYPE) == VT_STRUCT) {
+    if ((func_type->t & VT_BTYPE) == VT_STRUCT
+        || (func_type->t & VT_BTYPE) == VT_VECTOR) {
         CType type, ret_type;
         int ret_align, ret_nregs, regsize;
         ret_nregs = gfunc_sret(func_type, func_var, &ret_type,
@@ -9699,7 +9701,8 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
                     struct {int x,y;} a = {1,2}, b = {3,4}, c[] = {a,b};
                In that case we need to parse the element in order to check
                it for compatibility below */
-            || (type->t & VT_BTYPE) == VT_STRUCT)
+            || (type->t & VT_BTYPE) == VT_STRUCT
+            || (type->t & VT_BTYPE) == VT_VECTOR)
         ) {
         int ncw_prev = nocode_wanted;
         if ((flags & DIF_SIZE_ONLY) && !p->sec)

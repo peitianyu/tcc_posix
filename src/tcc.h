@@ -1664,15 +1664,13 @@ ST_FUNC void gen_opf(int op);
 ST_FUNC void gen_v128(int op, int r, Sym *sym, int c);
 ST_FUNC void gen_v128_pi(int op, int r, Sym *sym, int c);
 ST_FUNC void gen_v128_sse41(int op, int r, Sym *sym, int c);
-ST_FUNC void gen_vec_div(int esize, int n, int us, int ao, int bo, int dst);
-ST_FUNC void gen_vec_mul8(int n, int ao, int bo, int dst);
 ST_FUNC void gen_v128_shift(int op, int count);
 ST_FUNC void gen_v128_cmp(int prefix66, int imm, int r, Sym *sym, int c);
 ST_FUNC void gen_v128_f3(int op, int r, Sym *sym, int c);
-/* x86_64-simd.c 后端接口: 内建函数调度 / 原生运算符路由 / 向量类型判定 */
+/* x86_64-simd.c 后端接口: 内建函数调度 / 向量类型判定 */
 ST_FUNC int simd_builtin_dispatch(int tok);
-ST_FUNC int simd_gen_op(int op);
 ST_FUNC int simd_vector_kind(CType *t);
+ST_FUNC void *simd_kind_ref(int kind);
 ST_FUNC void gen_cvt_ftoi(int t);
 ST_FUNC void gen_cvt_itof(int t);
 ST_FUNC void gen_cvt_ftof(int t);

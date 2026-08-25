@@ -159,3 +159,40 @@ VECTOR 的 `type_size` 已返回 16，故**让 VT_VECTOR 复用 struct 聚合路
 - `lib/simd.h`：单模式（tcc 免 immintrin，clang include immintrin；`v4f/v2d/v4i/v8h/v16b`
   = `__m128` 别名）。
 - `tcc.h`：声明 `simd_kind_ref`。
+## 9. M2 落地与扩展收敛 (2026-08-25)
+
+### M2 完成: VT_VECTOR 聚合值路径贯穿
+- tccgen.c 并入点（`bt==VT_STRUCT || bt==VT_VECTOR`）: gv() 早退(1934)、compare_types(2925)、
+  combine_types(3032)、verify_assign_cast(3916)、vstore memcpy(3943)、unary 调用 sret(7770)、
+  expr_cond islv(8224)、gfunc_return(8354)、decl_initializer(9705)、add_local_bounds(1746)。
+- 未并入（正确排除）: `type_size` ref 布局遍历、`find_field`/`check_fields` 成员访问、
+  `decl_initializer_alloc` flex-array 检测(9955)、`classify_x86_64_inner` 字段遍历(SysV 分支)、
+  x86_64 `load()` 小标量化 —— VECTOR ref 是身份标签, 不可解引用。
+- `simd_ensure_slot(n)`: 操作数非 16 对齐本地槽(LLOCAL 参数/全局/解引用指针)时经 vstore
+  复制到临时槽 —— 修复 `movdqa [rbp+bo]` 未对齐 #GP (LLOCAL 参数槽 8 对齐 + 内容是指针)。
+- SysV 分支: `classify_x86_64_inner` 加 `case VT_VECTOR: return x86_64_mode_memory`。
+
+### 标准名收敛 (删除 tcc 私有名/扩展, 2026-08-25 决策)
+按"不要 tcc 独有扩展"收敛到 immintrin 标准交集:
+- 删除内建: `_mm_div_epi32/16/8`、`_mm_div_epu32/16/8`(标量除法)、`_mm_mul_epi8`(无标准);
+  `simd_gen_op`(__m128 原生 + - * /)与 tccgen.c 路由一并删除 → `__m128 a+b` 报
+  "invalid operand types"(与 clang 一致)。
+- 删除私有名别名: `_mm_load/store_epi32/16/8` → `_mm_load/storeu_si128`(movdqu 未对齐)/
+  `_mm_load/store_si128`; `_mm_mul_epi32/16` → `_mm_mullo_epi32/16`; `_mm_setzero_epi32/16/8`
+  → `_mm_setzero_si128`。
+- 删除 `gen_vec_div`/`gen_vec_mul8`(x86_64-gen.c) 与 tcc.h 声明。
+- `__m128i` 单类型归一: I4/W16/B8 共享 ref tag(`simd_kind_tag`), kind 语义由内建名承载
+  (v8h sav = _mm_loadu_si128(...) 类型兼容); W16/B8 仅剩 add/sub。
+
+### M3 验收结果
+- tcc -run: `tests/t046_simd.c` PASS; 全量 `test.sh` **77/77**。
+- clang 闭环: `desugar.ps1 tests/t046_simd.c` PASS (CLANG-FAIL → PASS); desugar 核心 10/10。
+- 脱糖产物纯透传: `__m128` 类型 + 标准 `_mm_*` 名 + `#include <immintrin.h>`(simd.h
+  `__TCC_DESUGAR__` 分支恢复用于产物透传)。
+
+### 基础设施教训 (bin/tcc.exe 形态)
+- bin/tcc.exe 必须是 `CONFIG_TCC_POSIX=1` 构建(默认链 ELF libc.a 而非 msvcrt);
+  a813951 后 install.sh 的 musl 自编译因 environ(weak 符号 alacarte) 失败 fallback 到
+  原生 build → 链接 musl 测试报 `unresolved stdout`/dllimport。正确构建命令(老 install
+  逻辑): `BOOT_TCC -DCONFIG_TCC_POSIX=1 -DCONFIG_TCC_PREDEFS=1 -o build/tcc-win.exe
+  src/tcc.c -I src -DONE_SOURCE=1`, 且 build/lib/libc.a 就位。

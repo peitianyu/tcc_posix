@@ -391,46 +391,6 @@ ST_FUNC void gen_v128_sse41(int op, int r, Sym *sym, int c)
     }
 }
 
-/* 通用整型标量除法兜底: SSE 无打包整型除法. 对每个元素把被除数扩展(ESIZE
-   为 1/2 时)或原样(4)装载进 EAX, 除数装载进 ECX, 做 32 位 div/idiv, 存回低
-   字节. 用 ECX 存除数是为了避免 32 位 idivl 直接读内存时吃到相邻元素的高位.
-   us=1 无符号(movzx + xor edx + div), us=0 有符号(movsx + cdq + idiv).
-   ao/bo/dst 都是 16 字节对齐槽的 [rbp+off] 偏移. 调用方须已 save RAX/RDX/RCX. */
-ST_FUNC void gen_vec_div(int esize, int n, int us, int ao, int bo, int dst)
-{
-    int i;
-    for (i = 0; i < n; i++) {
-        int aoff = ao + esize*i, boff = bo + esize*i, doff = dst + esize*i;
-        /* 除数 -> ecx (零/符号扩展到 32 位) */
-        if (esize == 1)      { o(0x0f); gen_modrm_impl(us ? 0xb6 : 0xbe, 0, TREG_RCX, VT_LOCAL, NULL, boff); }
-        else if (esize == 2) { o(0x0f); gen_modrm_impl(us ? 0xb7 : 0xbf, 0, TREG_RCX, VT_LOCAL, NULL, boff); }
-        else                   gen_modrm32(0x8b, TREG_RCX, VT_LOCAL, NULL, boff);
-        /* 被除数 -> eax, 再 edx:eax */
-        if (esize == 1)      { o(0x0f); gen_modrm_impl(us ? 0xb6 : 0xbe, 0, TREG_RAX, VT_LOCAL, NULL, aoff); }
-        else if (esize == 2) { o(0x0f); gen_modrm_impl(us ? 0xb7 : 0xbf, 0, TREG_RAX, VT_LOCAL, NULL, aoff); }
-        else                   gen_modrm32(0x8b, TREG_RAX, VT_LOCAL, NULL, aoff);
-        if (us) o(0xd231);              /* xor edx,edx */
-        else     o(0x99);               /* cdq: eax -> edx:eax 符号扩展 */
-        gen_modrm32(0xf7, us ? 6 : 7, TREG_RCX, NULL, 0);   /* div/idiv ecx */
-        /* store 结果低字节: al/ax/eax */
-        if (esize == 1)      gen_modrm32(0x88, 0, VT_LOCAL, NULL, doff);
-        else if (esize == 2) { o(0x66); gen_modrm32(0x89, 0, VT_LOCAL, NULL, doff); }
-        else                 gen_modrm32(0x89, 0, VT_LOCAL, NULL, doff);
-    }
-}
-
-/* 8 位打包乘法兜底: SSE 无 8 位打包乘. mul/imul byte 得 AX=AL*[b], 存 AL.
-   仅 esize=1 使用 (16/32 位走打包 pmullw/pmulld). 商低字节对有无符号一致. */
-ST_FUNC void gen_vec_mul8(int n, int ao, int bo, int dst)
-{
-    int i;
-    for (i = 0; i < n; i++) {
-        gen_modrm32(0x8a, 0, VT_LOCAL, NULL, ao + i);   /* mov al,[a+i]  */
-        gen_modrm32(0xf6, 4, VT_LOCAL, NULL, bo + i);   /* mul byte [b+i] -> AX */
-        gen_modrm32(0x88, 0, VT_LOCAL, NULL, dst + i);  /* mov [d+i],al  */
-    }
-}
-
 /* 整型打包位移 I4 的 imm 形式: "66 0F 72 /n ib", modrm 固定 rm=xmm0.
    调用方须已把源装进 XMM0. modrm 由移位类型决定 (reg 字段):
    pslld=0xf0 (reg=6), psrld=0xd0 (reg=2), psrad=0xe0 (reg=4).
@@ -909,7 +869,7 @@ void gfunc_call(int nb_args)
         if (using_regs(size))
             continue; /* arguments smaller than 8 bytes passed in registers or on stack */
 
-        if (bt == VT_STRUCT) {
+        if (bt == VT_STRUCT || bt == VT_VECTOR) {
             /* align to stack align size */
             size = (size + 15) & ~15;
             /* generate structure store */
@@ -1189,6 +1149,10 @@ static X86_64_Mode classify_x86_64_inner(CType *ty)
     
     case VT_LDOUBLE: return x86_64_mode_x87;
       
+    case VT_VECTOR:
+        /* 128-bit SIMD 向量: 内存/隐藏指针返回 (不遍历 ref, 其为身份标签) */
+        return x86_64_mode_memory;
+
     case VT_STRUCT:
         f = ty->ref;
 
@@ -1390,6 +1354,7 @@ void gfunc_call(int nb_args)
 
 	switch (vtop->type.t & VT_BTYPE) {
 	    case VT_STRUCT:
+	    case VT_VECTOR:
 		/* allocate the necessary size on stack */
 		o(0x48);
 		oad(0xec81, size); /* sub $xxx, %rsp */

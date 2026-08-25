@@ -203,8 +203,9 @@ t053/054/058/076/t052/t064 为既有问题), 无新增回归。
   遇该 builtin 直接回退 verbatim(不识别)。仅当文件确实用到 reflect 才发射表,
   避免普通 struct(t076 的 inode)误连 `__refl_field`。
 
-**4) t046_simd — 判定为语法边界, 不进 clang 闭环**
-t046 依赖 tcc 特制 SIMD 语法: `v4f`(16 字节 struct) + `.x` 字段访问 + `_mm_load_ps`
-内建透传。标准 C 下 `v4f x = _mm_load_ps(a)`(返回 `__m128` 直接赋 struct)与
-`dacc.x` 字段访问存在固有矛盾, 无法等价复现 —— 属 TCC 语言扩展, 非普通改写问题。
-详见 [docs/KNOWN_ISSUES.md](KNOWN_ISSUES.md)。
+**4) t046_simd — 已闭环 (2026-08-25 M2, 见 docs/simd-standard.md §9)**
+旧判定"语法边界不进 clang 闭环"基于双模式 struct v4f + `.x` 字段访问。M2 单模型化后
+消除: `__m128` 为内建向量类型(VT_VECTOR), t046 迁标准 intrinsic 名(`_mm_loadu_si128`/
+`_mm_mullo_epi32`/`_mm_setzero_si128`), 字段访问改 `((float*)&v)[0]`, tcc 独有扩展
+(整型除法/原生运算符)已删除。脱糖产物纯透传(标准 C + immintrin.h), clang 编译运行与
+tcc -run 数值一致: `desugar.ps1 tests/t046_simd.c` PASS。

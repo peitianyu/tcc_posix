@@ -73,7 +73,7 @@ run_run() {
     local src="tests/$name.c"
     [ -f "$src" ] || return
     local out rc
-    out=$(cd "$BASE" && timeout 15 "$TCC" -run -I "$INC_WIN" -I "$ARCH_WIN" "$src" 2>&1); rc=$?
+    out=$(cd "$BASE" && timeout 15 "$TCC" -run -I "$INC_WIN" -I "$ARCH_WIN" -I "$BASE/lib" "$src" 2>&1); rc=$?
     if [ "$rc" = "0" ]; then
         PASS=$((PASS+1)); echo "PASS $name (-run)"
     else
