@@ -4300,6 +4300,7 @@ static void dg_var_del(int tok)
 }
 
 /* 该 token 是否为标量/结构等类型关键字 (声明符判定用) */
+static int dg_w_intkey(const char *w);   /* 定义在下方 (4877) — 前向声明 */
 static int dg_tok_is_typekw(int tok)
 {
     const char *s;

@@ -3,6 +3,21 @@
 > 里程碑级变更摘要。README 只做概览。按时间序, 最新在上。
 > 完整逐提交历史用 `git log --oneline`。
 
+## 2026-08-25 — @listfile glob 恢复 + `%out` 输出指令
+
+- **glob 通配恢复** (此前被 CONFIG_TCC_MUSL 门控而不可用, KNOWN_ISSUES §3):
+  改为**内置实现** — winapi FindFirstFileA 枚举 + 自实现 fnmatch (`*` `?` `[..]`
+  字符类, 大小写不敏感), 零外部运行时依赖 (编译器自身链 msvcrt, 无 POSIX glob)。
+  支持最后路径段通配; 无匹配原样保留 (同 GLOB_NOCHECK)。`tests/*.c`、
+  `t0[34]*.c` 现可用。
+- **新增 `%out <file>` 输出指令**: 注入 `-o <path>`, 路径基准 = **listfile 所在
+  目录** (origin 参数落实; 自包含构建不受调用 cwd 影响); 绝对路径/盘符原样;
+  受 `%if` 控制 (条件输出名)。
+- **`%dep` 仍仅 CONFIG_TCC_MUSL 启用** (需 POSIX system/access), 当前形态不可用。
+- 验证: glob/%out 端到端 (不同 cwd 调用产物落 listfile 旁); test.sh **79/79**
+  (win), **158/158** (linux) 无回归。
+- 文档: listfile.md §2 语法表 + §9.3/§9.4; KNOWN_ISSUES/TODO 同步。
+
 ## 2026-08-25 — abort/assert 修复 + 构建链路断点修复
 
 - **abort()/assert 挂死 → 正确终止** (KNOWN_ISSUES §1): nt64 abort.c 原

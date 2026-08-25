@@ -50,12 +50,14 @@
 
 ## 3. 编译链路 / 平台约束
 
-- **@listfile 的 glob 通配与 `%dep` 当前不可用**: 两者被 `#ifdef CONFIG_TCC_MUSL` 门控
-  (libtcc.c; MUSL 形态 tcc.exe 链 POSIX libc 才有 glob/access/system), 而 M2 已删除
-  CONFIG_TCC_MUSL 形态 (docs/simd-standard.md §9) → 当前 POSIX 构建的 tcc.exe 仅支持
-  `@listfile` 的 注释/引号/`@`嵌套/`%if` 编译选择。`src/*.c` 通配与 `%dep 拉依赖` 会
-  原样保留/忽略, 与 docs/listfile.md §2/§4 的 P2 验收标注存在分裂。
-  **规避**: 脚本侧 glob (bash `tests/t*.c`) + 显式路径; 仓库内用法见 docs/listfile.md §9。
+- **@listfile 的 glob 通配已恢复, `%dep` 仍不可用** (2026-08-25): glob 原被
+  `#ifdef CONFIG_TCC_MUSL` 门控 (MUSL 形态已删 → 不可用), 现已改为**内置实现**
+  (winapi FindFirstFileA 枚举 + 自实现 fnmatch, 零外部运行时依赖) 对所有构建
+  启用 — `tests/*.c`、`t0[34]*.c`、`?` 等可用。`%dep` 包管理仍仅 CONFIG_TCC_MUSL
+  启用 (需 POSIX system/access; 当前形态下不可用)。
+  **新增 `%out <file>` 输出指令**: 注入 `-o`, 路径基准 = listfile 所在目录
+  (自包含构建, 不受调用 cwd 影响); 受 `%if` 控制; 绝对路径/盘符原样。
+  **归属**: docs/listfile.md §2/§9。
 
 - **linux 目标测试 12 项既有失败已全部修复** (2026-08-25, 现 test.sh -linux 158/158):
   - 编译器 bug: operator 后缀 ++/-- 在 SysV (linux) 寄存器返回路径下实参传成地址

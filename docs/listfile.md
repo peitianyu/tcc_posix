@@ -34,10 +34,13 @@
 | `#` 开头 / 空白行 | 注释, 跳过 |
 | `@other.txt` | 嵌套展开(现有 `@` 机制, 复用) |
 | `%if <cond>` `%else` `%end` | **编译选择**: 条件启用一段参数 |
+| `%out <file>` | **输出指令** (2026-08-25 新增): 注入 `-o <path>`; 路径基准 =
+  **本 listfile 所在目录** (不受调用 cwd 影响); 绝对路径/盘符原样; 受 `%if` 控制 |
 | `%dep [name=]owner/repo[#ref]` | 包管理: 拉取缓存; 无名→注入根include/lib, 有名→登记前缀别名 |
 
 - **token 拆分**: 与现有一致, 空白拆分; 支持引号组(`"a b"` 一个参数)。
-- **相对路径**: 源文件/`-I`/嵌套 `@` 的相对路径, 基于**本 listfile 所在目录**(便于移动)。
+- **相对路径**: 普通源文件/`-I`/`-o` token 基于调用 cwd; **`%out` 基于本 listfile
+  所在目录** (自包含构建: 无论从哪调用, 产物落在 listfile 旁)。
 
 ## 3. 编译选择 (`%if`)
 
@@ -196,12 +199,27 @@ listfile 所在目录"不一致 —— 实际以仓库根调用)。tcc-linux.lis
 修复: linux 分支此前缺 `-I lib -I .`, STL 测试 (t062+) 在 linux 目标编译失败;
 补上后 t046/t049/t051/t062-t079 全部可编 (linux 全量 128→146 通过, 无回归)。
 
-### 9.3 可用范围 (glob / %dep 受 MUSL 门控)
+### 9.3 可用范围 (2026-08-25: glob 已恢复, %dep 仍门控)
 
-`src/*.c` 通配 (list_emit_token) 与 `%dep` 拉依赖 (list_dep) 被 `#ifdef
-CONFIG_TCC_MUSL` 门控 —— 而 M2 已删除 CONFIG_TCC_MUSL 形态 (docs/simd-standard.md §9),
-故**当前 POSIX 构建的 tcc.exe 不支持 glob 与 %dep**, 仅支持 注释/引号/`@`嵌套/`%if`。
-P2 验收标注与实现的这个分裂记入 docs/KNOWN_ISSUES.md §3。
+`src/*.c` 通配 (list_emit_token) 原被 `#ifdef CONFIG_TCC_MUSL` 门控而不可用;
+2026-08-25 改为**内置实现** (winapi FindFirstFileA 枚举 + 自实现 fnmatch,
+零外部运行时依赖) 对所有构建启用: 支持最后路径段的 `*` `?` `[..]` (大小写不敏感),
+无匹配原样保留。`%dep` 拉依赖 (list_dep) 仍仅 CONFIG_TCC_MUSL 启用 (需 POSIX
+system/access), 当前形态不可用 — 记入 docs/KNOWN_ISSUES.md §3。
+
+### 9.4 `%out` 输出指令示例 (2026-08-25 新增)
+
+```
+# build/app.list — 自包含构建: 产物落在 build/ 旁 (不受调用 cwd 影响)
+D:/work/tcc_posix/tests/t001_stdio.c
+%out t001_app.exe                 # → -o build/t001_app.exe (相对本文件)
+%if @os == win
+%out t001_app_win.exe             # 条件输出名
+%end
+%out D:/abs_out.exe               # 绝对路径原样
+```
+
+用法: 任意目录下 `tcc @build/app.list ...` — 产物始终在 build/ 下。
 
 ---
 

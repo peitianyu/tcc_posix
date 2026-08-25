@@ -15,9 +15,10 @@
       复合赋值 (+= -= *= /= %=) — t059; 已同步 `--emit-c` 脱糖
 - [x] 脱糖闭环: `--emit-c` + operator/defer/model + clang 驱动 + 性能对照 (≈37×)
       — docs/desugar.md / docs/desugar-perf.md
-- [x] `@listfile` 编译描述: 注释/引号/嵌套/`%if` 编译选择 (P0/P1) — 已用于自举与测试
-      (build/selfhost-*.list, tests-common.list); **`%dep` 包管理与 glob 通配被
-      CONFIG_TCC_MUSL 门控而 MUSL 形态已删 → 当前 POSIX 构建不可用** (KNOWN_ISSUES §3)
+- [x] `@listfile` 编译描述: 注释/引号/嵌套/`%if` 编译选择/glob 通配 (内置 winapi
+      实现, 2026-08-25 恢复)/`%out` 输出指令 (路径基准 = listfile 目录) — 已用于
+      自举与测试 (build/selfhost-*.list, tests-common.list); **`%dep` 包管理仍被
+      CONFIG_TCC_MUSL 门控而 MUSL 形态已删 → 当前不可用** (KNOWN_ISSUES §3)
 
 ## P1 / Q 待办
 

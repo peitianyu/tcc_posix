@@ -1842,13 +1842,11 @@ static uint32_t parse_version(TCCState *s1, const char *version)
 /* insert args from 'p' (separated by sep or ' ') into argv at position 'optind' */
 /* ============ @listfile 编译描述 (docs/listfile.md) ============
  * 增强 TCC 内置的 @file 响应文件: 支持 # 注释、引号 token、@嵌套、%(if/else/end)
- * 编译选择、通配符(glob)与 %dep 依赖(仅最终 musl 版启用; [1/3] 外部 BOOT 是
- * msvcrt, 无 POSIX glob/unistd, 故用 #ifdef CONFIG_TCC_MUSL 排除以利自举)。
+ * 编译选择、通配符(glob)与 %dep 依赖。
+ * glob: 内置实现 (winapi FindFirstFileA, 零外部运行时依赖) — 2026-08-25 起
+ * 所有构建启用 (此前被 CONFIG_TCC_MUSL 门控, 而 MUSL 形态已删 → 不可用)。
+ * %dep: 仅 CONFIG_TCC_MUSL 启用 (需 POSIX system/access; 当前形态下不可用)。
  * 变量来源: @os/@arch/@tcc 内建 + 现有 -D。 */
-#ifdef CONFIG_TCC_MUSL
-#include <glob.h>
-#include <dirent.h>
-#endif
 
 /* 内置变量求值 */
 static const char *list_var_get(const char *key, char **argv, int argc)
@@ -1971,8 +1969,24 @@ static void parse_list_args(const char *p, char **argv, int argc,
     int sp = 0;
     const char *q = p;
     char line[1024];
+    /* origin = 本 listfile 路径 → 目录部分 (作 %out 输出路径基准) */
+    char origin_dir[700];
+    int origin_dir_len = 0;
 
-    (void)origin;
+    origin_dir[0] = 0;
+    if (origin && *origin) {
+        const char *sl = strrchr(origin, '/');
+        const char *bs = strrchr(origin, '\\');
+        const char *last = (sl && (!bs || sl > bs)) ? sl : bs;
+        if (last && last != origin) {
+            int len = (int)(last - origin);
+            if (len >= (int)sizeof origin_dir)
+                len = (int)sizeof origin_dir - 1;
+            memcpy(origin_dir, origin, len);
+            origin_dir[len] = 0;
+            origin_dir_len = len;
+        }
+    }
     S[0].on = 1; S[0].hit = 0;
     while (*q) {
         int ln = 0;
@@ -2002,6 +2016,32 @@ static void parse_list_args(const char *p, char **argv, int argc,
             } else if (!strcmp(s, "%end")) {
                 if (sp > 0)
                     sp--;
+            } else if (!strncmp(s, "%out", 4) && (s[4] == ' ' || s[4] == '\t')) {
+                if (S[sp].on) {                 /* %out 受 %if 条件控制 */
+                    /* %out <file>: 注入 `-o <path>`, 路径基准 = 本 listfile
+                     * 所在目录 (绝对路径/盘符原样) — 自包含构建: 无论从哪个
+                     * cwd 调用, 产物落在 listfile 旁. */
+                    char **tmp = NULL;
+                    int tmpn = 0, ti;
+                    const char *o = s + 4;
+                    while (*o == ' ' || *o == '\t')
+                        o++;
+                    list_split_line(o, &tmp, &tmpn);
+                    if (tmpn > 0) {
+                        char outp[1000];
+                        const char *fn = tmp[0];
+                        if (origin_dir_len > 0 && fn[0] != '/' && fn[0] != '\\'
+                            && !(fn[1] == ':' && fn[0]))
+                            snprintf(outp, sizeof outp, "%s/%s", origin_dir, fn);
+                        else
+                            snprintf(outp, sizeof outp, "%s", fn);
+                        dynarray_add(out, outn, tcc_strdup("-o"));
+                        dynarray_add(out, outn, tcc_strdup(outp));
+                    }
+                    for (ti = 0; ti < tmpn; ti++)
+                        tcc_free(tmp[ti]);
+                    tcc_free(tmp);
+                }
             } else if (!strncmp(s, "%dep", 4) && (s[4] == ' ' || s[4] == '\t')) {
                 if (S[sp].on) {                 /* %dep 受 %if 条件控制 */
                     const char *d = s + 4;
@@ -2049,35 +2089,143 @@ static int dep_alias_expand(const char *tok, char *buf, int nbuf)
     }
     return 0;
 }
+#endif /* CONFIG_TCC_MUSL: %dep 别名表 (glob 以下无条件启用) */
 
-/* 通配符展开: 含 * ? [ 的 token 用 glob 展开(相对 cwd); 无匹配则保留原样 */
-static void list_emit_token(char ***out, int *outn, const char *tok)
+/* ---- tcc 内置 glob (零外部运行时依赖) ----
+ * 编译器自身是 Windows PE (BOOT/msvcrt 链接), 无 POSIX glob()/dirent 可用
+ * (musl 头有声明但 msvcrt 不导出; CONFIG_TCC_MUSL 形态已删) → Windows 下用
+ * winapi FindFirstFileA/FindNextFileA (kernel32 自动链接, 自声明零头依赖)。
+ * 支持: 最后路径段的 * ? [..] 通配 (终端式 glob); 无匹配原样保留 (同 GLOB_NOCHECK)。 */
+static int tcc_lowc(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+
+/* fnmatch 子集: * 任意序列 / ? 单字符 / [..] 字符类(支持 [!..] 取反、a-z 范围),
+ * 大小写不敏感 (Windows 文件系统语义). 递归实现 (路径名 ≤260B, 栈深安全). */
+static int tcc_glob_match(const char *pat, const char *s)
 {
-    char buf[900];
-    if (dep_alias_expand(tok, buf, sizeof buf))   /* 命中 %dep 前缀 → 展开为缓存路径 */
-        tok = buf;
-    if (strpbrk(tok, "*?[")) {
-        glob_t g;
-        size_t np, i;
-        memset(&g, 0, sizeof g);
-        if (glob(tok, GLOB_NOCHECK, NULL, &g) == 0 || g.gl_pathc) {
-            np = g.gl_pathc;
-            for (i = 0; i < np; i++)
-                if (g.gl_pathv[i])
-                    dynarray_add(out, outn, tcc_strdup(g.gl_pathv[i]));
-            globfree(&g);
-            if (np)
-                return;
+    while (*pat) {
+        if (*pat == '*') {
+            while (*pat == '*') pat++;
+            if (!*pat)
+                return 1;
+            for (; *s; s++)
+                if (tcc_glob_match(pat, s))
+                    return 1;
+            return 0;
+        } else if (*pat == '?') {
+            if (!*s)
+                return 0;
+            pat++; s++;
+        } else if (*pat == '[') {
+            int neg = 0, hit = 0;
+            const char *p = pat + 1;
+            if (!*s)
+                return 0;
+            if (*p == '!' || *p == '^') { neg = 1; p++; }
+            while (*p && *p != ']') {
+                int c = tcc_lowc((unsigned char)*s);
+                if (p[1] == '-' && p[2] && p[2] != ']') {
+                    int lo = tcc_lowc((unsigned char)*p);
+                    int hi = tcc_lowc((unsigned char)p[2]);
+                    if (c >= lo && c <= hi) hit = 1;
+                    p += 3;
+                } else {
+                    if (c == tcc_lowc((unsigned char)*p)) hit = 1;
+                    p++;
+                }
+            }
+            if (!*p)   /* 未闭合 '[': 不匹配, 调用方原样保留 */
+                return 0;
+            if (hit == neg)
+                return 0;
+            pat = p + 1; s++;
+        } else {
+            if (tcc_lowc((unsigned char)*pat) != tcc_lowc((unsigned char)*s))
+                return 0;
+            pat++; s++;
         }
     }
+    return *s == 0;
+}
+
+#if defined(_WIN32) && !defined(CONFIG_TCC_MUSL)
+/* winapi (windows.h 已由 tcc.h 在 PE/非 MUSL 下 include): 直接枚举 */
+static void list_glob_expand(const char *tok, char ***out, int *outn)
+{
+    const char *sep, *pat;
+    char dir[900], full[1200], epat[920];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    int n = 0, dirlen;
+    sep = strrchr(tok, '/');
+    {
+        const char *b = strrchr(tok, '\\');
+        if (b && (!sep || b > sep))
+            sep = b;
+    }
+    pat = sep ? sep + 1 : tok;
+    dirlen = sep ? (int)(sep - tok) : 0;
+    if (dirlen >= (int)sizeof dir)
+        goto verbatim;
+    memcpy(dir, tok, dirlen); dir[dirlen] = 0;
+    if (strpbrk(dir, "*?["))
+        goto verbatim;                /* 目录段含通配: 仅支持终端段 */
+    /* FindFirstFileA 只支持 * ? (不支持 [..]) → 枚举目录全部条目,
+     * 由内置 tcc_glob_match 精确过滤 (支持 [..] 字符类) */
+    snprintf(epat, sizeof epat, "%s%c*", dir, dir[0] ? '/' : 0);
+    h = FindFirstFileA(epat, &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        goto verbatim;                /* 无匹配: 原样保留 */
+    do {
+        if (fd.cFileName[0] == '.' &&
+            (!fd.cFileName[1] || fd.cFileName[1] == '.'))
+            continue;                 /* . / .. */
+        if (tcc_glob_match(pat, fd.cFileName)) {
+            snprintf(full, sizeof full, "%s%c%s", dir, dir[0] ? '/' : 0,
+                     fd.cFileName);
+            dynarray_add(out, outn, tcc_strdup(full));
+            n++;
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    if (n)
+        return;
+verbatim:
     dynarray_add(out, outn, tcc_strdup(tok));
 }
 #else
-static void list_emit_token(char ***out, int *outn, const char *tok)
+#include <glob.h>
+static void list_glob_expand(const char *tok, char ***out, int *outn)
 {
+    glob_t g;
+    size_t np, i;
+    memset(&g, 0, sizeof g);
+    if (glob(tok, GLOB_NOCHECK, NULL, &g) == 0 || g.gl_pathc) {
+        np = g.gl_pathc;
+        for (i = 0; i < np; i++)
+            if (g.gl_pathv[i])
+                dynarray_add(out, outn, tcc_strdup(g.gl_pathv[i]));
+        globfree(&g);
+        if (np)
+            return;
+    }
     dynarray_add(out, outn, tcc_strdup(tok));
 }
 #endif
+
+/* 通配符展开: 含 * ? [ 的 token 展开(相对 cwd); 无匹配则原样保留 */
+static void list_emit_token(char ***out, int *outn, const char *tok)
+{
+    char buf[900];
+#ifdef CONFIG_TCC_MUSL
+    if (dep_alias_expand(tok, buf, sizeof buf))   /* 命中 %dep 前缀 → 展开为缓存路径 */
+        tok = buf;
+#endif
+    if (strpbrk(tok, "*?[")) {
+        list_glob_expand(tok, out, outn);
+        return;
+    }
+    dynarray_add(out, outn, tcc_strdup(tok));
+}
 
 /* 依赖白名单字符 (防 shell 注入/路径穿越): name/owner/repo/ref 段 */
 static int list_idchar(int c)
@@ -2296,10 +2444,10 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *pargc, char ***pargv)
             if (fd < 0)
                 return tcc_error_noabort("listfile '%s' not found", r);
             p = tcc_load_text(fd);
-            { /* @listfile 增强解析(注释/引号/%if/glob) */
+            { /* @listfile 增强解析(注释/引号/%if/glob/%out) */
                 char **na = NULL;
                 int n = 0;
-                parse_list_args(p, argv, argc, &na, &n, "");
+                parse_list_args(p, argv, argc, &na, &n, r);
                 insert_list_tokens(s1, &argv, &argc, optind, na, n);
                 tcc_free(na);   /* 元素已转移给 argv, 只释放数组 */
             }
