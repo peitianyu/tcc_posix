@@ -62,31 +62,29 @@ offset=0 始终是"未分配"哨兵)给每个 `__emutls_object` 分配对齐 off
 **验证**: `tests/t047_tls.c` 覆盖初始化物化 / 数组 / 复合赋值 / 跨函数 / 取址 /
 结构体 TLS / 多对象不冲突; 全部通过。
 
-## 3. 纯 musl 编译器 (零 winapi 依赖)
+## 3. 编译器产物零 winapi 依赖 (链 musl + psxscl)
 
-`bin/tcc.exe` 是用自身按 **CONFIG_TCC_MUSL** 线路自举的纯 musl 编译器:
-代码里所有 winapi 调用 —— 进程 (`_spawnvp`/`GetTickCount`/`GetCurrentProcessId`)、
-内存 (`VirtualAlloc`/`VirtualFree`/`VirtualProtect`)、动态库 (`LoadLibraryA`/
-`GetProcAddress`/`FreeLibrary`)、路径 (`GetModuleFileNameA`/`GetSystemDirectoryA`)、
-异常 (`AddVectoredExceptionHandler`) —— 全部换成 POSIX 对等项, 编译出的 PE **导入表
-为空**, 系统调用经 psxscl→ntdll 直通, 不依赖 msvcrt/kernel32/user32。
+`bin/tcc.exe` 是 **CONFIG_TCC_POSIX** 构建: 由发行 BOOT TCC 自举 (常规 PE/msvcrt 链接),
+但链接用户程序时**默认链 musl libc.a** (libtcc.c `CONFIG_TCC_POSIX` 分支), 产物不依赖
+msvcrt/kernel32: PE **导入表为空**, 系统调用经 psxscl→ntdll 直通。
 
-| 原生 winapi | musl 等价 |
+| 产物运行时 (musl 层) | POSIX 落地 |
 |---|---|
-| `_spawnvp` | `posix_spawn` + `waitpid` |
-| `GetTickCount` | `gettimeofday` |
-| `GetCurrentProcessId` / `getpid` | `getpid` |
-| `DeleteFileA` | `unlink` |
-| `VirtualAlloc`/`VirtualFree`/`VirtualProtect` | `mmap`/`munmap`/`mprotect` |
-| `LoadLibraryA`/`GetProcAddress`/`FreeLibrary` | `dlopen`/`dlsym`/`dlclose` (psxscl dlfcn→ntdll LDR) |
-| `GetModuleFileNameA` 定位 tcc 目录 | 编译期 `CONFIG_TCCDIR` 固定 |
-| `GetSystemDirectoryA` | 无 (musl 线路不搜索 windows 系统目录) |
-| `AddVectoredExceptionHandler` (VEH) | `sigaction` (POSIX 信号 + ucontext) |
-| `RtlAddFunctionTable`/`RUNTIME_FUNCTION` | 弃用 (崩溃回溯走 sigaction) |
-| `VirtualQuery` 取模块基址 (bt-exe) | `dlopen(NULL)` |
+| 进程 | `posix_spawn` + `waitpid` |
+| 时间 | `gettimeofday` / `clock_gettime` |
+| 内存 | `mmap`/`munmap`/`mprotect` |
+| 文件 | `unlink` / open / read / write |
+| 动态库 | `dlopen`/`dlsym`/`dlclose` (psxscl dlfcn→ntdll LDR) |
+| 异常 | `sigaction` (POSIX 信号 + ucontext) |
+| 线程 | pthread → ntdll RtlWaitOnAddress 真 futex |
 
-自举链路 (install.sh `[3/3]`): 用已构建的发行 TCC 以 `-DCONFIG_TCC_MUSL`
-及 `CONFIG_TCCDIR` 重编自身并链 `libc-win.a` (musl libc), 产出即 `bin/tcc.exe`。
+> 历史: 早期曾以 CONFIG_TCC_MUSL 自举编译器自身 (内部 winapi 调用全换 POSIX, PE
+> 导入表为空) —— 因 musl 线路 tccrun 在 psxscl ≥1GB reserve 下重定位溢出 (-run 不可用)
+> 已停用, 编译选项结论见 docs/simd-standard.md §9。
+
+自举链路 (install.sh `[1/3]`): BOOT 发行 TCC 以 `-DCONFIG_TCC_POSIX=1
+-DCONFIG_TCC_PREDEFS=1` 编出 build/tcc-win.exe (参数集中在 build/selfhost-win.list),
+直接部署为 bin/tcc.exe —— 无 CONFIG_TCC_MUSL 重编自身步骤。
 
 ## 4. 语言扩展一览
 

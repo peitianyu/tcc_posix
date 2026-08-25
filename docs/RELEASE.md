@@ -3,6 +3,24 @@
 > 里程碑级变更摘要。README 只做概览。按时间序, 最新在上。
 > 完整逐提交历史用 `git log --oneline`。
 
+## 2026-08-25 — 自举与测试改用 @listfile (参数集中, 脚本精简)
+
+- **新增 build/selfhost-win.list / selfhost-linux.list**: 自举参数集中 (BOOT 发行 TCC
+  与自举产物通用, 纯参数格式兼容 BOOT 基础 `@`)。build.sh `[1/4]` / install.sh `[1/3]`
+  改为 `BOOT_TCC @build/selfhost-win.list`; install.sh 顺带去掉冗余 `-DONE_SOURCE=1`。
+- **新增 build/tests-common.list**: 测试公共编译选项用 `%if @os == win` 一个文件服务
+  win/linux 双目标; test.sh run_win/run_linux 编译命令改为 `@build/tests-common.list`
+  (脚本开头 cd "$BASE" 固定相对路径基准)。
+- **修复 linux 目标 STL 编译**: linux 分支此前缺 `-I lib -I .` → t062-t079/t046/t049/
+  t051 在 linux 目标全部编译失败; 补上后全部可编, `test.sh -linux` 全量 128→**146**
+  通过, 无回归 (剩余 12 项既有失败: ucontext 为 nt64 专有实现无 linux 基座 / t049
+  缺 extra 源 / WSL 运行时差异, 记 docs/KNOWN_ISSUES.md §3)。
+- **验证**: test.sh (win) 79/79; install.sh 开箱即用通过。
+- **文档**: docs/listfile.md §9 记录仓库内实际用法; 标注 glob 通配与 `%dep` 被
+  CONFIG_TCC_MUSL 门控 → 当前 POSIX 构建不可用 (KNOWN_ISSUES §3); features.md §3
+  与 README "纯 musl 编译器" 描述同步为现状 (产物零 winapi, 编译器自身为
+  CONFIG_TCC_POSIX 构建)。
+
 ## 2026-08-25 — STL M4 补全 + operator 小 struct 返回修复
 
 - **String 自由函数** (lib/stl/string_extra.h, §7.4 C7): `STL_string_split` (含空段/

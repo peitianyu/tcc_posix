@@ -14,9 +14,9 @@ echo "=== [1/3] 自举 tcc-win (CONFIG_TCC_POSIX: 默认链 musl) ==="
 # BOOT_TCC must be a full self-hosted x86_64 tcc (e.g. D:/work/tinycc/win32/tcc.exe).
 # CONFIG_TCC_PREDEFS=1 embeds tccdefs_.h so the built tcc bootstraps standalone
 # (no runtime dependency on an external <tccdefs.h>), for a portable bin/ tree.
+# 参数集中在 @build/selfhost-win.list (自举/重自举共用; 纯参数格式兼容 BOOT 基础 @)。
 BOOT_TCC="${BOOT_TCC:-tcc.exe}"
-"$BOOT_TCC" -DCONFIG_TCC_POSIX=1 -DCONFIG_TCC_PREDEFS=1 -o "$BASE/build/tcc-win.exe" \
-    "$BASE/src/tcc.c" -I"$BASE/src" -DONE_SOURCE=1 2>&1 | grep -iE 'error' | head -5
+(cd "$BASE" && "$BOOT_TCC" @build/selfhost-win.list) 2>&1 | grep -iE 'error' | head -5
 "$BASE/build/tcc-win.exe" -v || exit 1
 
 echo "=== [2/3] 组装 bin/ ==="

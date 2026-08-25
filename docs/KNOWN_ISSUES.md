@@ -48,6 +48,22 @@
 
 ## 3. 编译链路 / 平台约束
 
+- **@listfile 的 glob 通配与 `%dep` 当前不可用**: 两者被 `#ifdef CONFIG_TCC_MUSL` 门控
+  (libtcc.c; MUSL 形态 tcc.exe 链 POSIX libc 才有 glob/access/system), 而 M2 已删除
+  CONFIG_TCC_MUSL 形态 (docs/simd-standard.md §9) → 当前 POSIX 构建的 tcc.exe 仅支持
+  `@listfile` 的 注释/引号/`@`嵌套/`%if` 编译选择。`src/*.c` 通配与 `%dep 拉依赖` 会
+  原样保留/忽略, 与 docs/listfile.md §2/§4 的 P2 验收标注存在分裂。
+  **规避**: 脚本侧 glob (bash `tests/t*.c`) + 显式路径; 仓库内用法见 docs/listfile.md §9。
+
+- **linux 目标测试 (test.sh -linux) 12 项既有失败** (2026-08-25 实测 146/12):
+  - 链接失败 (5): t041_dlfcn、t047_tls、t060/t061 ucontext (src/thread/nt64/ 为 Windows
+    专有实现, linux 目标无 ucontext 基座)、t049_cpu (run_linux 无 extra 源逻辑,
+    cpu-prof.c 未入链 — run_win 有)。
+  - 运行时失败 (7): t034_enosys/t039_unsupported/t040_select_poll/t042_timer/t043_mq/
+    t044_ipc/t059_operator_more — WSL 环境系统调用/等待语义差异, 与编译参数无关。
+  **注意**: 编译层已修复 (build/tests-common.list 补 -I lib/-I . 后 STL/simd/reflect
+  t046/t049/t051/t062-t079 全部可编, 净增 18 通过)。
+
 - **纯 musl 编译器 (CONFIG_TCC_MUSL)** 走 POSIX 接口, 不含任何 winapi 依赖:
   PE 导入表为空, 系统调用经 psxscl→ntdll 直通。
   **代价**: musl 线路无 `GetModuleFileNameA` 定位私有目录, `CONFIG_TCCDIR` 需在

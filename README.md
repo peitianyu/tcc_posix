@@ -56,8 +56,8 @@ reflect 脱糖/STL 容器与抽象迭代器。
 
 - **两大编译产物链**: Windows native exe / Linux static ELF,行为一致。
 - **双 libc 支撑**: musl libc + midipix psxscl (POSIX syscall → ntdll 直通)。
-- **纯 musl 编译器**: `bin/tcc.exe` 自身按 CONFIG_TCC_MUSL 自举,PE 导入表为空,
-  零 winapi 依赖(映射表见 [docs/features.md](docs/features.md) §3)。
+- **产物零 winapi 依赖**: 编译产物默认链 musl libc.a (CONFIG_TCC_POSIX), PE 导入表
+  为空, 系统调用经 psxscl→ntdll 直通 (映射见 [docs/features.md](docs/features.md) §3)。
 - **开发-验证 + 正式产物**: TCC 做验证前端,clang/LLVM 出高性能产物——脱糖输出
   标准 C,吃满 AVX/FMA(性能实测 ≈37×,见 [docs/desugar-perf.md](docs/desugar-perf.md))。
 

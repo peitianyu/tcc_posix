@@ -8,6 +8,7 @@
 # 测试源码: tests/tNNN_*.c, 每个程序退出码 0 = 通过
 set -u
 BASE="$(cd "$(dirname "$0")" && pwd)"
+cd "$BASE"   # listfile 相对路径与 tests/*.c 均基于仓库根
 TCC="$BASE/bin/tcc.exe"
 INC_WIN="$BASE/src/posix/musl-nt64/include"
 ARCH_WIN="$BASE/src/posix/musl-nt64/arch/nt64"
@@ -42,8 +43,7 @@ run_win() {
     # 布局导致 ucontext 协程(test t060/t061)结构体错位 → swapcontext 段错误。
     # 仓库根(-I "$BASE")让 STL 测试 (t062/t063) 的 #include "lib/stl/..." 命中
     # lib/stl/.h, 而非被 $BASE/lib 误解析成 lib/lib/stl/...。
-    if ! "$TCC" -c "$src" -o "$o" -I "$INC_WIN" -I "$ARCH_WIN" -I "$BASE/include" -I "$BASE/lib" \
-        -I "$BASE" -std=c99 -D_XOPEN_SOURCE=700 -DSTL_CHECKS \
+    if ! "$TCC" -c "$src" -o "$o" @build/tests-common.list \
         2>"$TESTDIR/$name.cerr"; then
         FAIL=$((FAIL+1)); FAILED="$FAILED $name(编译)"; echo "FAIL $name: 编译错误"; head -3 "$TESTDIR/$name.cerr"; return
     fi
@@ -90,8 +90,8 @@ run_linux() {
     local lnx="$BASE/build/tcc-linux.exe"
     [ -x "$lnx" ] || { echo "SKIP $name (无 tcc-linux.exe)"; return; }
     local o="$TESTDIR/${name}_lnx.o" exe="$TESTDIR/${name}_linux"
-    if ! "$lnx" -c "$src" -o "$o" -I "$BASE/include" -I "$ARCH_LNX" \
-        -std=c99 -D_XOPEN_SOURCE=700 2>"$TESTDIR/$name.lcerr"; then
+    if ! "$lnx" -c "$src" -o "$o" @build/tests-common.list \
+        2>"$TESTDIR/$name.lcerr"; then
         FAIL=$((FAIL+1)); FAILED="$FAILED $name(lnx编译)"; echo "FAIL $name (lnx编译)"; head -3 "$TESTDIR/$name.lcerr"; return
     fi
     if ! ( cd "$BASE/build/linux-musl-obj" && "$lnx" -nostdlib -static \

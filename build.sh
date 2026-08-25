@@ -18,10 +18,8 @@ echo "=== [1/4] 自举 TCC (Windows + Linux 目标) ==="
 #     (编译期嵌入 tccdefs_.h, 自足无需外部 tccdefs.h)。ONE_SOURCE 不必传 (tcc.c 默认 1)。
 #   tcc-linux.exe: 另加 TCC_TARGET_X86_64 (防御性: 宿主即 x86_64 时自动定义, 显式传保证
 #     交叉构建也不受宿主架构影响)。
-[ -f "$BASE/build/tcc-win.exe" ] || "$BOOT_TCC" -DCONFIG_TCC_POSIX=1 -DCONFIG_TCC_PREDEFS=1 \
-	-o "$BASE/build/tcc-win.exe" "$BASE/src/tcc.c" -I"$BASE/src"
-[ -f "$BASE/build/tcc-linux.exe" ] || "$BOOT_TCC" -DTCC_TARGET_X86_64 -DCONFIG_TCC_PREDEFS=1 \
-	-o "$BASE/build/tcc-linux.exe" "$BASE/src/tcc.c" -I"$BASE/src"
+[ -f "$BASE/build/tcc-win.exe" ] || (cd "$BASE" && "$BOOT_TCC" @build/selfhost-win.list)
+[ -f "$BASE/build/tcc-linux.exe" ] || (cd "$BASE" && "$BOOT_TCC" @build/selfhost-linux.list)
 "$BASE/build/tcc-win.exe" -v && "$BASE/build/tcc-linux.exe" -v
 # 宿主 TCC 运行时 (并入 libc.a 用; 后续可自产)
 mkdir -p "$BASE/lib"

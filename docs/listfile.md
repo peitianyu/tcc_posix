@@ -1,6 +1,7 @@
 # `@listfile.txt` 编译描述 —— 编译选择 + 包管理 设计方案
 
-> 状态: 2026-08-23 设计
+> 状态: 2026-08-23 设计, 已实现 (P0-P2); **2026-08-25 起仓库内实际用于自举与测试**
+> (build/selfhost-*.list, build/tests-common.list, 见 §9)。
 > 定位: TCC 已内置 `@file` 响应文件(TCC 参数按空白拆词展开, libtcc.c `insert_args` +
 > tcc_parse_args 的 `@` 分支)。本方案把 `@listfile.txt` 升级为**声明式编译描述**:
 > 支持 注释 / 嵌套 / 条件选择(编译选择) / `%dep` 依赖(包管理), 零额外运行时依赖。
@@ -149,7 +150,62 @@ stb/stb_image.h                            # 单个头: 作源或 -I 由你定
 
 ---
 
-## 9. 决策(已确认, 2026-08-23)
+## 9. 仓库内实际用法 (2026-08-25)
+
+自举与测试的编译参数已集中到 listfile, 脚本内不再重复长命令行:
+
+### 9.1 自举 (build/selfhost-win.list / selfhost-linux.list)
+
+```
+# build/selfhost-win.list (纯参数格式 —— 兼容 BOOT 发行 TCC 的基础 @, 不支持注释)
+-DCONFIG_TCC_POSIX=1
+-DCONFIG_TCC_PREDEFS=1
+-o build/tcc-win.exe
+src/tcc.c
+-I src
+```
+
+用法: `(cd <仓库根> && BOOT_TCC @build/selfhost-win.list)` (build.sh `[1/4]` / install.sh
+`[1/3]`)。相对路径基于 **cwd** (parse_list_args 的 origin 未启用, 与 §2 文档的"基于
+listfile 所在目录"不一致 —— 实际以仓库根调用)。tcc-linux.list 同构 (`-DTCC_TARGET_X86_64`)。
+自举产物自身再 @ 同一文件即重自举。
+
+### 9.2 测试公共选项 (build/tests-common.list)
+
+一个文件用 `%if @os` 分支服务双目标 (tcc-win.exe 报 win / tcc-linux.exe 报 linux):
+
+```
+%if @os == win
+-I src/posix/musl-nt64/include      # nt64 头优先 (include/ 兜底)
+-I src/posix/musl-nt64/arch/nt64
+-I include
+-I lib                             # STL: #include "lib/stl/..."
+-I .
+-DSTL_CHECKS
+%else
+-I include                         # 固化 Linux musl 头
+-I src/posix/musl-1.1.11/arch/x86_64
+-I lib
+-I .
+%end
+-std=c99
+-D_XOPEN_SOURCE=700
+```
+
+用法: test.sh run_win / run_linux 的 `tcc -c <src> -o <o> @build/tests-common.list`。
+修复: linux 分支此前缺 `-I lib -I .`, STL 测试 (t062+) 在 linux 目标编译失败;
+补上后 t046/t049/t051/t062-t079 全部可编 (linux 全量 128→146 通过, 无回归)。
+
+### 9.3 可用范围 (glob / %dep 受 MUSL 门控)
+
+`src/*.c` 通配 (list_emit_token) 与 `%dep` 拉依赖 (list_dep) 被 `#ifdef
+CONFIG_TCC_MUSL` 门控 —— 而 M2 已删除 CONFIG_TCC_MUSL 形态 (docs/simd-standard.md §9),
+故**当前 POSIX 构建的 tcc.exe 不支持 glob 与 %dep**, 仅支持 注释/引号/`@`嵌套/`%if`。
+P2 验收标注与实现的这个分裂记入 docs/KNOWN_ISSUES.md §3。
+
+---
+
+## 10. 决策(已确认, 2026-08-23)
 
 1. **`%if` 变量来源**: `@os/@arch/@tcc` 内建 + 命令行 `-D<key>`; **不含任意进程环境变量**(更可控)。
 2. **`%dep` 存储**: git clone(--depth 1, `[--branch ref]`) 到 `.tcc_cache/<owner__repo>[@ref]`;
