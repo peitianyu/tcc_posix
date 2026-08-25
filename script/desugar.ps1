@@ -17,9 +17,11 @@ param(
 )
 $BASE = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 # emit-c hypervisor (cross, no -run) + native golden (-run available)
-$EMITT = Join-Path $BASE "build\tcc-linux-native.exe"
+$EMITT = Join-Path $BASE "build\tcc-dg8.exe"
 $TCC   = Join-Path $BASE "build\tcc-win.exe"
-$INC   = @("-I", (Join-Path $BASE "include"),
+$INC   = @("-I", $BASE,
+                "-I", (Join-Path $BASE "include"),
+                "-I", (Join-Path $BASE "lib"),
                 "-I", (Join-Path $BASE "src\posix\musl-nt64\include"),
                 "-I", (Join-Path $BASE "src\posix\musl-nt64\arch\nt64"))
 $OUT  = Join-Path $BASE "build\desugar"
@@ -48,7 +50,7 @@ foreach ($s in $Files) {
     $exe    = Join-Path $OUT "$b.clang"
 
     # 1) host tcc emit-c
-    & $EMITT --emit-c $src -o $desc 2>$cerr
+    & $EMITT --emit-c $src -o $desc @INC 2>$cerr
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $desc)) {
         $FAIL++; Write-Output "EMIT-FAIL $b"; Get-Content $cerr -ErrorAction SilentlyContinue | Select-Object -First 10; continue
     }

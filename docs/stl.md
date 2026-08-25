@@ -288,11 +288,26 @@ tests/
 | M0d | 全量回归 + SLT_CHECKS 内在检测(at/front/back 边界断言) | t067 ✅ |
 | M0e | String 基础 → 全功能(SSO/UTF-8/operator/concat) | t068 ✅ |
 | M1 | Map(有序,仅 operator<,getor/at)/Set/Deque/深拷贝/快排/二分 | t069/t071/t073/t072/t070 ✅ |
-| M1-待办 | unordered(哈希)、抽象迭代器算法骨架、heap 后端、--emit-c 脱糖 clang 闭环 | — |
+| M1-待办 | STL×--emit-c clang 闭环(见注 M) | — |
+| M2 | unordered 哈希容器 UMap/USet(开放寻址线性探测+墓碑, FNV-1a, operator==, ≈75% 再哈希) | t074/t075 ✅ |
+| M3a | 抽象迭代器算法骨架(STL_Iter(T) vptr + stl_iter_find/count/for_each) + list 算法中断(find/count/for_each) | t076 ✅ |
+| M3b | allocator heap 后端(逐对象 malloc/free + 元素析构回调 + live/泄漏检测) | t077 ✅ |
 
 已落地的命名/调用规范（替代 §13 决策4/6，见 §13-10/11）：统一 `STL_`/`stl_` 前缀避免
 与 libc 冲突；容器方法一律用**对象方法糖** `m->stl_map_set(int,int)(k,v)`（编译器已支持
 model 泛型方法糖 + 大 struct sret 返回）。
+
+> **注 M — STL×`--emit-c` clang 闭环（M1-待办，编译器层专项，待决）**:
+> 脱糖引擎对**简单翻译单元**的 operator/model/defer 改写已闭环（desugar.md P1：
+> t050/t053/t055/t056/t054，全 ✅）。但 STL 容器的脱糖产物仍原样保留
+> `model struct STL_XXX(K,V){...}` 声明、`STL_XXX(int,int) m;` 变量，以及
+> `m->stl_map_set(int,int)(...)` 方法糖调用（实测 t074.desug.c → WSL clang 10 编译失败，报
+> `STL_Unordered_Map(int,int) m;` 处 `expected expression`）。
+> 根因：STL 的泛型 model 定义**留在被 `#include` 的头里**（脱糖只发射 include 不展开头），
+> 而泛型容器的**实例化展开**（`model struct FOO(K,V)` → 具体 struct/函数）与**方法糖改写**
+> 超出既有脱糖覆盖。让全部 STL 容器通过 clang 发行检验，需要在脱糖引擎补
+> 「按实例化参数展开头内 model 定义 + 方法糖转显式调用」两件事，属编译器层改造，风险面大，
+> 本次未擅改（避免破坏既有 73 测试）。
 
 ## 12. 测试计划
 
@@ -367,4 +382,11 @@ model 泛型方法糖 + 大 struct sret 返回）。
 → 现状（2026-08-24）：M0a–M0d、M0e(String 全功能)、M1(有序 Map/Set/Deque/深拷贝/快排/
    二分/二分查找) 已落地并全绿(73 测试)。待办：unordered(哈希)、抽象迭代器算法骨架、
    String heap 后端、`--emit-c` 脱糖 clang 闭环（发行检验）。
+
+→ 增补（2026-08-24）：unordered_map/unordered_set(开放寻址+墓碑, FNV-1a)、抽象迭代器算法
+   骨架(`stl_iter_find/count/for_each`)、allocator heap 后端 已落地。脱糖闭环: 修复
+   `dg_splitw` token 512→2048 + `ntxt[24]→[64]`(见 docs/desugar.md §4.3), t063/t068/t074
+   int 主流程经 mingw64 gcc -O3 编译运行全绿。**已知待办**: struct 键 `operator==` 脱糖改写
+   缺陷(`e->key==key` 被错改为 `e->operator_eq_Mid(key,key)`), 影响 struct 键哈希容器;
+   int/内置键不受影响, 待"operator 关键字级改写"P1 统一修复。
 ```

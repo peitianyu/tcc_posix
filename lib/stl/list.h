@@ -41,6 +41,29 @@ model (T) T *stl_list_data(const STL_List(T) *self, void *n) {
     (void)self; STL_NODE_DEF(T); return n ? &((struct __stl_node_ *)n)->data : 0;
 }
 
+/* ---- 算法中断(经抽象迭代器语义落到 list): 内联遍历, 避免 per-T 静态表重复
+ * 定义(list 已有裸节点 span, 这里提供 find/count/for_each 三件套; 通用 vptr 抽象
+ * 迭代器算法骨架见 iterator.h §"M1-待办-抽象迭代器算法骨架") ---- */
+
+model (T) T *stl_list_find(const STL_List(T) *self, T val) {
+    STL_NODE_DEF(T);
+    struct __stl_node_ *n = (struct __stl_node_ *)self->head;
+    for (; n; n = n->next) if (n->data == val) return &n->data;
+    return 0;
+}
+model (T) int stl_list_count(const STL_List(T) *self, T val) {
+    STL_NODE_DEF(T);
+    struct __stl_node_ *n = (struct __stl_node_ *)self->head;
+    int c = 0;
+    for (; n; n = n->next) if (n->data == val) c++;
+    return c;
+}
+model (T) void stl_list_for_each(const STL_List(T) *self, void (*fn)(T *)) {
+    STL_NODE_DEF(T);
+    struct __stl_node_ *n = (struct __stl_node_ *)self->head;
+    for (; n; n = n->next) fn(&n->data);
+}
+
 model (T) T stl_list_front(const STL_List(T) *self) {
     STL_NODE_DEF(T); STL_ASSERT(self->head != 0);
     return ((struct __stl_node_ *)self->head)->data;

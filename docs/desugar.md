@@ -120,4 +120,91 @@ SIMD 原生运算**不需要改写**: 通过双模式 `include/simd.h` 把 `v4f`
 | P1 | operator 泛化(嵌套/混合优先级完整表达式改写) | t053 + t058 闭环 | ✅ 已落地 |
 | P1 | defer 脱糖(作用域逆序重放 + return 早退) | t055 + t056 闭环 | ✅ 已落地 |
 | P1 | model 泛型实例化排出标准 C | t031/t032/t054 | ✅ 已落地 |
+| P1 | model 函数体完整捕获(宏展开大函数不截断) | t074 int 主流程 gcc -O3 闭环 | ✅ 已落地 (见 §4.3) |
 | P1 | clang 驱动脚本(win/linux) + 性能对照(tcc vs clang -O3) | script/desugar.ps1 + docs/desugar-perf.md | ✅ 已落地 (≈37×) |
+
+## 4.3 model 函数体捕获截断修复(2026-08-24)
+
+**现象**: `lib/stl/unordered_map.h` 的 `set/at` 方法体含 `STL_UMAP_REHASH` 大宏,
+脱糖后函数体仅剩尾部几行(rehash/探查/墓碑回填尽失), 功能残缺。
+
+**根因**: 捕获链路两处容量/锚点缺陷叠加:
+1. `dg_splitw` 拆分 model 体 token 上限 **512** —— `set` 展开后 `n=549` 超限被截,
+   锚点扫描失配(`FINFAIL fp=8 openb=24 n=512`, 尾 token 停在 `e->state == 1 && e ->`)。
+2. `DgModelDef.ntxt` 仅 **24** 字符, 长方法名 `stl_unordered_map_contains`(25) 被截。
+
+**修复**(均在 `src/tccpp.c`):
+- token 缓冲上限 512 → `DG_TOKENCAP_N=2048`(统一常量); `set` 现完整捕获 `n=549 blen=1661`。
+- `ntxt[24]` → `ntxt[64]`, 长方法名完整存储。
+- 锚点式解析 + 相对深度基准(`dg_mbase`, 形体开括号处的包围深度为闭合判定基准)已落地,
+  宏内花括号嵌套不再破坏配对。(此前已含 openb 定位在参数表右括号后的首个 `{`。)
+
+**验证**: t074 全部方法体完整捕获(`set n=549 / at n=582 / contains n=176 ...`),
+脱糖产物经 mingw64 `gcc -O3` 编译运行 exit 0 = 全断言通过; t063(list)/t068(string) 同绿。
+
+**已闭环**: `operator==` 自定义类型键(`struct Mid`)脱糖改写缺陷已修复——
+根因在 `dg_gbody_op_left` 的成员前缀分支只判 `"."` 未接 `"->"`, 导致 `e->key` 左操作数只取到 `key`,
+`e ->` 漂移到改写调用之外, 生成 `e->operator_eq_Mid(key,key)`。
+修复为 `->` 与 `.` 同等待遇(配合 `dg_gbody_obj_start` 的访问器链收全对象基址)后,
+脱糖正确输出 `operator_eq_Mid(e -> key, key)`。
+验证: t074(unordered_map)/t075(unordered_set) 从 FAIL 转 PASS(clang 输出 == tcc -run)。
+已知剩余(与本修复无关的既有问题): t053/054/058(struct Vec3 `+` operator 改写未触发,
+`invalid operands`)、t076(迭代器 `STL_Iter_*` 模型未实例化)、t052/t064(测试自报 PASS,
+仅尾随空白差异)。
+
+## 4.4 model 实例化路径统一精简(2026-08-25)
+
+**目标**: 消除语句级与函数定义级两套嵌套 typedef 累积实现的重复。
+
+**改动**(均在 `src/tccpp.c`):
+- `dg_model_expand_src` 移除 `CString *typedefs` 出参 —— 此前函数泛型定义体走
+  `typedefs` 分支手动拼 typedef 行, 语句级走 `dg_model_emit` 直打 ppfp, 两套路径
+  各维护一份实现。现统一: 体内嵌套实例一律调用 `dg_model_emit`, 去重累积到文件
+  作用域全局池 `dg_fout_td`, 引用以 `struct <sn>`/`union <sn>` tag 内联。
+- 顺带将源文本参数由 CString(`m->body`/`m->ret`/`m->fparams`)收敛为 token 区间
+  (`m->bbody`/`m->bret`/`m->bfp` + 结束下标), 免压串/回切。
+- 提取 `dg_model_inst_end` 统一三条模型实例化点(verbatim 预扫、verbatim 主扫、
+  fdefs 函数泛型登记)。
+
+**构建**: `tcc-dg6.exe` 为 musl-only 自举, 需
+`-Isrc -Ibin\include -Ilib\bt-inc -DONE_SOURCE=1 -DCONFIG_TCC_MUSL=1
+-DCONFIG_TCC_SEMLOCK=0 -DCONFIG_TCC_PREDEFS=1`(SEMLOCK=0 去掉 winapi
+CRITICAL_SECTION; PREDEFS=1 保证产物顶部不残留 `#include <tccdefs.h>`)。
+
+**验证**: 25 个扩展回归测试 `--emit-c` 产物与重构前逐字节一致; clang 闭环
+17 通过 / 8 失败, 失败集合与重构前相同(t029/t050 首次纳入 clang 集即失败,
+t053/054/058/076/t052/t064 为既有问题), 无新增回归。
+
+## 4.5 闭环补齐: defer 早退 / vptr 保真 / reflect 脱糖 / SIMD 边界 (2026-08-25)
+
+**现状**: 全量 clang 闭环 **26 通过 / 1 失败** (t046_simd 为语法边界, 见下)。
+
+**1) defer 早退补齐 (t029_defer 闭环)** — `src/tccpp.c`
+- 原 `dg_is_defer_line` 只认"行首 defer"。换为行内任意位置 (`dg_has_defer`),
+  `dg_defer_pick` 提取单个 `defer f(...);` 调用文本入栈。
+- 新增 `dg_flush_defer_line` 处理含 defer 的整行: 同行多 defer 正确入栈、
+  `{`/`}` 行内深度追踪、闭块逆序重放; 对 return 用 `{ emit; return; }` 包块发射
+  存活 defer, 避免条件 return 破坏控制流。
+- 主流程 `st.isexit`(行首 goto/break/continue) 在跳出作用域前发射存活 defer
+  (t029 的 goto 跨块与 for 内 break 均依赖此)。
+
+**2) vptr 间接调用保真 (t076_stl_iterator 闭环)** — `src/tccpp.c`
+- `dg_sugar_rewrite` 对 arrow 左侧为成员访问(前置 `.` / `->`)的调用跳过, 不再把
+  `it.ops->eq(&it,&end)` 误当泛型方法糖重写成 `it.eq(&ops,&it,&end)`。
+- EOF 回放拆 `dg_fdefs_typedefs` / `dg_fdefs_funcs` 两段: 结构 typedef 前置到
+  "最后一个回到主文件行标记之后", 使顶层用户函数(i_incr)在使用前先见合成类型,
+  解决 `STL_Iter_int` "使用先于定义"。
+
+**3) reflect 脱糖 (t051_reflect 闭环)** — `src/tccpp.c`
+- 收集 struct/union/enum 定义字段(`dg_reflect_collect_line`), EOF 前置生成
+  tcc-reflect.h 的 `__refl` 静态表(`dg_reflect_emit`): 含嵌套 `sub` 引用、数组
+  `count`、offsetof/sizeof/_Alignof 计算、同一类型地址复用。
+- verbatim 遇 `__builtin_reflect(struct T)` 改写为 `(&T_refl)`; `dg_region_rewrite`
+  遇该 builtin 直接回退 verbatim(不识别)。仅当文件确实用到 reflect 才发射表,
+  避免普通 struct(t076 的 inode)误连 `__refl_field`。
+
+**4) t046_simd — 判定为语法边界, 不进 clang 闭环**
+t046 依赖 tcc 特制 SIMD 语法: `v4f`(16 字节 struct) + `.x` 字段访问 + `_mm_load_ps`
+内建透传。标准 C 下 `v4f x = _mm_load_ps(a)`(返回 `__m128` 直接赋 struct)与
+`dacc.x` 字段访问存在固有矛盾, 无法等价复现 —— 属 TCC 语言扩展, 非普通改写问题。
+详见 [docs/KNOWN_ISSUES.md](KNOWN_ISSUES.md)。

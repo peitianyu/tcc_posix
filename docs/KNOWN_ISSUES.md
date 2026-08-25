@@ -76,6 +76,13 @@
   交 gcc/clang 脱糖(只能用标准内建交集)。
   **归属**: docs/desugar.md。
 
+- **SIMD 语法边界 (t046_simd, 不进 clang 闭环)**: tcc 特制 SIMD 语法 —— `v4f`
+  (16 字节 struct) + `.x` 字段访问 + `_mm_load_ps` 内建透传, 标准 C 下
+  `v4f x = _mm_load_ps(a)`(返回 `__m128` 直接赋 struct) 与 `dacc.x` 字段访问
+  存在固有矛盾, 无法等价复现。属 TCC 语言扩展; 脱糖产物仅支持 stdintrinc 交集
+  (纯 `_mm_*` + `__m128`, 无 `.x`)。
+  **归属**: docs/desugar.md §4.5。
+
 - **TLS 相关**: emutls 为单线程懒分配器; 函数内 `__thread` 局部变量按普通自动变量
   处理 (天然 per-thread, 不拦截不报错)。
   **归属**: docs/features.md §2。

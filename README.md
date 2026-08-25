@@ -38,6 +38,11 @@ setjmp/regex/search/fenv/multibyte/crypt/prng、语言扩展 defer/model(含常�
 reflect/SIMD、cpu-prof、及系统型回归 t033-t045(socket/process/select/termios/dlfcn/
 timer/mq/ipc/aio…)。完整矩阵见 [docs/system-modules.md](docs/system-modules.md)。
 
+**扩展语法 clang 闭环** (desugar.ps1)：`--emit-c` 脱糖产物交 WSL clang -O3 编译运行,
+与 tcc -run 输出逐字节比对 —— **26 通过 / 1 失败**(t046 为 tcc 特制 SIMD 语法边界,
+见 [docs/desugar.md](docs/desugar.md) §4.5)；本例覆盖 defer 早退/model 泛型/operator/
+reflect 脱糖/STL 容器与抽象迭代器。
+
 ---
 
 ## 架构总览
