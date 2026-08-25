@@ -101,4 +101,30 @@ model (T) T *stl_binary_search(T *a, int n, T key) {
     return a + n;
 }
 
+/* ---- M1 补全: remove / unique / accumulate (docs/stl.md §8) ---- */
+
+/* 移除: [b,e) 中 == val 的元素, 就地压缩保留顺序, 返回新 end */
+model (T) T *stl_remove(T *b, T *e, T val) {
+    T *w = b;
+    for (; b != e; b++)
+        if (!(*b == val)) *w++ = *b;
+    return w;
+}
+
+/* 去重: 相邻相等元素就地去除(需有序), 返回新 end */
+model (T) T *stl_unique(T *b, T *e) {
+    T *w;
+    if (b == e) return e;
+    w = b;
+    for (T *p = b + 1; p != e; p++)
+        if (!(*p == *w)) *++w = *p;
+    return w + 1;
+}
+
+/* 累加: [b,e) 求和(默认 operator+), 初值 init */
+model (T) T stl_accumulate(T *b, T *e, T init) {
+    for (; b != e; b++) init = init + *b;
+    return init;
+}
+
 #endif /* STL_ALGORITHM_H */

@@ -292,6 +292,7 @@ tests/
 | M2 | unordered 哈希容器 UMap/USet(开放寻址线性探测+墓碑, FNV-1a, operator==, ≈75% 再哈希) | t074/t075 ✅ |
 | M3a | 抽象迭代器算法骨架(STL_Iter(T) vptr + stl_iter_find/count/for_each) + list 算法中断(find/count/for_each) | t076 ✅ |
 | M3b | allocator heap 后端(逐对象 malloc/free + 元素析构回调 + live/泄漏检测) | t077 ✅ |
+| M4 | String 自由函数 split/trim/join(string_extra.h) + 算法 remove/unique/accumulate | t078/t079 ✅ |
 
 已落地的命名/调用规范（替代 §13 决策4/6，见 §13-10/11）：统一 `STL_`/`stl_` 前缀避免
 与 libc 冲突；容器方法一律用**对象方法糖** `m->stl_map_set(int,int)(k,v)`（编译器已支持
@@ -389,4 +390,13 @@ model 泛型方法糖 + 大 struct sret 返回）。
    int 主流程经 mingw64 gcc -O3 编译运行全绿。**已知待办**: struct 键 `operator==` 脱糖改写
    缺陷(`e->key==key` 被错改为 `e->operator_eq_Mid(key,key)`), 影响 struct 键哈希容器;
    int/内置键不受影响, 待"operator 关键字级改写"P1 统一修复。
+
+→ 增补（2026-08-25, M4）：String 自由函数 `STL_string_split/trim/join`
+   (lib/stl/string_extra.h, §7.4 C7) + 算法 `stl_remove/stl_unique/stl_accumulate`
+   (§8 M1 补全), t078/t079, 套件 79/79。**编译器修复**: operator 小 struct (≤8B)
+   寄存器返回路径三处 vstack 错乱 — operator_call/unary 调用/method sugar 的 packed
+   struct return 循环 (vset 原地替换后单条目 vswap 越界 + gfunc_call 后原地写 vtop
+   覆盖外层赋值左值 + vstore 结果=src 需 vpop) — `struct Pt {int x;} s = a+b;` 及
+   `s = a+b;` 赋值现可编译运行 (此前 vstack leak/cannot convert)。
+   **遗留**: struct 键 `operator==` 脱糖改写缺陷 (见上) 仍待 P1。
 ```

@@ -3128,7 +3128,11 @@ static void operator_call(Sym *s, CType *ft, CType *rt, int nargs)
             for (i = 0; i < nargs; i++)
                 vpushv(&arg[i]);
             gfunc_call(nargs);
-            vtop->type = rvt;
+            /* gfunc_call 后栈底可能还有外层条目 (如赋值左值): vpush 压入返回寄存器值,
+               不能原地写 vtop (会覆盖外层条目). PE: ret_nregs 恒 1 (≤8B 单寄存器,
+               16B→sret). vstore 保留 dest(不弹), 不能用 vset 原地替换后 vswap
+               (单条目越界 → vstack leak). */
+            vpush(&rvt);
             vtop->c.i = 0;
             PUT_R_RET(vtop, rvt.t);
             size = type_size(rt, &align);
@@ -3137,17 +3141,13 @@ static void operator_call(Sym *s, CType *ft, CType *rt, int nargs)
                 align = ret_align;
             loc = (loc - size) & -align;
             addr = loc;
-            off = 0;
-            for (;;) {
-                vset(&rvt, VT_LOCAL | VT_LVAL, addr + off);
-                vswap();
-                vstore();
-                vtop--;
-                if (--ret_nregs == 0)
-                    break;
-                off += regsize;
-            }
-            vset(rt, VT_LOCAL | VT_LVAL, addr);
+            vpush(&rvt);
+            vtop->r = VT_LOCAL | VT_LVAL;
+            vtop->c.i = addr;
+            vswap();          /* [.., slot, retval] */
+            vstore();         /* [.., retval] — vstore 结果=src */
+            vpop();           /* [..] — 弹掉已消费的 retval */
+            vset(rt, VT_LOCAL | VT_LVAL, addr);   /* [.., result] */
         } else {
             /* sret: 返回槽 + 隐藏指针 (大 struct), 布局 [f,ptr,args...] */
             size = type_size(rt, &align);
@@ -7001,16 +7001,14 @@ static void method_call_sugar(void)
                 talign = ret_align;
             loc = (loc - sz) & -talign;
             addr = loc;
-            tofs = 0;
-            for (;;) {
-                vset(&ret.type, VT_LOCAL | VT_LVAL, addr + tofs);
-                vswap();
-                vstore();
-                vtop--;
-                if (--ret_nregs == 0)
-                    break;
-                tofs += regsize;
-            }
+            /* PE: ret_nregs 恒 1 (≤8B 单寄存器, 16B→sret). vstore 保留 dest(不弹),
+               vset 原地替换后 vswap 会单条目越界 → vpush 目标槽. */
+            vpush(&ret.type);
+            vtop->r = VT_LOCAL | VT_LVAL;
+            vtop->c.i = addr;
+            vswap();
+            vstore();       /* vstore 结果=src(已消费的寄存器值) */
+            vpop();         /* 弹掉, 恢复外层栈 */
             vset(&ret_type, VT_LOCAL | VT_LVAL, addr);
         }
 
@@ -7889,16 +7887,14 @@ special_math_val:
                         align = ret_align;
                     loc = (loc - size) & -align;
                     addr = loc;
-                    offset = 0;
-                    for (;;) {
-                        vset(&ret.type, VT_LOCAL | VT_LVAL, addr + offset);
-                        vswap();
-                        vstore();
-                        vtop--;
-                        if (--ret_nregs == 0)
-                          break;
-                        offset += regsize;
-                    }
+                    /* PE: ret_nregs 恒 1. vstore 保留 dest(不弹), vset 原地替换后
+                       vswap 单条目越界 → vpush 目标槽. */
+                    vpush(&ret.type);
+                    vtop->r = VT_LOCAL | VT_LVAL;
+                    vtop->c.i = addr;
+                    vswap();
+                    vstore();       /* vstore 结果=src(已消费的寄存器值) */
+                    vpop();         /* 弹掉, 恢复外层栈 */
                     vset(&s->type, VT_LOCAL | VT_LVAL, addr);
                 }
 

@@ -3,8 +3,20 @@
 > 里程碑级变更摘要。README 只做概览。按时间序, 最新在上。
 > 完整逐提交历史用 `git log --oneline`。
 
-## 2026-08-25 — SIMD 标准交集化 (M2) + 编译选项瘦身
+## 2026-08-25 — STL M4 补全 + operator 小 struct 返回修复
 
+- **String 自由函数** (lib/stl/string_extra.h, §7.4 C7): `STL_string_split` (含空段/
+  长段 SSO 溢出/max 截断)、`STL_string_trim` (首尾空白)、`STL_string_join` (一次
+  reserve) — t078。
+- **算法补全** (§8 M1): `stl_remove` / `stl_unique` / `stl_accumulate` (含 struct
+  operator+ 累加) — t079。
+- **编译器修复**: operator 小 struct (≤8B) 寄存器返回三处 vstack 错乱 (operator_call/
+  unary 调用/method sugar 的 packed struct return): vset 原地替换后单条目 vswap 越界
+  (vstack leak)、gfunc_call 后原地写 vtop 覆盖外层赋值左值 (cannot convert)、vstore
+  结果=src 需 vpop。`struct Pt {int x;} s = a+b;` 与 `s = a+b;` 现可编译运行。
+- 套件 77 → **79/79**。
+
+## 2026-08-25 — SIMD 标准交集化 (M2) + 编译选项瘦身
 **SIMD 收敛到 immintrin 标准交集** (docs/simd-standard.md §9):
 
 - 内核新增 `__m128/__m128d/__m128i` 内建向量类型 (VT_VECTOR), 打通聚合值路径
