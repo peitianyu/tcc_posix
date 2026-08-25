@@ -10,9 +10,6 @@ set -u
 BASE="$(cd "$(dirname "$0")" && pwd)"
 cd "$BASE"   # listfile 相对路径与 tests/*.c 均基于仓库根
 TCC="$BASE/bin/tcc.exe"
-INC_WIN="$BASE/src/posix/musl-nt64/include"
-ARCH_WIN="$BASE/src/posix/musl-nt64/arch/nt64"
-ARCH_LNX="$BASE/src/posix/musl-1.1.11/arch/x86_64"
 TESTDIR="$BASE/build/tests"
 PASS=0; FAIL=0; FAILED=""
 MODE_LINUX=0; MODE_RUN=0
@@ -72,8 +69,15 @@ run_run() {
     local name="$1"
     local src="tests/$name.c"
     [ -f "$src" ] || return
+    # -run 内存执行局限 (独立 exe / -linux 下均已覆盖):
+    #   t041: dladdr 无模块加载概念 → 返回 0
+    #   t049: 单文件模式不含 extra 源 lib/cpu-prof.c (cpu_prof_* 未定义)
+    case "$name" in
+        t041_dlfcn) echo "SKIP $name (-run: dladdr 无模块)"; return ;;
+        t049_cpu)   echo "SKIP $name (-run: 需 extra 源 cpu-prof.c)"; return ;;
+    esac
     local out rc
-    out=$(cd "$BASE" && timeout 15 "$TCC" -run -I "$INC_WIN" -I "$ARCH_WIN" -I "$BASE/lib" "$src" 2>&1); rc=$?
+    out=$(cd "$BASE" && timeout 15 "$TCC" -run @build/tests-common.list "$src" 2>&1); rc=$?
     if [ "$rc" = "0" ]; then
         PASS=$((PASS+1)); echo "PASS $name (-run)"
     else

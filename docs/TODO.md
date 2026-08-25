@@ -15,13 +15,15 @@
       复合赋值 (+= -= *= /= %=) — t059; 已同步 `--emit-c` 脱糖
 - [x] 脱糖闭环: `--emit-c` + operator/defer/model + clang 驱动 + 性能对照 (≈37×)
       — docs/desugar.md / docs/desugar-perf.md
-- [x] `@listfile` 编译描述 P0-P2 (`%dep`/glob/`%if`/嵌套) — docs/listfile.md
+- [x] `@listfile` 编译描述: 注释/引号/嵌套/`%if` 编译选择 (P0/P1) — 已用于自举与测试
+      (build/selfhost-*.list, tests-common.list); **`%dep` 包管理与 glob 通配被
+      CONFIG_TCC_MUSL 门控而 MUSL 形态已删 → 当前 POSIX 构建不可用** (KNOWN_ISSUES §3)
 
 ## P1 / Q 待办
 
-- [ ] **operator 脱糖产物 clang 验证** — 环境无 clang, 现以 gcc 侧 5/5 PASS; 需在有
-      clang 的环境跑 script/desugar.ps1 确认新运算符 (比较/一元/自增减/复合赋值) 的
-      `-O3 -mavx2 -mfma` 正式产物等价。
+- [ ] **operator 脱糖产物 clang 验证收尾** — 2026-08-25 起 WSL clang 10 可用,
+      脱糖闭环已达 27 通过/0 失败 (docs/RELEASE.md); 待补: 新运算符
+      (比较/一元/自增减/复合赋值) 用例的 clang 产物数值比对全量覆盖确认。
 - [ ] **termios console E2E 确认** — R6 已实现 (t040 通过)，需在真交互终端跑一次
       t040 确认 tcgetattr/TIOCGWINSZ/TCSETS 实际数值。
 - [ ] **cpu-prof 报告接入 `-bt` 符号渲染 vs 独立构建双路径覆盖确认**。

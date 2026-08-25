@@ -3,6 +3,20 @@
 > 里程碑级变更摘要。README 只做概览。按时间序, 最新在上。
 > 完整逐提交历史用 `git log --oneline`。
 
+## 2026-08-25 — `-run` 模式修复 + KNOWN_ISSUES/TODO 同步
+
+- **run_run 改用 @build/tests-common.list** (listfile 化遗漏): 原 `-run` 编译缺
+  `-I lib -I .` → t062-t079 (STL) + t049 全部 `lib/stl/... not found`;
+  修复后 -run 全量 140/18 → **156/156**。
+- **-run 已知局限 (t041/t049 SKIP)**: tccrun 内存执行无模块加载 → dladdr 返回 0
+  (t041); 单文件模式不含 extra 源 → cpu-prof.c 未定义 (t049)。独立 exe / linux
+  目标均已覆盖。
+- **文档同步**: KNOWN_ISSUES — operator 边界更新 (比较/一元/自增减/复合赋值已支持),
+  CONFIG_TCC_MUSL 形态标注已删 (M2), syscall 未注册验证注明 psxscl 专有,
+  新增 -run 局限; TODO — clang 验证项更新 (WSL clang 10 可用, 闭环 27/0),
+  @listfile 标注 %dep/glob 不可用。
+- 三模式全绿: test.sh **79/79** (win), **158/158** (linux), **156/156** (-run)。
+
 ## 2026-08-25 — linux 目标测试 12 项既有失败全部修复 (test.sh -linux 158/158)
 
 - **编译器 bug (t059)**: operator 后缀 `++/--` 在 SysV 寄存器返回路径下实参传成

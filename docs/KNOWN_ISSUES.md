@@ -12,6 +12,11 @@
   完全正常), 用毕删除, 透传参数与退出码。故 `-run -b` 现可正常使用。
   **归属**: docs/features.md §1; 排查细节 docs/system-modules.md R13。
 
+- **`-run` 内存执行局限**: tccrun 无模块加载概念 — `dladdr` 恒返回 0
+  (t041 -run SKIP); 单文件模式不含 extra 源 (t049 依赖 lib/cpu-prof.c,
+  -run SKIP)。独立 exe 与 linux 目标均已覆盖这两项。
+  **归属**: test.sh run_run 注释。
+
 - **`__builtin_ia32_rdtsc` 不受支持** → cpu-prof 退化为内联汇编 `rdtsc`/`lfence`。
   **归属**: docs/cpu-prof.md。
 
@@ -43,7 +48,9 @@
   **影响**: 真实舍入/异常语义不生效 (t026 只测 API 契约)。
 
 - **部分 syscall 未注册**: 未注册 syscall 由 `__syscall_vtbl[n]==NULL → -ENOSYS`
-  兜底。t039 断言用 getrandom=318 / fanotify_init=300 / bpf=321 验证该兜底。
+  兜底。验证 (t034/t039) 用 getrandom=318 / fanotify_init=300 / bpf=321 — 这是
+  **psxscl 专有语义** (真实 Linux 内核已实现 getrandom), linux 目标下 t034/t039
+  跳过 (见 tests/wsl1.h 与测试内 #ifdef __linux__)。
   **归属**: docs/system-modules.md R1。
 
 ## 3. 编译链路 / 平台约束
@@ -69,18 +76,23 @@
     fd: linux -1 EBADF vs psxscl 0), t042/t043/t044 (WSL1 限制: timer_create/
     mq/msgget, 经 tests/wsl1.h 检测 SKIP)。
 
-- **纯 musl 编译器 (CONFIG_TCC_MUSL)** 走 POSIX 接口, 不含任何 winapi 依赖:
-  PE 导入表为空, 系统调用经 psxscl→ntdll 直通。
-  **代价**: musl 线路无 `GetModuleFileNameA` 定位私有目录, `CONFIG_TCCDIR` 需在
-  编译期 `-D` 固定 (install.sh 已写好)。无需支持原生 win32 编译。
+- **CONFIG_TCC_MUSL 形态已删除 (M2, 2026-08-25)**: 曾以 CONFIG_TCC_MUSL 自举
+  编译器自身 (内部 winapi 调用全换 POSIX, PE 导入表为空), 因 musl 线路 tccrun
+  在 psxscl ≥1GB reserve 下重定位溢出 (-run 不可用) 已停用。现状:
+  `bin/tcc.exe` 是 CONFIG_TCC_POSIX 构建 (常规 PE/msvcrt 链接), **编译产物**
+  默认链 musl libc.a, 产物 PE 导入表为空、零 winapi 依赖。编译选项结论见
+  docs/simd-standard.md §9。
 
 - **winapi 不可 shim 到 musl(msvcrt 风格 stdio)**: 因 `__iob_func` 指针算术陷阱,
   msvcrt 风格 stdio 无法 shim 到 musl。
 
 ## 4. 语言扩展边界
 
-- **operator 重载**: 仅 `+ - * / %`, 精确单一匹配, 无隐式转换/成员/ADL 重载决议;
-  一元与比较暂不做; 不能显式写 `operator+(a,b)` (在表达式层是关键字)。
+- **operator 重载**: 支持 二元算术 `+ - * / %`、一元 `! ~`、自增自减 `++ --`
+  (前后缀, 存回操作数)、比较 `== != < <= > >=`、复合赋值 `+= -= *= /= %=`;
+  精确单一匹配, 无隐式转换/成员/ADL 重载决议; 不能显式写 `operator+(a,b)`
+  (在表达式层是关键字)。**注**: 后缀 ++/-- 在 SysV 目标曾有实参传址 bug
+  (2026-08-25 已修, gen_incdec_operator VT_LOCAL|VT_LVAL)。
   **归属**: docs/features.md §4.4。
 
 - **model 泛型**: 模板名与成员/参数名不得重复(实例化替换会冲突); 函数模板实参
@@ -102,8 +114,10 @@
   immintrin.h), clang 编译运行与 tcc -run 数值一致。
   **归属**: docs/simd-standard.md §9 / docs/desugar.md §4.5。
 
-- **TLS 相关**: emutls 为单线程懒分配器; 函数内 `__thread` 局部变量按普通自动变量
-  处理 (天然 per-thread, 不拦截不报错)。
+- **TLS 相关**: emutls 为单线程懒分配器 (win 在 musl-nt64 crt_tls.c, linux 在
+  musl-1.1.11/src/thread/x86_64/emutls.c, 语义一致); 函数内 `__thread` 局部变量
+  按普通自动变量处理 (天然 per-thread, 不拦截不报错)。多线程 per-thread 副本
+  超出范围。
   **归属**: docs/features.md §2。
 
 ## 5. 已知无碍的行为说明
