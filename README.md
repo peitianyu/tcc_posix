@@ -41,10 +41,11 @@ map/set/deque/unordered/heap, t062-t079)、cpu-prof、及系统型回归 t033-t0
 [docs/system-modules.md](docs/system-modules.md)。
 
 **扩展语法 clang 闭环** (desugar.ps1)：`--emit-c` 脱糖产物交 WSL clang -O3 编译运行,
-与 tcc -run 输出逐字节比对 —— **32 通过 / 0 失败**(带 `-Wall -Werror` 正式产物质量门禁)；
-本例覆盖 defer 早退/model 泛型/operator/reflect v2 (bitfield/FAM/递归链)/STL 容器与
-抽象迭代器。独立库导出场景另由 script/lib-export.sh 验收 (clang `-flto`
-`-fvisibility=hidden` 编库 + 导出符号集断言, 见 [docs/desugar.md](docs/desugar.md) §4.5)。
+与 tcc -run 输出逐字节比对 —— **33 通过 / 0 失败**(带 `-Wall -Werror` 正式产物质量门禁)；
+本例覆盖 defer 早退/model 泛型 (多类型参数/嵌套实例化/常量参数/递归自引用,
+t032c)/operator/reflect v2 (bitfield/FAM/递归链)/STL 容器与抽象迭代器。独立库导出
+场景另由 script/lib-export.sh 验收 (clang `-flto` `-fvisibility=hidden` 编库 +
+导出符号集断言, 见 [docs/desugar.md](docs/desugar.md) §4.5)。
 
 ---
 

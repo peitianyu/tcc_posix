@@ -3,6 +3,25 @@
 > 里程碑级变更摘要。README 只做概览。按时间序, 最新在上。
 > 完整逐提交历史用 `git log --oneline`。
 
+## 2026-08-25 — model 泛型脱糖边界收敛 (t032c, TODO P1 关闭)
+
+- 新增 tests/t032c_model_edge.c: 多类型参数 (Pair2/Tri + 嵌套实参)、嵌套实例化
+  2/3 层 (`Array(Box(int))` / `Wrap(Array(Box(int)))`)、泛型递归 (struct 关键字/
+  裸名/双自引用字段)、常量参数组合 (`Grid→Mat(T,N,2)` 常量传嵌套、`2+2` 归一化
+  缓存)、函数泛型嵌套实例类型、缓存一致性。tcc 编译与脱糖 clang 产物数字一致。
+- 修复 4 处边界缺陷:
+  - **泛型递归自引用**: `struct Node(T) { T v; struct Node(T) *next; }` 实例化
+    无限重入 → 缓存查重放宽到实例化中占位 (c==-1 命中) + TOK_STRUCT/UNION
+    分支识别 `struct Node(` 走 model_instantiate;
+  - **嵌套实参逗号误判**: 定义期"参数与成员名冲突"检查加括号深度 (Grid 的
+    `Mat(T, N, 2)` 不再误报);
+  - **脱糖双 struct 关键字**: `struct Node(T)` → `struct struct Node_int`
+    → phase2 遇 struct/union 后跟嵌套实例时吞关键字;
+  - **脱糖嵌套实例化栈溢出**: expand_src 的 512KB 栈数组 ×2 层嵌套击穿 1MB 栈
+    (基线即崩) → 堆分配。
+- 套件: win **82/82**, linux **163/163**, -run **160/160**, desugar **33/33**,
+  lib-export **3/3**。
+
 ## 2026-08-25 — 反射 v2 + emit-c 独立库导出 (TODO P1 两项关闭)
 
 - **反射 v2** (`__builtin_reflect`, t051): `__refl_field` ABI 40B→48B
