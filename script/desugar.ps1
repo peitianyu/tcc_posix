@@ -70,10 +70,19 @@ foreach ($s in $Files) {
         $FAIL++; Write-Output "CLANG-FAIL $b"; Get-Content $gccerr -ErrorAction SilentlyContinue | Select-Object -First 20; continue
     }
     # 4) host native tcc -run golden (extensions run natively in tcc-win)
+    #    编码: tcc 输出 UTF-8, PS 5.1 默认按 ANSI 捕获会乱码, `>` 又写 UTF-16 →
+    #    捕获前设 [Console]::OutputEncoding=UTF8, 再显式写 UTF-8 无 BOM,
+    #    与 WSL clang 的 UTF-8 输出字节一致 (t052 中文输出验证).
     Push-Location $BASE
-    & $TCC -run @INC $src > $ccout 2>"$OUT/$b.tcc.err"
+    $prevEnc = [Console]::OutputEncoding
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $tccout = & $TCC -run @INC $src 2>"$OUT/$b.tcc.err"
     $tccrc = $LASTEXITCODE
+    [Console]::OutputEncoding = $prevEnc
     Pop-Location
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    if ($null -ne $tccout) { [IO.File]::WriteAllText($ccout, ($tccout -join "`n") + "`n", $utf8) }
+    else { [IO.File]::WriteAllText($ccout, "", $utf8) }
     # 5) compare (normalize CRLF vs LF; ignore stderr warnings)
     if ($tccrc -eq 0 -and (Test-Path $cldout) -and (Test-Path $ccout)) {
         $a = ([IO.File]::ReadAllText($cldout)).Replace("`r`n","`n").TrimEnd()

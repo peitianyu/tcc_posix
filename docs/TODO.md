@@ -21,9 +21,11 @@
 
 ## P1 / Q 待办
 
-- [ ] **operator 脱糖产物 clang 验证收尾** — 2026-08-25 起 WSL clang 10 可用,
-      脱糖闭环已达 27 通过/0 失败 (docs/RELEASE.md); 待补: 新运算符
-      (比较/一元/自增减/复合赋值) 用例的 clang 产物数值比对全量覆盖确认。
+- [x] **operator 脱糖产物 clang 验证** — 2026-08-25 完成: WSL clang 10 全量脱糖
+      闭环 **32/32** (含新运算符比较/一元/自增减/复合赋值 t059, model 泛型+operator
+      组合 t079)。期间修复: 泛型体算术 operator 改写 (arith=1)、同名变量跨作用域
+      误改写 (dg_var_del)、desugar.ps1 UTF-8 编码。
+
 - [ ] **termios console E2E 确认** — R6 已实现 (t040 通过)，需在真交互终端跑一次
       t040 确认 tcgetattr/TIOCGWINSZ/TCSETS 实际数值。
 - [ ] **cpu-prof 报告接入 `-bt` 符号渲染 vs 独立构建双路径覆盖确认**。

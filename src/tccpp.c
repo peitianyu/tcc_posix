@@ -4286,6 +4286,32 @@ static void dg_var_setptr2(int tok, int val)
             dg_var_ptr[i] = val;
 }
 
+/* 注销 op 变量 (同名非 op 类型声明时调用, 防跨作用域同名误改写):
+ * tag 置 0 → dg_var_of 返回 0 不再触发运算符改写; 同名 op 声明可重登记. */
+static void dg_var_del(int tok)
+{
+    int i;
+    for (i = 0; i < dg_varcnt; i++)
+        if (dg_var_nm[i] == tok) {
+            dg_var_tag[i] = 0;
+            dg_var_ptr[i] = 0;
+            return;
+        }
+}
+
+/* 该 token 是否为标量/结构等类型关键字 (声明符判定用) */
+static int dg_tok_is_typekw(int tok)
+{
+    const char *s;
+    if (tok == TOK_STRUCT || tok == TOK_UNION || tok == TOK_ENUM)
+        return 1;
+    s = get_tok_str(tok, NULL);
+    return s && (dg_w_intkey(s) || !strcmp(s, "float") || !strcmp(s, "double")
+                 || !strcmp(s, "void") || !strcmp(s, "_Bool")
+                 || !strcmp(s, "const") || !strcmp(s, "volatile")
+                 || !strcmp(s, "typedef"));
+}
+
 /* ---- 完全括号/忠实改写: 右值 -> DGNode 树 ---- */
 static int dg_tokchar(int i)
 {
@@ -5739,9 +5765,12 @@ static void dg_gbody_oprewrite(CString *out, const char *fp_txt,
     }
 #undef GV_SET
 
-    /* 泛型体内比较/判等改写: 由共用核心 dg_binop_rewrite 完成 (arith=0 仅比较运算);
+    /* 泛型体内 operator 改写: 由共用核心 dg_binop_rewrite 完成 (arith=1 全运算符
+     * 算术+比较, 与语句级 6313 一致) — 2026-08-25 t079 (stl_accumulate(struct Pt)
+     * 的 `init + *b`) 暴露算术分支未开; 改写条件 dg_gbody_op_left/right 仍要求
+     * 两侧都是 opbase 类型变量, int 等非 OP 运算原样透传.
      * 无改写点时核心仍把全部 token 原样重建进 out, 等价旧 P2a/P2b 透传. */
-    dg_binop_rewrite(out, w2, N, gv, gvk, gvc, opbase, 0);
+    dg_binop_rewrite(out, w2, N, gv, gvk, gvc, opbase, 1);
 }
 
 static void dg_model_f_register(TCCState *s1, const DgModelDef *m, char av[][64])
@@ -6954,6 +6983,17 @@ static void dg_flush(TCCState *s1)
                             dg_add_var(t, pending);
                         dg_var_setptr2(t, star);
                         star = 0;
+                    } else if (dg_var_of(t)) {
+                        /* 同名非 op 类型声明 → 注销先前登记的 op 变量
+                         * (t079: main 内 `int *r` 与 operator+ 定义内
+                         * `struct Pt r` 同名, 防 `r == a + 3` 被误改写为
+                         * operator_eq_Pt). 声明符判定: 前 token 是类型关键字,
+                         * 或 `*`/`[` 且前前 token 是类型关键字
+                         * (`int *r` / `char buf[]`). */
+                        if (dg_tok_is_typekw(prev)
+                            || ((prev == '*' || prev == '[')
+                                && dg_tok_is_typekw(pp)))
+                            dg_var_del(t);
                     }
                 }
             } else if (ch == ';') {

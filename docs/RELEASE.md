@@ -3,6 +3,23 @@
 > 里程碑级变更摘要。README 只做概览。按时间序, 最新在上。
 > 完整逐提交历史用 `git log --oneline`。
 
+## 2026-08-25 — 脱糖 clang 全量闭环 32/32 (WSL clang 实测)
+
+- **desugar.ps1 全量扩展集 (32 测试) 交 WSL clang 10 -O3 编译运行, 与 tcc -run
+  逐字节比对: 32 通过 / 0 失败** (含 t059 新运算符、t079 model 泛型+operator 组合)。
+  期间修复 3 个问题:
+  1. **model 泛型体内算术 operator 未改写** (t079): `dg_gbody_oprewrite` 硬编码
+     arith=0 (仅比较) → `stl_accumulate(struct Pt)` 的 `init + *b` 未改写;
+     改 arith=1 (与语句级一致), 改写条件仍要求两侧为 opbase 类型变量。
+  2. **同名变量跨作用域误改写** (t079 `r == a+3` 被误改 operator_eq_Pt): 变量表
+     按名全局首注册优先, `int *r` 与 operator+ 内 `struct Pt r` 冲突 → 声明收集
+     遇非 op 类型声明 (前/前前 token 为类型关键字) 注销该名 (dg_var_del)。
+  3. **desugar.ps1 编码**: tcc -run 输出 UTF-8 但 PS 5.1 按 ANSI 捕获 (`>` 又写
+     UTF-16) → 捕获前设 [Console]::OutputEncoding=UTF8 + 显式写 UTF-8 无 BOM
+     (t052 中文输出验证)。
+- 回归: test.sh **79/79** (win), **158/158** (linux), desugar **32/32**。
+  TODO P1 "operator 脱糖 clang 验证" 关闭。
+
 ## 2026-08-25 — `-run` 模式修复 + KNOWN_ISSUES/TODO 同步
 
 - **run_run 改用 @build/tests-common.list** (listfile 化遗漏): 原 `-run` 编译缺
