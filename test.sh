@@ -132,6 +132,18 @@ for src in tests/t*.c; do
     run_win "$(basename "$src" .c)"
 done
 
+# -b 边界检查冒烟 (bcheck.o 部署回归; 2026-08-25 集成 install.sh 前 -b 报 not found)
+echo "--- -b 边界检查冒烟 ---"
+cat > "$TESTDIR/bound_smoke.c" <<'EOF'
+int main(void) { int a[4]; a[100] = 5; return 0; }
+EOF
+if bin/tcc.exe -b "$TESTDIR/bound_smoke.c" -o "$TESTDIR/bound_smoke.exe" 2>/dev/null \
+    && "$TESTDIR/bound_smoke.exe" 2>&1 | grep -q "BCHECK"; then
+    PASS=$((PASS+1)); echo "PASS bound_smoke (-b 越界上报)"
+else
+    FAIL=$((FAIL+1)); FAILED="$FAILED bound_smoke(-b)"; echo "FAIL bound_smoke (-b)"
+fi
+
 if [ "$MODE_RUN" = "1" ]; then
     echo "--- tcc -run 模式 ---"
     for src in tests/t*.c; do

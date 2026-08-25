@@ -32,7 +32,7 @@ build/tcc-win.exe -platform=linux examples/hello.c  # Linux ELF
 ./test.sh -linux       # 追加 Linux (WSL) 测试
 ```
 
-当前 **79/79 通过** (test.sh, Windows tcc 自编译运行)：stdio/malloc/mmap/文件/目录/
+当前 **80/80 通过** (test.sh, Windows tcc 自编译运行)：stdio/malloc/mmap/文件/目录/
 时间/宽字符/信号/tmp 映射、pthread 全套、线程压力、`-run`(真阻塞 futex)、ctype/
 setjmp/regex/search/fenv/multibyte/crypt/prng、语言扩展 defer/model(含常量参)/operator/
 reflect/SIMD、ucontext 协程 (t060/t061)、STL 容器/算法/迭代器 (vector/list/string/

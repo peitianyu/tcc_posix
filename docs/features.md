@@ -21,7 +21,9 @@ build/tcc-win.exe -b -bt hello.c -o hello.exe
 以及对齐分配 (`posix_memalign` / `aligned_alloc` / `memalign`)。运行时由
 `lib/bcheck.c`(CONFIG_TCC_MUSL 分支, 无 winapi/pthread/dlfcn 依赖)实现,
 `lib/bt-exe.c`/`tccrun.c` 提供基于 NT x64 固定偏移 (Rip=0xf8/Rbp=0xa0/Rsp=0x98)
-的堆栈回溯与向量异常处理。由 `script/build_bt.sh` 生成 `bcheck.o`/`bt-exe.o`/`bt-log.o`。
+的堆栈回溯与向量异常处理。由 `script/build_bt.sh` 生成 `bcheck.o`/`bt-exe.o`/`bt-log.o`
+(已集成 install.sh [3/3.5] 部署到 bin/lib; 2026-08-25 前不在主构建链, `-b` 报
+bcheck.o not found)。
 
 **越界对象反查变量名**:独立编译的 exe 会把最终 ELF 符号表+字符串表(一个 `.btsym`
 数据段)一并链接进去,`-b` 越界时报错时会把命中的**全局/static 数组变量名**及其

@@ -3,6 +3,16 @@
 > 里程碑级变更摘要。README 只做概览。按时间序, 最新在上。
 > 完整逐提交历史用 `git log --oneline`。
 
+## 2026-08-25 — `-b` 边界检查修复 (bcheck.o 入主构建链)
+
+- **断点**: script/build_bt.sh 编译 bcheck.o/bt-exe.o/bt-log.o 但不在主构建链
+  (build.sh/install.sh 均未调用) → `tcc -b` 报 `bcheck.o not found`, 而
+  features.md 宣称 -b 可用 (文档分裂)。
+- **修复**: install.sh 新增 [3/3.5] 调用 build_bt.sh, 部署三个运行时到 bin/lib;
+  test.sh 新增 bound_smoke (-b 越界上报) 冒烟防回归; 套件 79 → **80/80**。
+- 实测: `tcc -run -b` / 独立 exe `-b` 越界均报 `BCHECK: ... outside of the
+  region` + `文件:行 by main` ✓。
+
 ## 2026-08-25 — @listfile glob 恢复 + `%out` 输出指令
 
 - **glob 通配恢复** (此前被 CONFIG_TCC_MUSL 门控而不可用, KNOWN_ISSUES §3):

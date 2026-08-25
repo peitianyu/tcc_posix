@@ -55,6 +55,10 @@ echo "✓ 编译器就绪: $BIN/tcc.exe"
 mkdir -p "$BASE/build/lib"
 cp "$BASE/lib/libc-win.a" "$BASE/build/lib/libc.a"
 
+echo "=== [3/3.5] -b/-bt 运行时 (bcheck.o/bt-exe.o/bt-log.o → bin/lib) ==="
+# 2026-08-25: 此前 build_bt.sh 不在主构建链, `tcc -b` 报 bcheck.o not found
+bash "$BASE/script/build_bt.sh"
+
 echo "=== [4/4] 验证开箱即用 ==="
 cd /tmp && rm -f bin_hello.c bin_hello.exe
 cat > bin_hello.c <<'EOF'
