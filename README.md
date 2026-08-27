@@ -32,18 +32,20 @@ build/tcc-win.exe -platform=linux examples/hello.c  # Linux ELF
 ./test.sh -linux       # 追加 Linux (WSL) 测试
 ```
 
-当前 **80/80 通过** (test.sh, Windows tcc 自编译运行)：stdio/malloc/mmap/文件/目录/
+当前 **82/82 通过** (test.sh, Windows tcc 自编译运行)：stdio/malloc/mmap/文件/目录/
 时间/宽字符/信号/tmp 映射、pthread 全套、线程压力、`-run`(真阻塞 futex)、ctype/
 setjmp/regex/search/fenv/multibyte/crypt/prng、语言扩展 defer/model(含常量参)/operator/
-reflect/SIMD、ucontext 协程 (t060/t061)、STL 容器/算法/迭代器 (vector/list/string/
-map/set/deque/unordered/heap, t062-t079)、cpu-prof、及系统型回归 t033-t045
+reflect/SIMD、ucontext 协程 (t060/t061)、STL 容器/算法/迭代器/代数类型 (vector/list/
+string/map/set/deque/unordered/heap/Option/Result, t062-t081)、cpu-prof、及系统型回归
+t033-t045
 (socket/process/select/termios/dlfcn/timer/mq/ipc/aio…)。完整矩阵见
 [docs/system-modules.md](docs/system-modules.md)。
 
 **扩展语法 clang 闭环** (desugar.ps1)：`--emit-c` 脱糖产物交 WSL clang -O3 编译运行,
-与 tcc -run 输出逐字节比对 —— **33 通过 / 0 失败**(带 `-Wall -Werror` 正式产物质量门禁)；
+与 tcc -run 输出逐字节比对 —— **35 通过 / 0 失败**(带 `-Wall -Werror` 正式产物质量门禁)；
 本例覆盖 defer 早退/model 泛型 (多类型参数/嵌套实例化/常量参数/递归自引用,
-t032c)/operator/reflect v2 (bitfield/FAM/递归链)/STL 容器与抽象迭代器。独立库导出
+t032c)/operator/reflect v2 (bitfield/FAM/递归链)/STL 容器与抽象迭代器/代数类型
+(Option/Result 组合子)。独立库导出
 场景另由 script/lib-export.sh 验收 (clang `-flto` `-fvisibility=hidden` 编库 +
 导出符号集断言, 见 [docs/desugar.md](docs/desugar.md) §4.5)。
 
@@ -76,7 +78,7 @@ t032c)/operator/reflect v2 (bitfield/FAM/递归链)/STL 容器与抽象迭代器
 | CPU 周期插桩 | `rdtsc` 插桩,总周期/次数/avg 归因到函数 | cpu-prof.md |
 | 语言扩展 | defer / model 泛型 / operator / `__builtin_reflect` | features §4, reflect.md |
 | 泛型方法糖 | `obj.method(args)` → 静态分派 (struct 方法/迭代器) | method-call.md |
-| STL | vector/list/string/map/set/deque/unordered/heap + 算法/迭代器 | stl.md |
+| STL | vector/list/string/map/set/deque/unordered/heap + 算法/迭代器 + Option/Result | stl.md |
 | SIMD | `__m128` 家族 + `_mm_*` SSE 标准 intrinsic 交集(x86_64-simd 模块) | features §4.3, simd-standard.md |
 | 脱糖输出 | `--emit-c` 标准 C → clang/LLVM 正式产物(≈37×) | desugar.md, desugar-perf.md |
 | `@listfile` | `tcc @build.txt` 包管理 + glob + `%if` 编译选择 | listfile.md |

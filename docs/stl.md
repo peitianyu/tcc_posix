@@ -293,6 +293,7 @@ tests/
 | M3a | 抽象迭代器算法骨架(STL_Iter(T) vptr + stl_iter_find/count/for_each) + list 算法中断(find/count/for_each) | t076 ✅ |
 | M3b | allocator heap 后端(逐对象 malloc/free + 元素析构回调 + live/泄漏检测) | t077 ✅ |
 | M4 | String 自由函数 split/trim/join(string_extra.h) + 算法 remove/unique/accumulate | t078/t079 ✅ |
+| M5 | 代数类型 Option/Result(model STL_Option(T)/STL_Result(R,E): 构造/谓词/unwrap 系/map/and_then/or_else, union 双分支) | t080/t081 ✅ |
 
 已落地的命名/调用规范（替代 §13 决策4/6，见 §13-10/11）：统一 `STL_`/`stl_` 前缀避免
 与 libc 冲突；容器方法一律用**对象方法糖** `m->stl_map_set(int,int)(k,v)`（编译器已支持
@@ -398,5 +399,13 @@ model 泛型方法糖 + 大 struct sret 返回）。
    struct return 循环 (vset 原地替换后单条目 vswap 越界 + gfunc_call 后原地写 vtop
    覆盖外层赋值左值 + vstore 结果=src 需 vpop) — `struct Pt {int x;} s = a+b;` 及
    `s = a+b;` 赋值现可编译运行 (此前 vstack leak/cannot convert)。
+
+→ 增补（2026-08-27, M5）：代数类型 `STL_Option(T)`/`STL_Result(R,E)`
+   (lib/stl/option.h / lib/stl/result.h), t080/t081, 套件 82/82。**closed-loop 全绿**:
+   tcc `-run` + 编译链接运行 + `--emit-c`→WSL clang `-O3 -Wall -Werror` 逐字节一致。
+   覆盖: 内嵌 tag + 值 (Option) / tag + union 双分支 (Result); map/and_then/map_err/
+   or_else 变类型组合子 (2~3 类型参数)。**闭环约束**: 用户回调 (main 前) 不得再调
+   model 构造器 (EOF 冲排于用户代码之后) → 回调内 inline 构造; 模型类型实参用
+   STL_Pair 等 model 类型而非用户 struct (typedef 先于其定义)。
    **遗留**: struct 键 `operator==` 脱糖改写缺陷 (见上) 仍待 P1。
 ```
