@@ -2,7 +2,7 @@
 
 > 本文件收纳各类特性/扩展的**详细设计**。README 只保留一页总览与模块索引，
 > 每个功能的实现细节在此展开。专题设计另有独立文档的 (desugar / memory /
-> cpu-prof / reflect / matrix-library / system-modules / listfile) 不在本文重复，
+> cpu-prof / reflect / matrix / system-modules / listfile) 不在本文重复，
 > 只做指引。
 
 ## 1. 调试体验 (-b 边界检查 + -bt 回溯)
@@ -90,7 +90,8 @@ msvcrt/kernel32: PE **导入表为空**, 系统调用经 psxscl→ntdll 直通�
 
 ## 4. 语言扩展一览
 
-各扩展的完整语义/边界/设计文档见 docs/matrix-library.md 附录 B、docs/reflect.md。
+各扩展的完整语义/边界/设计文档见本文件 §4.x、docs/reflect.md、docs/method-call.md。
+(mat 库独立设计见 docs/matrix.md)
 
 ### 4.1 defer (t029)
 

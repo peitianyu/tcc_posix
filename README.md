@@ -122,7 +122,8 @@ const struct __refl *r = __builtin_reflect(struct Vec3);
 | [reflect.md](docs/reflect.md) | `__builtin_reflect` 设计 |
 | [cpu-prof.md](docs/cpu-prof.md) | rdtsc 周期插桩设计 |
 | [listfile.md](docs/listfile.md) | `@build.txt` 编译描述 |
-| [matrix-library.md](docs/matrix-library.md) | 矩阵库 demo 与扩展决策链(附录 B/C) |
+| [matrix.md](docs/matrix.md) | Eigen 式固定尺寸矩阵库 `STL_Mat(T,R,C)` 设计 + M0 实现(合并自 matrix-library) |
+| [comptime.md](docs/comptime.md) | 编译期语义扩展: 受限 constexpr + model/_Generic 类型分派 |
 | [opt.md](docs/opt.md) | 优化 |
 | [KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) | 已知限制 / 未解决问题 (bug, pty/fenv/termios-E2E 等) |
 | [TODO.md](docs/TODO.md) | 待办与路线图 (P1/P2) |
