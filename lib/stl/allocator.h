@@ -184,4 +184,16 @@ STL_STATIC void stl_heap_destroy(STL_Heap *h)
     h->live = 0;
 }
 
+/* 连续数组容器(vector/stack)翻倍扩容公共宏: len>=cap 时分配新块并拷贝旧元素
+ * 更新 data/cap; 分配失败保持原位(由调用方判 return)。T/self 为调用点符号。 */
+#define STL_ARR_GROW(self) \
+    if ((self)->len >= (self)->cap) { \
+        int nc = (self)->cap ? (self)->cap * 2 : 4; \
+        T *nd = (T *)stl_arena_alloc((self)->ar, (size_t)nc * sizeof(T), STL_ALIGN); \
+        if (nd) { \
+            for (int k = 0; k < (self)->len; k++) nd[k] = (self)->data[k]; \
+            (self)->data = nd; (self)->cap = nc; \
+        } \
+    }
+
 #endif /* STL_ALLOCATOR_H */

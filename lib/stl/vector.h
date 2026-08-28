@@ -67,15 +67,8 @@ model (T) void stl_vector_reserve(STL_Vector(T) *self, int n) {
 }
 
 model (T) void stl_vector_push_back(STL_Vector(T) *self, T x) {
-    if (self->len >= self->cap) {
-        int nc = self->cap ? (self->cap * 2) : 4;
-        T *nd = (T *)stl_arena_alloc(self->ar, (size_t)nc * sizeof(T), STL_ALIGN);
-        if (!nd) return;
-        if (self->len > 0 && self->data)
-            for (int i = 0; i < self->len; i++) nd[i] = self->data[i];
-        self->data = nd;
-        self->cap = nc;
-    }
+    STL_ARR_GROW(self);
+    if (self->len >= self->cap) return;   /* 分配失败: 保留原位 */
     self->data[self->len++] = x;
 }
 
