@@ -82,69 +82,57 @@ model (K,V) void stl_unordered_map_clear(STL_Unordered_Map(K,V) *self) {
 #define STL_UMAP_ROOM() ((self->nb == 0) || \
     ((self->len + self->tomb) >= (self->nb - self->nb / 4)))
 
+/* 线性探查定位: 声明 s/h/e, 计算 `fo`(命中槽下标, 未命中 -1)、`ft`(首个墓碑
+ * 下标, 无则 -1) 与 `et`(首个空槽下标, 无则 -1, 即 break 处)。读/写方法共用
+ * 同一探查段, 消除 4 处重复循环。写路径插入位 = ft>=0?ft:et。
+ * 前置: STL_UMAP_SLOT_EN 已展开, self/key/nb 有效; 空表由调用方先判(nb==0)。 */
+#define STL_UMAP_SPAN() \
+    struct __stl_umap_e *s = (struct __stl_umap_e *)self->slots; \
+    int fo = -1, ft = -1, et = -1; \
+    int h = (int)(stl_uwhash((const unsigned char *)&key, sizeof(K)) & (unsigned)(self->nb - 1)); \
+    for (int p = 0; p < self->nb; p++) { \
+        int i = (h + p) & (self->nb - 1); \
+        struct __stl_umap_e *e = &s[i]; \
+        if (e->state == 0) { et = i; break; } \
+        if (e->state == 1 && e->key == key) { fo = i; break; } \
+        if (e->state == 2 && ft < 0) ft = i; \
+        }
+
 /* 取键对应值指针(无则 0)。只读: 不触发再哈希(空表直接 0)。 */
 model (K,V) V *stl_unordered_map_get(STL_Unordered_Map(K,V) *self, K key) {
     STL_UMAP_SLOT_EN();
     if (self->nb == 0) return 0;
-    struct __stl_umap_e *s = (struct __stl_umap_e *)self->slots;
-    int h = (int)(stl_uwhash((const unsigned char *)&key, sizeof(K)) & (unsigned)(self->nb - 1));
-    for (int p = 0; p < self->nb; p++) {
-        int i = (h + p) & (self->nb - 1);
-        struct __stl_umap_e *e = &s[i];
-        if (e->state == 0) return 0;
-        if (e->state == 1 && e->key == key) return &e->val;
-    }
+    STL_UMAP_SPAN();
+    if (fo >= 0) return &s[fo].val;
     return 0;
 }
 model (K,V) int stl_unordered_map_contains(const STL_Unordered_Map(K,V) *self, K key) {
     STL_UMAP_SLOT_EN();
     if (self->nb == 0) return 0;
-    struct __stl_umap_e *s = (struct __stl_umap_e *)self->slots;
-    int h = (int)(stl_uwhash((const unsigned char *)&key, sizeof(K)) & (unsigned)(self->nb - 1));
-    for (int p = 0; p < self->nb; p++) {
-        int i = (h + p) & (self->nb - 1);
-        struct __stl_umap_e *e = &s[i];
-        if (e->state == 0) return 0;
-        if (e->state == 1 && e->key == key) return 1;
-    }
-    return 0;
+    STL_UMAP_SPAN();
+    return fo >= 0;
 }
 
 /* 置值: 已存在→覆盖返回 0; 新插入返回 0; 内存失败 -1。写路径先确保装载余量。 */
 model (K,V) int stl_unordered_map_set(STL_Unordered_Map(K,V) *self, K key, V val) {
     STL_UMAP_SLOT_EN();
     if (STL_UMAP_ROOM()) STL_UMAP_REHASH(-1);
-    struct __stl_umap_e *s = (struct __stl_umap_e *)self->slots;
-    int h = (int)(stl_uwhash((const unsigned char *)&key, sizeof(K)) & (unsigned)(self->nb - 1));
-    int first_tomb = -1;
-    for (int p = 0; p < self->nb; p++) {
-        int i = (h + p) & (self->nb - 1);
-        struct __stl_umap_e *e = &s[i];
-        if (e->state == 0) {
-            int ins = (first_tomb >= 0) ? first_tomb : i;
-            s[ins].key = key; s[ins].val = val; s[ins].state = 1;
-            if (ins == first_tomb) self->tomb--;
-            self->len++;
-            return 0;
-        }
-        if (e->state == 1 && e->key == key) { e->val = val; return 0; }  /* 覆盖 */
-        if (e->state == 2 && first_tomb < 0) first_tomb = i;
+    STL_UMAP_SPAN();
+    if (fo >= 0) { s[fo].val = val; return 0; }       /* 覆盖 */
+    {   int ins = (ft >= 0) ? ft : et;                /* 墓碑复用, 否则首空槽 */
+        s[ins].key = key; s[ins].val = val; s[ins].state = 1;
+        if (ft >= 0) self->tomb--;
+        self->len++;
     }
-    return -1;                                    /* 满表(不应: 装载阈值已护航) */
+    return 0;
 }
 
 /* get 键值, 未设置时返回默认值 dflt (不改表) */
 model (K,V) V stl_unordered_map_getor(STL_Unordered_Map(K,V) *self, K key, V dflt) {
     STL_UMAP_SLOT_EN();
     if (self->nb == 0) return dflt;
-    struct __stl_umap_e *s = (struct __stl_umap_e *)self->slots;
-    int h = (int)(stl_uwhash((const unsigned char *)&key, sizeof(K)) & (unsigned)(self->nb - 1));
-    for (int p = 0; p < self->nb; p++) {
-        int i = (h + p) & (self->nb - 1);
-        struct __stl_umap_e *e = &s[i];
-        if (e->state == 0) return dflt;
-        if (e->state == 1 && e->key == key) return e->val;
-    }
+    STL_UMAP_SPAN();
+    if (fo >= 0) return s[fo].val;
     return dflt;
 }
 
@@ -152,39 +140,24 @@ model (K,V) V stl_unordered_map_getor(STL_Unordered_Map(K,V) *self, K key, V dfl
 model (K,V) V *stl_unordered_map_at(STL_Unordered_Map(K,V) *self, K key) {
     STL_UMAP_SLOT_EN();
     if (STL_UMAP_ROOM()) STL_UMAP_REHASH(0);
-    struct __stl_umap_e *s = (struct __stl_umap_e *)self->slots;
-    int h = (int)(stl_uwhash((const unsigned char *)&key, sizeof(K)) & (unsigned)(self->nb - 1));
-    int first_tomb = -1;
-    for (int p = 0; p < self->nb; p++) {
-        int i = (h + p) & (self->nb - 1);
-        struct __stl_umap_e *e = &s[i];
-        if (e->state == 0) {
-            int ins = (first_tomb >= 0) ? first_tomb : i;
-            s[ins].key = key; s[ins].state = 1;
-            if (ins == first_tomb) self->tomb--;
-            self->len++;
-            { char *vp = (char *)&s[ins].val;   /* 零初始化值槽 */
-              for (int k = 0; k < (int)sizeof(V); k++) vp[k] = 0; }
-            return &s[ins].val;
-        }
-        if (e->state == 1 && e->key == key) return &e->val;
-        if (e->state == 2 && first_tomb < 0) first_tomb = i;
+    STL_UMAP_SPAN();
+    if (fo >= 0) return &s[fo].val;
+    {   int ins = (ft >= 0) ? ft : et;
+        s[ins].key = key; s[ins].state = 1;
+        if (ft >= 0) self->tomb--;
+        self->len++;
+        { char *vp = (char *)&s[ins].val;   /* 零初始化值槽 */
+          for (int k = 0; k < (int)sizeof(V); k++) vp[k] = 0; }
+        return &s[ins].val;
     }
-    return 0;
 }
 
 /* 删键: 命中→置墓碑返回 1; 无→0 */
 model (K,V) int stl_unordered_map_erase(STL_Unordered_Map(K,V) *self, K key) {
     STL_UMAP_SLOT_EN();
     if (self->nb == 0) return 0;
-    struct __stl_umap_e *s = (struct __stl_umap_e *)self->slots;
-    int h = (int)(stl_uwhash((const unsigned char *)&key, sizeof(K)) & (unsigned)(self->nb - 1));
-    for (int p = 0; p < self->nb; p++) {
-        int i = (h + p) & (self->nb - 1);
-        struct __stl_umap_e *e = &s[i];
-        if (e->state == 0) return 0;
-        if (e->state == 1 && e->key == key) { e->state = 2; self->len--; self->tomb++; return 1; }
-    }
+    STL_UMAP_SPAN();
+    if (fo >= 0) { s[fo].state = 2; self->len--; self->tomb++; return 1; }
     return 0;
 }
 

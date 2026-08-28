@@ -68,56 +68,47 @@ model (K) void stl_unordered_set_clear(STL_Unordered_Set(K) *self) {
 #define STL_USET_ROOM() ((self->nb == 0) || \
     ((self->len + self->tomb) >= (self->nb - self->nb / 4)))
 
+/* 线性探查定位(同 unordered_map STL_UMAP_SPAN): fo=命中槽, ft=首墓碑, et=首空槽 */
+#define STL_USET_SPAN() \
+    struct __stl_uset_e *s = (struct __stl_uset_e *)self->slots; \
+    int fo = -1, ft = -1, et = -1; \
+    int h = (int)(stl_uwhash((const unsigned char *)&key, sizeof(K)) & (unsigned)(self->nb - 1)); \
+    for (int p = 0; p < self->nb; p++) { \
+        int i = (h + p) & (self->nb - 1); \
+        struct __stl_uset_e *e = &s[i]; \
+        if (e->state == 0) { et = i; break; } \
+        if (e->state == 1 && e->key == key) { fo = i; break; } \
+        if (e->state == 2 && ft < 0) ft = i; \
+        }
+
 /* 是否含 key(只读, 不触发再哈希; 空表直接 0) */
 model (K) int stl_unordered_set_contains(const STL_Unordered_Set(K) *self, K key) {
     STL_USET_SLOT_EN();
     if (self->nb == 0) return 0;
-    struct __stl_uset_e *s = (struct __stl_uset_e *)self->slots;
-    int h = (int)(stl_uwhash((const unsigned char *)&key, sizeof(K)) & (unsigned)(self->nb - 1));
-    for (int p = 0; p < self->nb; p++) {
-        int i = (h + p) & (self->nb - 1);
-        struct __stl_uset_e *e = &s[i];
-        if (e->state == 0) return 0;
-        if (e->state == 1 && e->key == key) return 1;
-    }
-    return 0;
+    STL_USET_SPAN();
+    return fo >= 0;
 }
 
 /* 插入(唯一): 已存在→0; 新插入→1; 内存失败 -1 */
 model (K) int stl_unordered_set_insert(STL_Unordered_Set(K) *self, K key) {
     STL_USET_SLOT_EN();
     if (STL_USET_ROOM()) STL_USET_REHASH(-1);
-    struct __stl_uset_e *s = (struct __stl_uset_e *)self->slots;
-    int h = (int)(stl_uwhash((const unsigned char *)&key, sizeof(K)) & (unsigned)(self->nb - 1));
-    int first_tomb = -1;
-    for (int p = 0; p < self->nb; p++) {
-        int i = (h + p) & (self->nb - 1);
-        struct __stl_uset_e *e = &s[i];
-        if (e->state == 0) {
-            int ins = (first_tomb >= 0) ? first_tomb : i;
-            s[ins].key = key; s[ins].state = 1;
-            if (ins == first_tomb) self->tomb--;
-            self->len++;
-            return 1;
-        }
-        if (e->state == 1 && e->key == key) return 0;      /* 已存在 */
-        if (e->state == 2 && first_tomb < 0) first_tomb = i;
+    STL_USET_SPAN();
+    if (fo >= 0) return 0;                              /* 已存在 */
+    {   int ins = (ft >= 0) ? ft : et;
+        s[ins].key = key; s[ins].state = 1;
+        if (ft >= 0) self->tomb--;
+        self->len++;
     }
-    return -1;
+    return 1;
 }
 
 /* 删除: 命中→置墓碑返回 1; 无→0 */
 model (K) int stl_unordered_set_erase(STL_Unordered_Set(K) *self, K key) {
     STL_USET_SLOT_EN();
     if (self->nb == 0) return 0;
-    struct __stl_uset_e *s = (struct __stl_uset_e *)self->slots;
-    int h = (int)(stl_uwhash((const unsigned char *)&key, sizeof(K)) & (unsigned)(self->nb - 1));
-    for (int p = 0; p < self->nb; p++) {
-        int i = (h + p) & (self->nb - 1);
-        struct __stl_uset_e *e = &s[i];
-        if (e->state == 0) return 0;
-        if (e->state == 1 && e->key == key) { e->state = 2; self->len--; self->tomb++; return 1; }
-    }
+    STL_USET_SPAN();
+    if (fo >= 0) { s[fo].state = 2; self->len--; self->tomb++; return 1; }
     return 0;
 }
 

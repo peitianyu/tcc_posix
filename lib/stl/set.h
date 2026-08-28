@@ -13,6 +13,17 @@
 
 #include "allocator.h"
 
+/* 有序 lower_bound: 声明 d/lo/hi 并定位首个 !(d[mid] < key) 位(key 形参在 self 域)。
+ * 各方法内联展开, 消除 4 处重复二分区段; lo 即首个 d[lo] >= key 的下标(等值由
+ * `!(key < d[lo])` 判定, 溢出守卫由方法自行处理)。 */
+#define STL_SET_LB() \
+    K *d = (K *)self->data; \
+    int lo = 0, hi = self->len; \
+    while (lo < hi) { \
+        int mid = (lo + hi) / 2; \
+        if (d[mid] < key) lo = mid + 1; else hi = mid; \
+        }
+
 model struct STL_Set(K) {
     void *data;         /* 有序唯一键数组(K*, 升序) */
     int  len;
@@ -35,23 +46,13 @@ model (K) K *stl_set_key_at(STL_Set(K) *self, int i) {
 
 /* 是否含 key: 仅 operator<, lower_bound + 等价 */
 model (K) int stl_set_contains(const STL_Set(K) *self, K key) {
-    K *d = (K *)self->data;
-    int lo = 0, hi = self->len;
-    while (lo < hi) {
-        int mid = (lo + hi) / 2;
-        if (d[mid] < key) lo = mid + 1; else hi = mid;
-    }
+    STL_SET_LB();
     return lo < self->len && !(key < d[lo]);
 }
 
 /* 插入(唯一): 已存在→返回 0; 新插入有序→返回 1; 分配失败→ -1 */
 model (K) int stl_set_insert(STL_Set(K) *self, K key) {
-    K *d = (K *)self->data;
-    int lo = 0, hi = self->len;
-    while (lo < hi) {
-        int mid = (lo + hi) / 2;
-        if (d[mid] < key) lo = mid + 1; else hi = mid;
-    }
+    STL_SET_LB();
     if (lo < self->len && !(key < d[lo])) return 0;        /* 已存在 */
     if (self->len >= self->cap) {
         int nc = self->cap ? (self->cap * 2) : 4;
@@ -68,12 +69,7 @@ model (K) int stl_set_insert(STL_Set(K) *self, K key) {
 
 /* 删除: 命中→左移压缩返回 1; 无→0 */
 model (K) int stl_set_erase(STL_Set(K) *self, K key) {
-    K *d = (K *)self->data;
-    int lo = 0, hi = self->len;
-    while (lo < hi) {
-        int mid = (lo + hi) / 2;
-        if (d[mid] < key) lo = mid + 1; else hi = mid;
-    }
+    STL_SET_LB();
     if (lo >= self->len || key < d[lo]) return 0;
     for (int j = lo; j < self->len - 1; j++) d[j] = d[j + 1];
     self->len--;
