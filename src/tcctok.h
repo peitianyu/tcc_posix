@@ -12,6 +12,7 @@
      DEF(TOK_SWITCH, "switch")
      DEF(TOK_CASE, "case")
      DEF(TOK_DEFAULT, "default")
+     DEF(TOK_CONSTEXPR, "constexpr")
      DEF(TOK_DEFER, "defer")
      DEF(TOK_MODEL, "model")
      DEF(TOK_OPERATOR, "operator")

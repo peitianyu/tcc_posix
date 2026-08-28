@@ -4825,8 +4825,10 @@ static void dg_model_reset_impl(void)
 static void dg_model_emit(TCCState *s1, const DgModelDef *m, char av[][64]);
 static void dg_model_expand_src(TCCState *s1, const DgModelDef *m, char av[][64],
                                 int bl, int el, CString *out);
+static void dg_model_f_register(TCCState *s1, const DgModelDef *m, char av[][64]);
 static void dg_fdefs_typedefs(TCCState *s1);
 static void dg_fdefs_funcs(TCCState *s1);
+static void dg_fdefs_protos(TCCState *s1);
 static void dg_reflect_emit(TCCState *s1);
 static void dg_reflect_forward(TCCState *s1);
 static void dg_reflect_mark_used(const char *tag, char kw);
@@ -5278,12 +5280,29 @@ static void dg_model_expand_src(TCCState *s1, const DgModelDef *m, char av[][64]
             continue;
         }
         DgModelDef *nn = dg_model_find(w2[i]);
-        if (nn && nn->kind != 'F' && i + 1 < n2 && !strcmp(w2[i + 1], "(")) {
+        if (nn && i + 1 < n2 && !strcmp(w2[i + 1], "(")) {
             char na[DG_MODEL_MAXP][64];
             int ne;
             if (dg_model_av_from_words(s1, w2, n2, i, nn, na, &ne)) {
                 char sn[384];
                 dg_model_synth(nn, na, sn, sizeof sn);
+                if (nn->kind == 'F') {
+                    /* 跨函数泛型调用 (模型函数体调另一模型函数, t090 linalg):
+                     * 登记该实例(EOF 发定义 + 前置原型)并改写为合成名, 使 clang
+                     * 所有调用点先见原型、定义兜底. 嵌套 register 会改写
+                     * dg_fdef_name/dg_fdef_synth(自递归绑定用), 须保存/恢复外层. */
+                    const char *saved_name = dg_fdef_name;
+                    char saved_synth[384];
+                    memcpy(saved_synth, dg_fdef_synth, sizeof dg_fdef_synth);
+                    dg_model_f_register(s1, nn, na);
+                    dg_fdef_name = saved_name;
+                    memcpy(dg_fdef_synth, saved_synth, sizeof dg_fdef_synth);
+                    if (out->size && out->data[out->size - 1] != ' ')
+                        cstr_ccat(out, ' ');
+                    cstr_cat(out, sn, strlen(sn));
+                    i = ne;
+                    continue;
+                }
                 /* 统一走 dg_model_emit: 递归展开嵌套 + 去重累积 typedef 到全局
                  * dg_fout_td (语句级与函数定义级同一路径, 消除重复实现) */
                 dg_model_emit(s1, nn, na);
@@ -5854,6 +5873,25 @@ static void dg_model_f_register(TCCState *s1, const DgModelDef *m, char av[][64]
         cstr_cat(&def, "\n}\n", 3);
         cstr_ccat(&def, 0);
         fp->def = tcc_strdup(def.data);
+        /* 归档同签名原型 (无函数体): 供 --emit-c 在用户 main 前代码(B 段)之前
+         * 前置发射, 使 B 段/C 段全部调用点(尤其 main 之前的 static 辅助函数,
+         * 如 mat 系列 t083.. 的 test_xxx)先见声明 → clang C99 不再 -Werror
+         * implicit-declaration. 定义仍统一在 main 前输出. */
+        if (fp_.size)
+            fp->proto = tcc_malloc((size_t)fp_.size + strlen(sn) + Rlen + 11);
+        else
+            fp->proto = tcc_malloc(9);
+        if (fp_.size) {
+            char *p = fp->proto;
+            memcpy(p, "static ", 7); p += 7;
+            memcpy(p, R, (size_t)Rlen); p += Rlen;
+            *p++ = ' ';
+            memcpy(p, sn, strlen(sn)); p += strlen(sn);
+            memcpy(p, fp_.data, (size_t)fp_.size); p += fp_.size;
+            *p++ = ';'; *p++ = '\n'; *p = 0;
+        } else {
+            memcpy(fp->proto, ";\n", 2); fp->proto[2] = 0; /* 无参(异常)兜底 */
+        }
     }
     cstr_free(&ret); cstr_free(&fp_); cstr_free(&body); cstr_free(&def);
     fp->next = dg_fdefs;
@@ -5876,6 +5914,13 @@ static void dg_fdefs_funcs(TCCState *s1)
     for (fp = dg_fdefs; fp; fp = fp->next)
         if (fp->def)
             fputs(fp->def, s1->ppfp);
+}
+static void dg_fdefs_protos(TCCState *s1)
+{
+    DgModelFDef *fp;
+    for (fp = dg_fdefs; fp; fp = fp->next)
+        if (fp->def && fp->proto)
+            fputs(fp->proto, s1->ppfp);
 }
 
 /* 从 token 缓冲解析一个 model 实例 (i 指向模板名, 其后应为 '('), 返回实参.
@@ -6397,6 +6442,11 @@ static int dg_sugar_rewrite(TCCState *s1)
             }
             for (j = i + 1; j < dg_n; j++) if (!is_space(dg_buf[j])) { mnam = j; break; }
             if (mnam < 0 || dg_buf[mnam] < TOK_IDENT) continue;
+            /* 仅当 mname 为已登记 model 函数才视为方法糖; 否则(如 mat 结构体
+             * 函数指针成员 `e->un(...)` 调用)是标准 C 成员调用, 须保留原样 ——
+             * 否则会被改写成 `un(&e, ...)`, clang -Werror implicit 报错 (t085). */
+            if (!dg_model_find(dg_txt[mnam] ? dg_txt[mnam] : ""))
+                continue;
             targ_o = mnam + 1;
             while (targ_o < dg_n && is_space(dg_buf[targ_o])) targ_o++;
             if (targ_o >= dg_n || dg_tokchar(targ_o) != '(') continue;
@@ -7383,6 +7433,7 @@ static int preprocess_loop(TCCState *s1, int desugar)
                 hdr = ins;
             fwrite(body.data, 1, hdr, dg_saved_ppfp);              /* A: header+回主文件标记 */
             dg_fdefs_typedefs(s1);                                 /* 结构/nested typedef */
+            dg_fdefs_protos(s1);                                   /* 函数泛型原型(main前代码须先见) */
             fwrite(body.data + hdr, 1, ins - hdr, dg_saved_ppfp);  /* B: 用户顶层(main 前) */
             if (nomain) {
                 /* 无 main (独立库导出场景, 2026-08-25): 函数泛型定义先落地 (用户

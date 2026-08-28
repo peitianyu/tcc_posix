@@ -3193,7 +3193,7 @@ static Sym *find_operator(int op, CType *ft, CType *rt)
     return s;
 }
 
-/* C 运算符重载 (独立语言扩展, 见 docs/matrix-library.md 附录 B):
+/* C 运算符重载 (独立语言扩展, 见 docs/features.md §4.4):
  * struct 两操作数的二元算术运算, 若全局存在精确同名的 operator<op> 函数,
  * 改写为一次普通函数调用. 属编译期静态分派, 零运行时开销.
  * vstack 已含 [a, b] (vtop[-1]=左, vtop[0]=右); 命中则替换为调用, 返回 1;
@@ -4903,6 +4903,8 @@ static void model_decl(void)
             while (*p) {
                 const int *q = p;
                 TOK_GET(&t, &p, &cv);
+                if (t == TOK_LINENUM)
+                    continue;   /* 跳过换行标记, 不干扰标识符追踪 */
                 if (prev >= TOK_IDENT && t == '(') {
                     /* 深度计数找匹配 ')' */
                     int depth = 1, t2, found = 0;
@@ -4910,12 +4912,18 @@ static void model_decl(void)
                     const int *r = p;
                     while (*r) {
                         TOK_GET(&t2, &r, &cv2);
+                        if (t2 == TOK_LINENUM)
+                            continue;   /* 深度扫描同理跳过换行标记 */
                         if (t2 == '(')
                             depth++;
                         else if (t2 == ')') {
                             if (--depth == 0) {
-                                /* 匹配 ')' 后是否 '{' */
-                                if (*r == '{')
+                                /* 匹配 ')' 后是否 '{' (跳过 LINENUM) */
+                                const int *r2 = r;
+                                do {
+                                    TOK_GET(&t2, &r2, &cv2);
+                                } while (t2 == TOK_LINENUM);
+                                if (t2 == '{')
                                     found = 1;
                                 break;
                             }
@@ -5216,6 +5224,7 @@ typedef struct ModelFn {
     int name;              /* 合成内部函数名 tok (max2_int) */
     Sym *sym;              /* 内部函数符号 */
     TokenString *body;     /* 函数体 token 流 ({...} 替换后, 含 ';' 缓冲) */
+    char done;             /* 已编译标志: 保留在链表中供 model_fn_find 命中缓存 */
 } ModelFn;
 
 static ModelFn *model_fn_list;   /* 待编译函数实例表 (兼缓存) */
@@ -5390,20 +5399,36 @@ static int model_function_call(int name, ModelDef *md)
     return 1;
 }
 
-/* 文件末尾: 编译所有待编译函数实例 */
+/* 文件末尾: 编译所有待编译函数实例。
+   要点:
+   1) 编译某实例时其函数体内对其它 model 函数的调用 (model→model 嵌套, 如
+      stl_mat_add→stl_mat_eval) 会经 model_function_call 把新实例前插到 list 头;
+      若用 `fn = fn->next` 单向前进会在编译过程中跳过这些新实例, 致其符号未定义。
+   2) 实例须留在 list 中 (done 标志) 供 model_fn_find 缓存命中 —— 否则已编译实例
+      被后来的嵌套引用再次重建 (同合成名) → 符号重复定义。
+   故: 每轮扫描未编译实例, 编译后置 done, 并重启扫描以纳入本轮前插的新实例。 */
 static void model_fn_compile_all(void)
 {
+    int again = 1;
     ModelFn *fn;
-    for (fn = model_fn_list; fn; fn = fn->next) {
-        int save_tok = tok;
-        CValue save_tokc = tokc;
-        begin_macro(fn->body, 1);
-        next();   /* '{' */
-        cur_text_section = text_section;
-        gen_function(fn->sym);
-        end_macro();
-        tok = save_tok;
-        tokc = save_tokc;
+    while (again) {
+        again = 0;
+        for (fn = model_fn_list; fn; fn = fn->next) {
+            if (fn->done)
+                continue;
+            int save_tok = tok;
+            CValue save_tokc = tokc;
+            fn->done = 1;
+            begin_macro(fn->body, 1);
+            next();   /* '{' */
+            cur_text_section = text_section;
+            gen_function(fn->sym);
+            end_macro();
+            tok = save_tok;
+            tokc = save_tokc;
+            again = 1;   /* 编译可能前插新实例, 重启扫描 */
+            break;
+        }
     }
 }
 
@@ -10502,8 +10527,14 @@ static int decl(int l)
     ElfSym *esym;
 
     while (1) {
+        int is_constexpr;
 
         oldint = 0;
+        /* cin: `constexpr` 作为受限编译期常量限定符, 只能置于声明最开头.
+           (非零新增语义: 复用枚举常量符号机制做单遍常量传播) */
+        is_constexpr = (tok == TOK_CONSTEXPR);
+        if (is_constexpr)
+            next();   /* 消费 constexpr, 让 parse_btype 从类型说明符开始 */
         if (!parse_btype(&btype, &adbase, l == VT_LOCAL)) {
             if (model_decl_seen) {
                 /* model 定义已由 parse_btype 消费, 直接继续 */
@@ -10697,6 +10728,34 @@ static int decl(int l)
 
                     if (tok == '=')
                         has_init = 1;
+
+                    if (is_constexpr) {
+                        long long cv;
+                        Sym *csym;
+                        CType ct;
+                        /* cin: `constexpr` 常量对象 — 编译期折叠 + 按枚举常量登记
+                         * (VT_CONST|VT_ENUM_VAL + enum_val), 不分配存储.
+                         * 引用处(见 unary VT_CONST 分支)自动拿到常数值, 即单遍
+                         * 常量传播. 求值走 expr_const64, 非编译期常量即报错(受限
+                         * constexpr 的结构性终止保证, 无循环/递归解释). */
+                        if (!has_init)
+                            tcc_error("constexpr object must be initialized");
+                        if ((type.t & VT_BTYPE) == VT_FUNC)
+                            tcc_error("constexpr function not supported yet (constant object only)");
+                        next(); /* '=' */
+                        cv = expr_const64();
+                        ct = type;
+                        ct.t = (ct.t & (VT_BTYPE|VT_UNSIGNED|VT_LONG|VT_DEFSIGN))
+                             | VT_STATIC | VT_ENUM_VAL;
+                        csym = sym_push(v, &ct, VT_CONST, 0);
+                        csym->enum_val = cv;
+                        if (tok != ',') {
+                            skip(';');
+                            break;
+                        }
+                        next();
+                        continue;
+                    }
 
                     if (((type.t & VT_EXTERN) && (!has_init || l != VT_CONST))
 		        || (type.t & VT_BTYPE) == VT_FUNC

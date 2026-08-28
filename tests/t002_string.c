@@ -1,5 +1,8 @@
 /* 测试: 字符串函数 */
+/* 注: strcasestr 系 GNU 扩展 -- emit-c 会丢弃源码中的 #define _GNU_SOURCE,
+ * clang 侧统一由 desugar.ps1 传 -D_GNU_SOURCE 补feature门控(见 t002 注释)。 */
 #include <string.h>
+#include <stdlib.h>          /* free */
 #include <stdio.h>
 int main(void) {
     char a[64], b[64];
