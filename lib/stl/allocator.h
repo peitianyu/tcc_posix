@@ -196,4 +196,18 @@ STL_STATIC void stl_heap_destroy(STL_Heap *h)
         } \
     }
 
+/* 环形缓冲(deque/queue)公共宏: 逻辑下标 k→物理下标; 扩增时按逻辑序重排到连续新块.
+ * T/self 为调用点符号, self 需含 data/begin/len/cap/ar 字段. */
+#define STL_RING_IDX(self, k) (((self)->begin + (k)) % ((self)->cap ? (self)->cap : 1))
+#define STL_RING_GROW(self) \
+    if ((self)->len >= (self)->cap) { \
+        int nc = (self)->cap ? (self)->cap * 2 : 4; \
+        T *nd = (T *)stl_arena_alloc((self)->ar, (size_t)nc * sizeof(T), STL_ALIGN); \
+        if (nd) { \
+            for (int k = 0; k < (self)->len; k++) nd[k] = (self)->data[STL_RING_IDX((self), k)]; \
+            (self)->data = nd; (self)->cap = nc; \
+            (self)->begin = 0; \
+        } \
+    }
+
 #endif /* STL_ALLOCATOR_H */

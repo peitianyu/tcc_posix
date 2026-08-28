@@ -14,8 +14,6 @@
 
 #include "allocator.h"
 
-#define STL_QIDX(s, k) (((s)->begin + (k)) % ((s)->cap ? (s)->cap : 1))
-
 model struct STL_Queue(T) {
     T *data;            /* 元素数组(arena); 空队列为 0 */
     int begin;          /* 逻辑 0 号元素物理下标 */
@@ -36,18 +34,13 @@ model (T) T stl_queue_front(const STL_Queue(T) *self) {
 }
 model (T) T stl_queue_back(const STL_Queue(T) *self) {
     STL_ASSERT(self->len > 0);
-    return self->data[STL_QIDX(self, self->len - 1)];
+    return self->data[STL_RING_IDX(self, self->len - 1)];
 }
 
 model (T) void stl_queue_push_back(STL_Queue(T) *self, T x) {
-    if (self->len >= self->cap) {         /* 自包含扩容: 重排到连续新块 */
-        int nc = self->cap ? (self->cap * 2) : 4;
-        T *nd = (T *)stl_arena_alloc(self->ar, (size_t)nc * sizeof(T), STL_ALIGN);
-        if (!nd) return;
-        for (int i = 0; i < self->len; i++) nd[i] = self->data[STL_QIDX(self, i)];
-        self->data = nd; self->cap = nc; self->begin = 0;
-    }
-    self->data[STL_QIDX(self, self->len)] = x;
+    STL_RING_GROW(self);
+    if (self->len >= self->cap) return;      /* 分配失败 */
+    self->data[STL_RING_IDX(self, self->len)] = x;
     self->len++;
 }
 
@@ -61,7 +54,5 @@ model (T) T stl_queue_pop_front(STL_Queue(T) *self) {
 }
 
 model (T) void stl_queue_clear(STL_Queue(T) *self) { self->begin = 0; self->len = 0; }
-
-#undef STL_QIDX
 
 #endif /* STL_QUEUE_H */

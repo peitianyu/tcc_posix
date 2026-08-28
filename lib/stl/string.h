@@ -19,7 +19,6 @@
 #include <string.h>
 
 #define STL_STR_SSO 23                    /* SSO 内联字节上限 */
-#define STL_STR_OK   1                    /* 便捷: 非空即真 */
 
 typedef struct STL_string {
     union {

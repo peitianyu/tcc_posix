@@ -24,7 +24,7 @@ model struct STL_Vector(T) {
     STL_Arena *ar;      /* 从哪个 arena 分配(self-contained, 仅 musl malloc) */
 };
 
-/* --- 构造 / 查询(无分配, 可安全互调残留? 否 —— 全是独立函数, 不复用) --- */
+/* --- 构造 / 查询(无分配) --- */
 
 model (T) void stl_vector_init(STL_Vector(T) *self, STL_Arena *ar) {
     self->data = 0; self->len = 0; self->cap = 0; self->ar = ar;

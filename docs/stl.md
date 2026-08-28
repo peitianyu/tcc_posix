@@ -251,7 +251,6 @@ model struct String {
 ```
 lib/stl/
   allocator.h   # 空间配置器 (arena/pool/ctmem 后端 + tcc-own 接入)
-  trait.h       # 比较/判等契约 (operator 驱动说明 + comp 回调类型)
   iterator.h    # 抽象迭代器 (vptr/itab) + 连续容器裸指针约定
   pair.h        # model Pair
   vector.h      # model Vector
