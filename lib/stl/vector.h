@@ -76,6 +76,42 @@ model (T) void stl_vector_pop_back(STL_Vector(T) *self) {
     if (self->len > 0) self->len--;
 }
 
+/* 改大小: n<=len 截断; n>len 扩容(2 幂)并把新增槽零初始化(POD 值语义)。
+ * 均自包含内联(与 §13-12 一致, 不调其它泛型方法)。分配失败保持原位。 */
+model (T) void stl_vector_resize(STL_Vector(T) *self, int n) {
+    STL_ASSERT(self && n >= 0);
+    if (n <= self->len) { self->len = n; return; }
+    if (n > self->cap) {
+        int nc = self->cap ? self->cap : 1;
+        while (nc < n) nc <<= 1;
+        T *nd = (T *)stl_arena_alloc(self->ar, (size_t)nc * sizeof(T), STL_ALIGN);
+        if (!nd) return;
+        for (int k = 0; k < self->len; k++) nd[k] = self->data[k];
+        self->data = nd; self->cap = nc;
+    }
+    { char *vp = (char *)&self->data[self->len];      /* 新增槽零初始化 */
+      for (int k = 0; k < (int)sizeof(T) * (n - self->len); k++) vp[k] = 0;
+    }
+    self->len = n;
+}
+
+/* 在 idx 处插入 x(0 基, idx==len 即尾插); 右移腾位. 分配失败保持原位. */
+model (T) void stl_vector_insert(STL_Vector(T) *self, int idx, T x) {
+    STL_ASSERT(self && idx >= 0 && idx <= self->len);
+    STL_ARR_GROW(self);
+    if (self->len >= self->cap) return;               /* 分配失败: 保留原位 */
+    for (int k = self->len; k > idx; k--) self->data[k] = self->data[k - 1];
+    self->data[idx] = x;
+    self->len++;
+}
+
+/* 删除 idx 处元素; 左移压缩. */
+model (T) void stl_vector_erase(STL_Vector(T) *self, int idx) {
+    STL_ASSERT(self && idx >= 0 && idx < self->len);
+    for (int k = idx; k < self->len - 1; k++) self->data[k] = self->data[k + 1];
+    self->len--;
+}
+
 /* 深拷贝(元素逐项拷贝到独立 arena 数据区). 按值返回新容器, 不改 self.
  * M0 元素为 POD 值语义 → 逐元素位拷贝即"深"拷贝; 新 data 从 self->ar 分配. */
 model (T) STL_Vector(T) stl_vector_copy(const STL_Vector(T) *self) {

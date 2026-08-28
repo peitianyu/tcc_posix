@@ -121,6 +121,39 @@ model (T) void stl_list_clear(STL_List(T) *self) {
     self->head = self->tail = 0; self->len = 0;   /* 节点留 arena, 整池回收 */
 }
 
+/* 在节点 after 后插入 x(after 可为迭代出的任一节点; after==0 → 头插, 等价 push_front)。
+ * 自包含内联(§13-12), 不调其它泛型方法。分配失败保持原位。 */
+model (T) void stl_list_insert(STL_List(T) *self, void *after, T x) {
+    STL_NODE_DEF(T);
+    struct __stl_node_ *a = (struct __stl_node_ *)after;
+    struct __stl_node_ *nn = (struct __stl_node_ *)
+        stl_arena_alloc(self->ar, sizeof(struct __stl_node_), STL_ALIGN);
+    if (!nn) return;
+    nn->data = x;
+    if (!a) {                             /* 头插 */
+        nn->prev = 0; nn->next = (struct __stl_node_ *)self->head;
+        if (self->head) ((struct __stl_node_ *)self->head)->prev = nn;
+        else            self->tail = nn;
+        self->head = nn;
+    } else {                              /* 插到 a 之后 */
+        nn->prev = a; nn->next = a->next;
+        if (a->next) ((struct __stl_node_ *)a->next)->prev = nn;
+        else         self->tail = nn;
+        a->next = nn;
+    }
+    self->len++;
+}
+
+/* 删除给定节点 n(须属 self; 由迭代/遍历得到). 无则 no-op. */
+model (T) void stl_list_erase(STL_List(T) *self, void *n) {
+    STL_NODE_DEF(T);
+    struct __stl_node_ *d = (struct __stl_node_ *)n;
+    if (!d) return;
+    if (d->prev) d->prev->next = d->next; else self->head = d->next;
+    if (d->next) d->next->prev = d->prev; else self->tail = d->prev;
+    self->len--;
+}
+
 /* 深拷贝: 逐节点 data 重建新链表(节点自 self->ar 分配), 按值返回, 不改 self. */
 model (T) STL_List(T) stl_list_copy(const STL_List(T) *self) {
     STL_NODE_DEF(T);

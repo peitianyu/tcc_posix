@@ -44,6 +44,31 @@ int main(void) {
     l->stl_list_clear(int)();
     CHECK(l->stl_list_empty(int)());
 
+    /* insert / erase (§7.3) */
+    STL_List(int) li; li->stl_list_init(int)(ar);
+    for (int i = 0; i < 4; i++) li->stl_list_push_back(int)(i);        /* 0,1,2,3 */
+    void *n2 = 0, *k = 0;
+    for (k = li->stl_list_begin(int)(); k; k = li->stl_list_next(int)(k))
+        if (*li->stl_list_data(int)(k) == 2) { n2 = k; break; }
+    CHECK(n2 != 0);
+    li->stl_list_insert(int)(n2, 99);                                   /* 2 后插 99 */
+    CHECK(li->stl_list_size(int)() == 5);
+    {   int seq[5] = {0,1,2,99,3}, i = 0, ok = 1;
+        for (k = li->stl_list_begin(int)(); k && ok; k = li->stl_list_next(int)(k)) {
+            if (*li->stl_list_data(int)(k) != seq[i]) ok = 0;
+            i++;
+        }
+        CHECK(ok && i == 5);
+    }
+    li->stl_list_erase(int)(n2);                                        /* 删原 2 → 0,1,99,3 */
+    CHECK(li->stl_list_size(int)() == 4);
+    CHECK(li->stl_list_back(int)() == 3);
+    li->stl_list_erase(int)(li->stl_list_begin(int)());                 /* 删头 0 → 1,99,3 */
+    CHECK(li->stl_list_front(int)() == 1);
+    li->stl_list_insert(int)(0, -5);                                    /* after==0 → 头插 */
+    CHECK(li->stl_list_front(int)() == -5);
+    CHECK(li->stl_list_size(int)() == 4);
+
     /* 多实例隔离 */
     STL_List(double) ld; ld->stl_list_init(double)(ar);
     for (int i = 0; i < 3; i++) ld->stl_list_push_back(double)(i * 0.5);

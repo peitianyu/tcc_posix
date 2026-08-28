@@ -54,6 +54,30 @@ int main(void) {
     CHECK(v->stl_vector_capacity(int)() >= 20);
     CHECK(v->stl_vector_at(int)(19) == 19);
 
+    /* 6. insert / erase / resize (§7.2) */
+    STL_Vector(int) w; w->stl_vector_init(int)(ar);
+    for (int i = 0; i < 5; i++) w->stl_vector_push_back(int)(i * 10);   /* 0,10,20,30,40 */
+    w->stl_vector_insert(int)(2, 99);
+    CHECK(w->stl_vector_size(int)() == 6);
+    CHECK(w->stl_vector_at(int)(2) == 99);
+    CHECK(w->stl_vector_at(int)(3) == 20);
+    CHECK(w->stl_vector_at(int)(5) == 40);
+    w->stl_vector_insert(int)(6, 77);                                    /* idx==len 尾插 */
+    CHECK(w->stl_vector_size(int)() == 7);
+    CHECK(w->stl_vector_back(int)() == 77);
+    w->stl_vector_erase(int)(2);                                         /* 删 99 */
+    CHECK(w->stl_vector_size(int)() == 6);
+    CHECK(w->stl_vector_at(int)(2) == 20);
+    w->stl_vector_erase(int)(0);                                         /* 删 0 */
+    CHECK(w->stl_vector_front(int)() == 10);
+    w->stl_vector_resize(int)(9);                                        /* 扩容+新增槽零初始化 */
+    CHECK(w->stl_vector_size(int)() == 9);
+    CHECK(w->stl_vector_at(int)(8) == 0);
+    CHECK(w->stl_vector_capacity(int)() >= 9);
+    w->stl_vector_resize(int)(4);                                        /* 截断 */
+    CHECK(w->stl_vector_size(int)() == 4);
+    CHECK(w->stl_vector_at(int)(3) == 40);
+
     /* 5. 多实例 + 缓存一致性 */
     STL_Vector(double) vd; vd->stl_vector_init(double)(ar);
     for (int i = 0; i < 5; i++) vd->stl_vector_push_back(double)(i * 0.5);
