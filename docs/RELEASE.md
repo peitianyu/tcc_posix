@@ -161,8 +161,8 @@
 
 ## 2026-08-25 — STL M4 补全 + operator 小 struct 返回修复
 
-- **String 自由函数** (lib/stl/string_extra.h, §7.4 C7): `STL_string_split` (含空段/
-  长段 SSO 溢出/max 截断)、`STL_string_trim` (首尾空白)、`STL_string_join` (一次
+- **String 自由函数** (lib/stl/string_extra.h, §7.4 C7): `stl_string_split` (含空段/
+  长段 SSO 溢出/max 截断)、`stl_string_trim` (首尾空白)、`stl_string_join` (一次
   reserve) — t078。
 - **算法补全** (§8 M1): `stl_remove` / `stl_unique` / `stl_accumulate` (含 struct
   operator+ 累加) — t079。

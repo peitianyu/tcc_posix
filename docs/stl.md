@@ -391,7 +391,7 @@ model 泛型方法糖 + 大 struct sret 返回）。
    缺陷(`e->key==key` 被错改为 `e->operator_eq_Mid(key,key)`), 影响 struct 键哈希容器;
    int/内置键不受影响, 待"operator 关键字级改写"P1 统一修复。
 
-→ 增补（2026-08-25, M4）：String 自由函数 `STL_string_split/trim/join`
+→ 增补（2026-08-25, M4）：String 自由函数 `stl_string_split/trim/join`
    (lib/stl/string_extra.h, §7.4 C7) + 算法 `stl_remove/stl_unique/stl_accumulate`
    (§8 M1 补全), t078/t079, 套件 79/79。**编译器修复**: operator 小 struct (≤8B)
    寄存器返回路径三处 vstack 错乱 — operator_call/unary 调用/method sugar 的 packed
