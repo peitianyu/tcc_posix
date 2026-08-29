@@ -9,6 +9,46 @@
 
 ---
 
+## 核心特性
+
+| 主题 | 一句话 | 详见 |
+|---|---|---|
+| 语言扩展 | defer / model 泛型 / operator / `__builtin_reflect` | features §4, reflect.md |
+| 泛型方法糖 | `obj.method(args)` → 静态分派 (struct 方法/迭代器) | method-call.md |
+| STL | vector/list/string/map/set/deque/unordered/heap + 算法/迭代器 + Option/Result | stl.md |
+| SIMD | `__m128` 家族 + `_mm_*` SSE 标准 intrinsic 交集(x86_64-simd 模块) | features §4.3, simd-standard.md |
+| 调试 `-b -bt` | 越界/堆错误报 `文件:行`,`-run -b` 透明回退临时 exe | features §1, system-modules R13 |
+| 内存治理 | `tcc_release`/mmap 登记/arena epoch/逃逸/memtrack 泄漏明细 + 输出 sink | memory-governance.md |
+| 系统模块 | socket/process/statfs/pwdgrp/select/termios/dlfcn/timer/mq/ipc/aio | system-modules.md |
+| CPU 周期插桩 | `rdtsc` 插桩,总周期/次数/avg 归因到函数 | cpu-prof.md |
+| 脱糖输出 | `--emit-c` 标准 C → clang/LLVM 正式产物(≈37×) | desugar.md, desugar-perf.md |
+| `@listfile` | `tcc @build.txt` 包管理 + glob + `%if` 编译选择 | listfile.md |
+| 矩阵库 | Eigen 式固定尺寸矩阵 `STL_Mat(T,R,C)` + SIMD 包层 + LU/Cholesky | matrix.md |
+
+### 语言扩展速览 (详见 features.md §4)
+
+```c
+/* defer — Go 式作用域清理 */
+{ struct File f = open_file("x"); defer f.close(); }
+
+/* model — 编译期类型工厂 */
+model struct Array(T) { T *data; int len; };
+model (T) T max2(T a, T b) { return a > b ? a : b; }
+Array(float) a = { buf, 3 };   if (max2(int)(3, 7) != 7) ...
+
+/* operator — 编译期静态分派的算术重载 (零运行时开销) */
+struct Vec3 operator+ (struct Vec3 a, struct Vec3 b) { ... }
+struct Vec3 c = a + b;   struct Vec3 e = a + b*b;
+
+/* SIMD 标准 intrinsic (__m128 家族, 与 clang/gcc 交集一致) */
+__m128 c = _mm_add_ps(a, b);         /* addps */
+
+/* 结构体反射 */
+const struct __refl *r = __builtin_reflect(struct Vec3);
+```
+
+---
+
 ## 快速开始
 
 ```bash
@@ -64,46 +104,6 @@ t032c)/operator/reflect v2 (bitfield/FAM/递归链)/STL 容器与抽象迭代器
   为空, 系统调用经 psxscl→ntdll 直通 (映射见 [docs/features.md](docs/features.md) §3)。
 - **开发-验证 + 正式产物**: TCC 做验证前端,clang/LLVM 出高性能产物——脱糖输出
   标准 C,吃满 AVX/FMA(性能实测 ≈37×,见 [docs/desugar-perf.md](docs/desugar-perf.md))。
-
----
-
-## 特性模块索引
-
-| 主题 | 一句话 | 详见 |
-|---|---|---|
-| 调试 `-b -bt` | 越界/堆错误报 `文件:行`,`-run -b` 透明回退临时 exe | features §1, system-modules R13 |
-| TLS | `__thread` via emutls(懒分配 + 物化) | features §2 |
-| 内存治理 | `tcc_release`/mmap 登记/arena epoch/逃逸/memtrack 泄漏明细 + 输出 sink | memory-governance.md |
-| 系统模块 | socket/process/statfs/pwdgrp/select/termios/dlfcn/timer/mq/ipc/aio | system-modules.md |
-| CPU 周期插桩 | `rdtsc` 插桩,总周期/次数/avg 归因到函数 | cpu-prof.md |
-| 语言扩展 | defer / model 泛型 / operator / `__builtin_reflect` | features §4, reflect.md |
-| 泛型方法糖 | `obj.method(args)` → 静态分派 (struct 方法/迭代器) | method-call.md |
-| STL | vector/list/string/map/set/deque/unordered/heap + 算法/迭代器 + Option/Result | stl.md |
-| SIMD | `__m128` 家族 + `_mm_*` SSE 标准 intrinsic 交集(x86_64-simd 模块) | features §4.3, simd-standard.md |
-| 脱糖输出 | `--emit-c` 标准 C → clang/LLVM 正式产物(≈37×) | desugar.md, desugar-perf.md |
-| `@listfile` | `tcc @build.txt` 包管理 + glob + `%if` 编译选择 | listfile.md |
-
-### 语言扩展速览 (详见 features.md §4)
-
-```c
-/* defer — Go 式作用域清理 */
-{ struct File f = open_file("x"); defer f.close(); }
-
-/* model — 编译期类型工厂 */
-model struct Array(T) { T *data; int len; };
-model (T) T max2(T a, T b) { return a > b ? a : b; }
-Array(float) a = { buf, 3 };   if (max2(int)(3, 7) != 7) ...
-
-/* operator — 编译期静态分派的算术重载 (零运行时开销) */
-struct Vec3 operator+ (struct Vec3 a, struct Vec3 b) { ... }
-struct Vec3 c = a + b;   struct Vec3 e = a + b*b;
-
-/* SIMD 标准 intrinsic (__m128 家族, 与 clang/gcc 交集一致) */
-__m128 c = _mm_add_ps(a, b);         /* addps */
-
-/* 结构体反射 */
-const struct __refl *r = __builtin_reflect(struct Vec3);
-```
 
 ---
 
